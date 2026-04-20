@@ -1,0 +1,46 @@
+{
+  "name": "episteme-core",
+  "version": "0.0.1",
+  "description": "",
+  "main": "index.js",
+  "bin": "dist/stdio.mjs",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "mastra dev",
+    "build": "mastra build",
+    "start": "mastra start"
+  },
+  "keywords": [],
+  "author": "Favour Orukpe",
+  "license": "ISC",
+  "packageManager": "pnpm@10.18.1",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^3.0.41",
+    "@ai-sdk/react": "^3.0.118",
+    "@libsql/client": "^0.17.2",
+    "@mastra/ai-sdk": "^1.1.3",
+    "@mastra/core": "^1.10.0",
+    "@mastra/evals": "^1.1.2",
+    "@mastra/libsql": "^1.6.4",
+    "@mastra/loggers": "^1.0.2",
+    "@mastra/memory": "^1.6.1",
+    "@mastra/observability": "^1.3.1",
+    "@mastra/rag": "^2.1.2",
+    "@pinecone-database/pinecone": "^7.1.0",
+    "ai": "^6.0.116",
+    "hono": "^4.12.11",
+    "unstructured-client": "^0.31.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "mastra": "^1.3.7",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,258 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-lora);
+  --font-mono: var(--font-geist-mono);
+  --font-serif: var(--font-lora);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-success-bg: var(--success-bg);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-warning-bg: var(--warning-bg);
+  --color-error: var(--error);
+  --color-error-foreground: var(--error-foreground);
+  --color-error-bg: var(--error-bg);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-info-bg: var(--info-bg);
+  --color-accent-secondary: var(--accent-secondary);
+  --color-accent-secondary-bg: var(--accent-secondary-bg);
+  --color-accent-tertiary: var(--accent-tertiary);
+  --color-accent-tertiary-bg: var(--accent-tertiary-bg);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --animate-shimmer: shimmer-sweep var(--shimmer-duration, 1000ms) linear infinite both;
+}
+
+@keyframes shimmer-sweep {
+  from {
+    background-position: 150% 0;
+  }
+
+  to {
+    background-position: -100% 0;
+  }
+}
+
+:root {
+  --radius: 4px;
+  /* Exact Stitch Radius */
+  --background: #F8F7F3;
+  /* Stitch Background — warm off-white page */
+  --foreground: #1A1816;
+  /* Darker warm near-black — crisper body text */
+  --card: #FFFFFF;
+  /* Pure white — lifts cards off the warm bg */
+  --card-foreground: #1A1816;
+  --popover: #FFFFFF;
+  --popover-foreground: #1A1816;
+  --primary: #D97757;
+  /* Stitch Primary (Terracotta) */
+  --primary-foreground: #FFFFFF;
+  --secondary: #EFECE6;
+  /* Stitch Surface */
+  --secondary-foreground: #1A1816;
+  --muted: #EFECE6;
+  --muted-foreground: #5C5855;
+  /* Darker muted — was #7D7772, now WCAG AA safe */
+  --accent: #E5E0D8;
+  /* Stitch Accent */
+  --accent-foreground: #1A1816;
+  --destructive: oklch(0.55 0.2 25);
+  --border: #D8D3CB;
+  /* Slightly more visible — was #E5E0D8 */
+  --input: #E5E0D8;
+  --ring: #D97757;
+
+  --sidebar: #EFECE6;
+  /* Stitch Surface for Sidebar */
+  --sidebar-foreground: #1A1816;
+  --sidebar-primary: #D97757;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #E5E0D8;
+  --sidebar-accent-foreground: #1A1816;
+  --sidebar-border: #D8D3CB;
+  --sidebar-ring: #D97757;
+
+  /* Semantic Status Tokens — Light Mode (minimalistic) */
+  --success: #10B981;
+  --success-foreground: #000000;
+  --success-bg: #ECFDF5;
+  --warning: #F59E0B;
+  --warning-foreground: #000000;
+  --warning-bg: #FFFBEB;
+  --error: #EF4444;
+  --error-foreground: #000000;
+  --error-bg: #FEE2E2;
+  --info: #3B82F6;
+  --info-foreground: #000000;
+  --info-bg: #EFF6FF;
+  --accent-secondary: #8B5CF6;
+  --accent-secondary-bg: #F5F3FF;
+  --accent-tertiary: #0EA5E9;
+  --accent-tertiary-bg: #F0F9FF;
+}
+
+.dark {
+  --background: #111111;
+  --foreground: #F8F7F3;
+  --card: #18181b;
+  --card-foreground: #F8F7F3;
+  --popover: #18181b;
+  --popover-foreground: #F8F7F3;
+  --primary: #D97757;
+  --primary-foreground: #111111;
+  --secondary: #1a1a1a;
+  --secondary-foreground: #F8F7F3;
+  --muted: #1a1a1a;
+  --muted-foreground: #a1a1aa;
+  --accent: #27272a;
+  --accent-foreground: #F8F7F3;
+  --destructive: oklch(0.4 0.15 25);
+  --border: #27272a;
+  --input: #27272a;
+  --ring: #D97757;
+
+  --sidebar: #1a1a1a;
+  --sidebar-foreground: #F8F7F3;
+  --sidebar-primary: #D97757;
+  --sidebar-primary-foreground: #111111;
+  --sidebar-accent: #27272a;
+  --sidebar-accent-foreground: #F8F7F3;
+  --sidebar-border: #27272a;
+  --sidebar-ring: #D97757;
+
+  /* Semantic Status Tokens — Dark Mode (minimalistic) */
+  --success: #10B981;
+  --success-foreground: #FFFFFF;
+  --success-bg: #064E3B;
+  --warning: #F59E0B;
+  --warning-foreground: #FFFFFF;
+  --warning-bg: #451A03;
+  --error: #EF4444;
+  --error-foreground: #FFFFFF;
+  --error-bg: #7F1D1D;
+  --info: #3B82F6;
+  --info-foreground: #FFFFFF;
+  --info-bg: #1E3A8A;
+  --accent-secondary: #8B5CF6;
+  --accent-secondary-bg: #3730A3;
+  --accent-tertiary: #0EA5E9;
+  --accent-tertiary-bg: #0C4A6E;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  :root {
+    color-scheme: light;
+  }
+
+  :root.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-lora), serif;
+  }
+}
+
+/* ── Sonner Toast — Brand Overrides ─────────────────────────────────────────
+   Font, radius, and shadow always applied.
+   Color vars scoped to light / dark to match the Stitch design system.
+   ──────────────────────────────────────────────────────────────────────── */
+
+[data-sonner-toaster] {
+  font-family: var(--font-lora), serif;
+}
+
+/* Light mode */
+:root [data-sonner-toaster],
+[data-sonner-toaster][data-theme="light"] {
+  --normal-bg:      #FFFFFF;
+  --normal-border:  #D8D3CB;
+  --normal-text:    #1A1816;
+  --success-bg:     #F4FBF6;
+  --success-border: #C6E9D0;
+  --success-text:   #1A5C34;
+  --error-bg:       #FFF5F2;
+  --error-border:   #F5C9BC;
+  --error-text:     #8B2A16;
+  --warning-bg:     #FFFBEB;
+  --warning-border: #FDE68A;
+  --warning-text:   #78400A;
+  --info-bg:        #F2F6FF;
+  --info-border:    #BFCFE8;
+  --info-text:      #1E3A6E;
+}
+
+/* Dark mode */
+.dark [data-sonner-toaster],
+[data-sonner-toaster][data-theme="dark"] {
+  --normal-bg:      #18181b;
+  --normal-border:  #27272a;
+  --normal-text:    #F8F7F3;
+  --success-bg:     #0D2318;
+  --success-border: #1A5C34;
+  --success-text:   #86EFAC;
+  --error-bg:       #2A100A;
+  --error-border:   #7A2516;
+  --error-text:     #FCA5A5;
+  --warning-bg:     #261800;
+  --warning-border: #78400A;
+  --warning-text:   #FCD34D;
+  --info-bg:        #0D1829;
+  --info-border:    #1E3A6E;
+  --info-text:      #93C5FD;
+}
+
+/* Per-toast structural overrides */
+[data-sonner-toast] {
+  border-radius: var(--radius) !important;
+  font-size: 13px !important;
+  box-shadow: 0 2px 16px rgba(26, 24, 22, 0.08), 0 1px 3px rgba(26, 24, 22, 0.06) !important;
+}
+
+.dark [data-sonner-toast] {
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3) !important;
+}

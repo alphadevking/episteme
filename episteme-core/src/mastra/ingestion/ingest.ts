@@ -1,0 +1,244 @@
+import { Pinecone } from '@pinecone-database/pinecone';
+import { processDocument, processMarkdown, processPlainText, elementsToText } from './document-processor';
+import { buildHierarchicalChunks, type ParentChunk, type ChildChunk, type ContentType } from './chunker';
+import { embedTexts, buildSparseVector } from './embedder';
+import { INGEST_CONFIG } from '../config';
+
+declare const process: { env: Record<string, string | undefined> };
+
+/**
+ * Sentinel value for institution-agnostic (globally shared) documents.
+ * Every vector is tagged with either a real institution UUID or this sentinel,
+ * so retrieval can always filter with { $in: [institutionId, GLOBAL_INSTITUTION] }
+ * without silent cross-tenant leaks.
+ */
+export const GLOBAL_INSTITUTION = '__global__';
+
+function getEnv(key: string): string {
+  const val = process.env[key];
+  if (!val) throw new Error(`Missing required environment variable: ${key}`);
+  return val;
+}
+
+const pinecone = new Pinecone({ apiKey: getEnv('PINECONE_API_KEY') });
+// Module-level singleton — avoids reconstructing the client on every call
+const pineconeIndex = pinecone.index({ name: getEnv('PINECONE_INDEX') });
+
+export interface IngestOptions {
+  /** Raw file bytes — for PDF, DOCX, HTML, scanned images */
+  fileBuffer?: Uint8Array;
+  /** Pre-converted Markdown string */
+  markdownContent?: string;
+  /** Plain text string — for announcements, emails, general info */
+  plainTextContent?: string;
+  /** Original file name e.g. "admissions-policy.pdf" */
+  fileName: string;
+  docId: string;
+  /** Domain category: 'admissions' | 'academic-policy' | 'financial-aid' | 'programmes' | 'staff-internal' | 'general' */
+  category: string;
+  /** Pinecone namespace to upsert into */
+  namespace: string;
+  /** Faculty scope: 'computing' | future faculties */
+  faculty: string;
+  /** Source URL or descriptive reference */
+  source: string;
+  /** Roles that may access this document */
+  roles: string[];
+  /** ISO date string of last document update */
+  updatedAt: string;
+  /**
+   * Institution UUID for multi-tenant isolation.
+   * Omit only for truly global documents shared across all institutions —
+   * they will be tagged with GLOBAL_INSTITUTION and visible to every tenant.
+   */
+  institutionId?: string;
+  /**
+   * Optional programme scope e.g. "Computer Science", "Software Engineering".
+   * Leave unset for faculty-wide or general documents — they are returned for all programmes.
+   */
+  programme?: string;
+  /**
+   * Optional academic level scope e.g. "300L", "MSc", "PhD".
+   * Leave unset for documents that apply to all levels — they are returned regardless of student level.
+   */
+  level?: string;
+  /** Drives chunking strategy — defaults to 'general' */
+  contentType?: ContentType;
+}
+
+export interface IngestAuditResult {
+  docId: string;
+  fileName: string;
+  namespace: string;
+  category: string;
+  contentType: ContentType;
+  faculty: string;
+  source: string;
+  roles: string[];
+  updatedAt: string;
+  /** The resolved institution UUID, or GLOBAL_INSTITUTION for shared docs. */
+  institutionId: string;
+  vectorsUpserted: number;
+  parentChunks: number;
+  childChunks: number;
+  ingestedAt: string; // ISO timestamp
+}
+
+/**
+ * Retry a Pinecone operation with exponential backoff.
+ * Handles transient network errors and rate limits without failing the ingestion.
+ */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxAttempts = INGEST_CONFIG.retryAttempts,
+  baseDelayMs = INGEST_CONFIG.retryBaseDelayMs,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, baseDelayMs * 2 ** (attempt - 1))
+        );
+      }
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Full ingestion pipeline:
+ * input → extract text → hierarchical chunk (MDocument) → embed → sparse → upsert to Pinecone
+ *
+ * Idempotent: deletes existing vectors for the docId before upserting.
+ * Retries Pinecone upsert batches on transient failures with exponential backoff.
+ * Returns a structured audit result — caller is responsible for persisting it.
+ *
+ * Supports any document form: PDF, DOCX, Markdown, plain text,
+ * announcements, FAQs, course catalogues, handbooks.
+ */
+export async function ingestDocument(options: IngestOptions): Promise<IngestAuditResult> {
+  const {
+    fileBuffer, markdownContent, plainTextContent,
+    fileName, docId, category, namespace,
+    faculty, source, roles, updatedAt, programme, level,
+    contentType = 'general',
+  } = options;
+
+  // Resolve institution — always a concrete value so filters never silently miss.
+  const institutionId = options.institutionId ?? GLOBAL_INSTITUTION;
+
+  // 1. Extract full text from input
+  let fullText: string;
+  let pageNumber: number | null = null;
+
+  if (markdownContent) {
+    fullText = elementsToText(processMarkdown(markdownContent, category));
+  } else if (plainTextContent) {
+    fullText = elementsToText(processPlainText(plainTextContent, category));
+  } else if (fileBuffer) {
+    const elements = await processDocument(fileBuffer, fileName, category);
+    pageNumber = elements[0]?.pageNumber ?? null;
+    fullText = elementsToText(elements);
+  } else {
+    throw new Error('One of fileBuffer, markdownContent, or plainTextContent must be provided');
+  }
+
+  if (!fullText.trim()) {
+    throw new Error(`No content extracted from ${fileName}`);
+  }
+
+  // 2. Idempotency — remove existing vectors for this docId before re-ingesting
+  await deleteDocument(docId, namespace);
+
+  // 3. Build hierarchical parent/child chunks via MDocument
+  const parents = await buildHierarchicalChunks(fullText, docId, category, contentType, pageNumber);
+  const allChildren = parents.flatMap((p: ParentChunk) => p.children);
+
+  if (allChildren.length === 0) {
+    throw new Error(`No chunks produced from ${fileName}`);
+  }
+
+  // 4. Embed child chunks (dense vectors via Mastra model router, retries built-in)
+  const texts = allChildren.map((c: ChildChunk) => c.text);
+  const denseVectors = await embedTexts(texts);
+
+  // 5. Build parent lookup map — O(1)
+  const parentMap = new Map<string, ParentChunk>(
+    parents.map((p: ParentChunk) => [p.parentId, p])
+  );
+
+  // 6. Build Pinecone records with dense + sparse vectors
+  const records = allChildren.map((child: ChildChunk, i: number) => {
+    const parent = parentMap.get(child.parentId)!;
+    return {
+      id: child.chunkId,
+      values: denseVectors[i],
+      sparseValues: buildSparseVector(child.text),
+      metadata: {
+        chunkId: child.chunkId,
+        parentId: child.parentId,
+        parentText: parent.text,
+        text: child.text,
+        chunkIndex: child.chunkIndex,
+        docId,
+        category,
+        contentType,
+        faculty,
+        source,
+        roles,
+        updatedAt,
+        // Always present — either a real institution UUID or GLOBAL_INSTITUTION.
+        // Retrieval filters with { $in: [userInstitutionId, GLOBAL_INSTITUTION] }
+        // so global docs are visible to all tenants without leaking tenant-specific ones.
+        institutionId,
+        pageNumber: child.pageNumber ?? -1,
+        // Only set for programme-specific documents.
+        // Omitted for faculty-wide docs so they match all programme filter queries.
+        ...(programme ? { programme } : {}),
+        // Only set for level-specific documents (e.g. "Final Year Project handbook").
+        // Omitted for docs that apply to all levels — they match all level filter queries.
+        ...(level ? { level } : {}),
+      },
+    };
+  });
+
+  // 7. Upsert to Pinecone in batches with retry per batch
+  const index = pineconeIndex.namespace(namespace);
+  const BATCH_SIZE = INGEST_CONFIG.upsertBatchSize;
+
+  for (let i = 0; i < records.length; i += BATCH_SIZE) {
+    const batch = records.slice(i, i + BATCH_SIZE);
+    await withRetry(() => index.upsert({ records: batch }));
+  }
+
+  return {
+    docId,
+    fileName,
+    namespace,
+    category,
+    contentType,
+    faculty,
+    source,
+    roles,
+    updatedAt,
+    institutionId,
+    vectorsUpserted: records.length,
+    parentChunks: parents.length,
+    childChunks: allChildren.length,
+    ingestedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Delete all vectors for a given docId from a namespace.
+ * Called automatically before re-ingestion (idempotency).
+ * Also called directly by the admin dashboard on document removal.
+ */
+export async function deleteDocument(docId: string, namespace: string): Promise<void> {
+  const index = pineconeIndex.namespace(namespace);
+  await withRetry(() => index.deleteMany({ filter: { docId: { $eq: docId } } }));
+}
