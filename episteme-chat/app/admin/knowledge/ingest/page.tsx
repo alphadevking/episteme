@@ -86,6 +86,14 @@ const STEP_LABEL: Record<PipelineStep, string> = {
   saving:     "Saving document record",
 };
 
+const STEP_DESCRIPTION: Record<PipelineStep, string> = {
+  extracting: "Parsing document structure",
+  chunking:   "Splitting into parent / child chunks",
+  embedding:  "Generating dense + sparse vectors",
+  upserting:  "Writing vectors to Pinecone",
+  saving:     "Persisting record to registry",
+};
+
 const INITIAL_STATUSES: Record<PipelineStep, StepStatus> =
   Object.fromEntries(PIPELINE_STEPS.map((s) => [s, "pending"])) as Record<PipelineStep, StepStatus>;
 
@@ -242,6 +250,23 @@ export default function IngestPage() {
   const [submitting,   setSubmitting]   = useState(false);
   const [succeeded,    setSucceeded]    = useState(false);
   const [error,        setError]        = useState<string | null>(null);
+
+  // uploading = before SSE starts (file upload + connection); streaming = SSE flowing
+  const [phase,         setPhase]         = useState<"uploading" | "streaming">("uploading");
+  const [elapsed,       setElapsed]       = useState(0);
+  const [stepDurations, setStepDurations] = useState<Partial<Record<PipelineStep, number>>>({});
+  const elapsedIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeStepRef      = useRef<PipelineStep | null>(null);
+  const stepStartRef       = useRef<number>(0);
+
+  function startElapsedTimer() {
+    stopElapsedTimer();
+    setElapsed(0);
+    elapsedIntervalRef.current = setInterval(() => setElapsed((e) => e + 1), 1000);
+  }
+  function stopElapsedTimer() {
+    if (elapsedIntervalRef.current) { clearInterval(elapsedIntervalRef.current); elapsedIntervalRef.current = null; }
+  }
   const [mode,         setMode]         = useState<InputMode>("file");
   const [dragging,     setDragging]     = useState(false);
   const [droppedFile,  setDroppedFile]  = useState<File | null>(null);
@@ -422,8 +447,13 @@ export default function IngestPage() {
     e.preventDefault();
     setError(null);
     setSubmitting(true);
+    setPhase("uploading");
     setStepStatuses(INITIAL_STATUSES);
     setStepDetails({});
+    setStepDurations({});
+    setElapsed(0);
+    activeStepRef.current = null;
+    stepStartRef.current  = 0;
 
     try {
       const resolvedInstitution = isSuperadmin
@@ -501,6 +531,13 @@ export default function IngestPage() {
         return;
       }
 
+      // SSE confirmed — transition from uploading to the live stepper
+      setPhase("streaming");
+      setStepStatuses((prev) => ({ ...prev, extracting: "active" }));
+      activeStepRef.current = "extracting";
+      stepStartRef.current  = Date.now();
+      startElapsedTimer();
+
       const reader  = res.body!.getReader();
       const decoder = new TextDecoder();
       let   buffer  = "";
@@ -509,6 +546,20 @@ export default function IngestPage() {
         const step = data.step as PipelineStep;
         const idx  = PIPELINE_STEPS.indexOf(step);
         if (idx === -1) return;
+
+        const now = Date.now();
+
+        // Record duration for the step that just finished
+        if (activeStepRef.current && activeStepRef.current !== step && stepStartRef.current > 0) {
+          const prev = activeStepRef.current;
+          const secs = (now - stepStartRef.current) / 1000;
+          setStepDurations((d) => ({ ...d, [prev]: secs }));
+        }
+
+        activeStepRef.current = step;
+        stepStartRef.current  = now;
+        startElapsedTimer();
+
         setStepStatuses((prev) => {
           const next = { ...prev };
           PIPELINE_STEPS.forEach((s, i) => {
@@ -539,10 +590,18 @@ export default function IngestPage() {
           if (eventType === "progress") {
             applyProgress(payload);
           } else if (eventType === "done") {
+            stopElapsedTimer();
+            // Record duration for the last active step
+            if (activeStepRef.current && stepStartRef.current > 0) {
+              const last = activeStepRef.current;
+              const secs = (Date.now() - stepStartRef.current) / 1000;
+              setStepDurations((d) => ({ ...d, [last]: secs }));
+            }
             setStepStatuses(Object.fromEntries(PIPELINE_STEPS.map((s) => [s, "done"])) as Record<PipelineStep, StepStatus>);
             setSucceeded(true);
-            setTimeout(() => router.push("/admin/knowledge"), 1800);
+            setTimeout(() => router.push("/admin/knowledge"), 2000);
           } else if (eventType === "error") {
+            stopElapsedTimer();
             setError((payload.error as string) ?? "Ingestion failed.");
             setStepStatuses((prev) => {
               const active = PIPELINE_STEPS.find((s) => prev[s] === "active");
@@ -555,6 +614,7 @@ export default function IngestPage() {
         }
       }
     } catch (err) {
+      stopElapsedTimer();
       setError(String(err));
       setSubmitting(false);
     }
@@ -610,39 +670,106 @@ export default function IngestPage() {
 
       ) : submitting ? (
         /* ── Pipeline progress ── */
-        <div className="rounded-xl border bg-card">
+        <div className="rounded-xl border bg-card overflow-hidden">
+
+          {/* Progress bar — steps completed / total */}
+          {phase === "streaming" && (() => {
+            const done = PIPELINE_STEPS.filter((s) => stepStatuses[s] === "done").length;
+            const pct  = Math.round((done / PIPELINE_STEPS.length) * 100);
+            return (
+              <div className="h-0.5 bg-border w-full">
+                <div
+                  className="h-full bg-primary transition-all duration-700 ease-out"
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+            );
+          })()}
+
           <div className="px-8 py-10 space-y-8">
-            <div className="text-center space-y-1">
-              <p className="text-sm font-semibold">Ingesting document</p>
-              <p className="text-xs text-muted-foreground">This may take a minute for large files.</p>
-            </div>
-            <div className="max-w-sm mx-auto space-y-6">
-              {PIPELINE_STEPS.map((step, i) => {
-                const status = stepStatuses[step];
-                const isLast = i === PIPELINE_STEPS.length - 1;
-                return (
-                  <div key={step} className="relative flex items-start gap-4">
-                    {/* Connector line */}
-                    {!isLast && (
-                      <div className={`absolute left-[9px] top-5 w-px h-6 transition-colors ${
-                        status === "done" ? "bg-primary/40" : "bg-border"
-                      }`} />
-                    )}
-                    <StepIcon status={status} />
-                    <div className="flex-1 min-w-0 pt-0.5">
-                      <p className={`text-sm font-medium leading-none ${
-                        status === "pending" ? "text-muted-foreground" : "text-foreground"
-                      }`}>
-                        {STEP_LABEL[step]}
-                      </p>
-                      {stepDetails[step] && (
-                        <p className="text-xs text-muted-foreground mt-1.5">{stepDetails[step]}</p>
-                      )}
+
+            {/* ── Uploading phase ── */}
+            {phase === "uploading" ? (
+              <div className="flex flex-col items-center gap-5 py-4">
+                <div className="relative flex size-14 items-center justify-center">
+                  <span className="absolute inset-0 rounded-full bg-primary/10 animate-ping opacity-60" />
+                  <span className="relative flex size-10 items-center justify-center rounded-full bg-primary/10">
+                    <UploadCloudIcon className="size-5 text-primary" />
+                  </span>
+                </div>
+                <div className="text-center space-y-1">
+                  <p className="text-sm font-semibold">Uploading and connecting&hellip;</p>
+                  <p className="text-xs text-muted-foreground">Sending document to the ingestion pipeline.</p>
+                </div>
+                {/* Skeleton stepper — shows what's coming */}
+                <div className="mt-2 max-w-xs w-full space-y-4 opacity-30">
+                  {PIPELINE_STEPS.map((step) => (
+                    <div key={step} className="flex items-center gap-3">
+                      <span className="size-2.5 rounded-full bg-border shrink-0" />
+                      <span className="text-xs text-muted-foreground">{STEP_LABEL[step]}</span>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              /* ── Streaming phase ── */
+              <>
+                <div className="text-center space-y-1">
+                  <p className="text-sm font-semibold">Ingesting document</p>
+                  <p className="text-xs text-muted-foreground">This may take a minute for large files.</p>
+                </div>
+
+                <div className="max-w-sm mx-auto space-y-0">
+                  {PIPELINE_STEPS.map((step, i) => {
+                    const status  = stepStatuses[step];
+                    const isLast  = i === PIPELINE_STEPS.length - 1;
+                    const dur     = stepDurations[step];
+                    const isActive = status === "active";
+                    return (
+                      <div key={step} className="relative flex items-start gap-4">
+                        {/* Connector line */}
+                        {!isLast && (
+                          <div className={`absolute left-[9px] top-5 w-px h-10 transition-colors duration-500 ${
+                            status === "done" ? "bg-primary/50" : "bg-border"
+                          }`} />
+                        )}
+                        <div className="shrink-0 mt-0.5">
+                          <StepIcon status={status} />
+                        </div>
+                        <div className="flex-1 min-w-0 pb-6">
+                          <div className="flex items-baseline gap-2">
+                            <p className={`text-sm font-medium leading-none transition-colors ${
+                              status === "pending" ? "text-muted-foreground/60" : "text-foreground"
+                            }`}>
+                              {STEP_LABEL[step]}
+                            </p>
+                            {/* Active: live elapsed counter */}
+                            {isActive && (
+                              <span className="text-[11px] tabular-nums text-primary font-mono">
+                                {elapsed}s
+                              </span>
+                            )}
+                            {/* Done: duration badge */}
+                            {status === "done" && dur !== undefined && (
+                              <span className="text-[11px] tabular-nums text-muted-foreground font-mono">
+                                {dur < 1 ? `${Math.round(dur * 1000)}ms` : `${dur.toFixed(1)}s`}
+                              </span>
+                            )}
+                          </div>
+                          {/* Step description (always shown when not pending) */}
+                          {status !== "pending" && (
+                            <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                              {stepDetails[step] ?? STEP_DESCRIPTION[step]}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
             {error && (
               <div className="max-w-sm mx-auto flex items-start gap-2.5 rounded-lg border border-destructive/30 bg-destructive/5 px-3.5 py-3">
                 <XIcon className="size-3.5 text-destructive shrink-0 mt-0.5" />
@@ -650,7 +777,7 @@ export default function IngestPage() {
                   <p className="text-xs text-destructive leading-snug">{error}</p>
                   <button
                     type="button"
-                    onClick={() => { setSubmitting(false); setError(null); setStepStatuses(INITIAL_STATUSES); setStepDetails({}); }}
+                    onClick={() => { stopElapsedTimer(); setSubmitting(false); setError(null); setStepStatuses(INITIAL_STATUSES); setStepDetails({}); setStepDurations({}); }}
                     className="text-xs text-destructive underline underline-offset-2"
                   >
                     Try again
