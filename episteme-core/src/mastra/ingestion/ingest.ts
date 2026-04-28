@@ -24,6 +24,16 @@ const pinecone = new Pinecone({ apiKey: getEnv('PINECONE_API_KEY') });
 // Module-level singleton — avoids reconstructing the client on every call
 const pineconeIndex = pinecone.index({ name: getEnv('PINECONE_INDEX') });
 
+/**
+ * Progress events emitted during ingestion — forwarded as SSE to the admin dashboard.
+ * Each event fires immediately before the corresponding step begins so the UI
+ * updates in real-time rather than after the step completes.
+ */
+export type IngestProgressEvent =
+  | { step: 'chunking' }
+  | { step: 'embedding'; parents: number; children: number }
+  | { step: 'upserting'; chunks: number };
+
 export interface IngestOptions {
   /** Raw file bytes — for PDF, DOCX, HTML, scanned images */
   fileBuffer?: Uint8Array;
@@ -31,6 +41,8 @@ export interface IngestOptions {
   markdownContent?: string;
   /** Plain text string — for announcements, emails, general info */
   plainTextContent?: string;
+  /** Optional progress callback — used by the SSE streaming handler */
+  onProgress?: (event: IngestProgressEvent) => void;
   /** Original file name e.g. "admissions-policy.pdf" */
   fileName: string;
   docId: string;
@@ -78,6 +90,8 @@ export interface IngestAuditResult {
   updatedAt: string;
   /** The resolved institution UUID, or GLOBAL_INSTITUTION for shared docs. */
   institutionId: string;
+  programme: string | null;
+  level: string | null;
   vectorsUpserted: number;
   parentChunks: number;
   childChunks: number;
@@ -126,6 +140,7 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
     fileName, docId, category, namespace,
     faculty, source, roles, updatedAt, programme, level,
     contentType = 'general',
+    onProgress,
   } = options;
 
   // Resolve institution — always a concrete value so filters never silently miss.
@@ -155,6 +170,7 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
   await deleteDocument(docId, namespace);
 
   // 3. Build hierarchical parent/child chunks via MDocument
+  onProgress?.({ step: 'chunking' });
   const parents = await buildHierarchicalChunks(fullText, docId, category, contentType, pageNumber);
   const allChildren = parents.flatMap((p: ParentChunk) => p.children);
 
@@ -164,6 +180,7 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
 
   // 4. Embed child chunks (dense vectors via Mastra model router, retries built-in)
   const texts = allChildren.map((c: ChildChunk) => c.text);
+  onProgress?.({ step: 'embedding', parents: parents.length, children: allChildren.length });
   const denseVectors = await embedTexts(texts);
 
   // 5. Build parent lookup map — O(1)
@@ -206,14 +223,17 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
     };
   });
 
-  // 7. Upsert to Pinecone in batches with retry per batch
+  // 7. Upsert to Pinecone — all batches in parallel, each with retry
+  onProgress?.({ step: 'upserting', chunks: texts.length });
   const index = pineconeIndex.namespace(namespace);
   const BATCH_SIZE = INGEST_CONFIG.upsertBatchSize;
 
-  for (let i = 0; i < records.length; i += BATCH_SIZE) {
-    const batch = records.slice(i, i + BATCH_SIZE);
-    await withRetry(() => index.upsert({ records: batch }));
-  }
+  await Promise.all(
+    Array.from({ length: Math.ceil(records.length / BATCH_SIZE) }, (_, i) => {
+      const batch = records.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE);
+      return withRetry(() => index.upsert({ records: batch }));
+    })
+  );
 
   return {
     docId,
@@ -226,6 +246,8 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
     roles,
     updatedAt,
     institutionId,
+    programme: programme ?? null,
+    level:     level     ?? null,
     vectorsUpserted: records.length,
     parentChunks: parents.length,
     childChunks: allChildren.length,
@@ -237,8 +259,15 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
  * Delete all vectors for a given docId from a namespace.
  * Called automatically before re-ingestion (idempotency).
  * Also called directly by the admin dashboard on document removal.
+ *
+ * 404 is treated as success — the namespace or vectors don't exist yet, nothing to delete.
  */
 export async function deleteDocument(docId: string, namespace: string): Promise<void> {
   const index = pineconeIndex.namespace(namespace);
-  await withRetry(() => index.deleteMany({ filter: { docId: { $eq: docId } } }));
+  try {
+    await withRetry(() => index.deleteMany({ filter: { docId: { $eq: docId } } }));
+  } catch (err) {
+    if (String(err).includes('404')) return;
+    throw err;
+  }
 }

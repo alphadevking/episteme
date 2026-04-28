@@ -5,23 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Trash2Icon, RefreshCwIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { DataTable } from "@/components/admin/data-table";
-
-type KbDocument = {
-  docId: string;
-  fileName: string;
-  namespace: string;
-  category: string;
-  contentType: string;
-  faculty: string;
-  source: string;
-  roles: string[];
-  vectorsUpserted: number;
-  parentChunks: number;
-  childChunks: number;
-  ingestedAt: string;
-  markdownContent: string | null;
-  plainTextContent: string | null;
-};
+import type { KbDocument } from "@/lib/types/kb";
 
 type Props = { documents: KbDocument[] };
 
@@ -144,6 +128,24 @@ export function KbDocumentTable({ documents }: Props) {
           label: "Type",
           render: (r) => (
             <span className="text-xs text-muted-foreground capitalize">{r.contentType}</span>
+          ),
+        },
+        {
+          key: "programme",
+          label: "Programme",
+          render: (r) => (
+            <span className={`text-xs ${r.programme ? "text-foreground" : "text-muted-foreground/50 italic"}`}>
+              {r.programme ?? "Not available"}
+            </span>
+          ),
+        },
+        {
+          key: "level",
+          label: "Level",
+          render: (r) => (
+            <span className={`text-xs ${r.level ? "text-foreground font-medium" : "text-muted-foreground/50 italic"}`}>
+              {r.level ?? "Not available"}
+            </span>
           ),
         },
         {

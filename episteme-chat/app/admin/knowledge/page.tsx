@@ -1,26 +1,10 @@
 // app/admin/knowledge/page.tsx
 import { PageHeader } from "@/components/admin/page-header";
 import { KbDocumentTable } from "@/components/admin/kb-document-table";
-import { KbUploadDialog } from "@/components/admin/kb-upload-dialog";
-import { DatabaseIcon, LayersIcon, NetworkIcon } from "lucide-react";
-
-type KbDocument = {
-  docId: string;
-  fileName: string;
-  namespace: string;
-  category: string;
-  contentType: string;
-  faculty: string;
-  source: string;
-  roles: string[];
-  updatedAt: string;
-  vectorsUpserted: number;
-  parentChunks: number;
-  childChunks: number;
-  ingestedAt: string;
-  markdownContent: string | null;
-  plainTextContent: string | null;
-};
+import { Button } from "@/components/ui/button";
+import { DatabaseIcon, LayersIcon, NetworkIcon, UploadCloudIcon } from "lucide-react";
+import Link from "next/link";
+import type { KbDocument } from "@/lib/types/kb";
 
 async function fetchDocuments(): Promise<KbDocument[]> {
   const base = process.env.MASTRA_BASE_URL ?? "http://localhost:4111";
@@ -56,7 +40,14 @@ export default async function KnowledgePage() {
       <PageHeader
         title="Knowledge Base"
         description="Manage ingested documents powering the Episteme AI assistant."
-        action={<KbUploadDialog />}
+        action={
+          <Button size="sm" asChild>
+            <Link href="/admin/knowledge/ingest">
+              <UploadCloudIcon className="size-4 mr-2" />
+              Ingest Document
+            </Link>
+          </Button>
+        }
       />
 
       <div className="grid grid-cols-3 gap-4">

@@ -77,42 +77,37 @@ export async function buildHierarchicalChunks(
     overlap: CHUNK_CONFIG.parentOverlap,
   });
 
-  const parents: ParentChunk[] = [];
+  // Step 2 — child chunks for all parents in parallel
+  const parents = (await Promise.all(
+    parentRaw.map(async (raw, pi) => {
+      const parentText = raw.text.trim();
+      if (!parentText) return null;
 
-  for (let pi = 0; pi < parentRaw.length; pi++) {
-    const parentText = parentRaw[pi].text.trim();
-    if (!parentText) continue;
+      const parentId = `${docId}-P${pi}`;
 
-    const parentId = `${docId}-P${pi}`;
-
-    // Step 2 — child chunks (small, for precise retrieval)
-    const childDoc = MDocument.fromText(parentText);
-    const childRaw = await childDoc.chunk({
-      strategy: 'recursive',
-      maxSize: CHUNK_CONFIG.childSize,
-      overlap: CHUNK_CONFIG.childOverlap,
-    });
-
-    const children: ChildChunk[] = [];
-
-    for (let ci = 0; ci < childRaw.length; ci++) {
-      const childText = childRaw[ci].text.trim();
-      if (childText.length < CHUNK_CONFIG.minChildLength) continue;
-
-      children.push({
-        chunkId: `${parentId}-C${ci}`,
-        parentId,
-        text: childText,
-        chunkIndex: ci,
-        category,
-        pageNumber,
+      const childDoc = MDocument.fromText(parentText);
+      const childRaw = await childDoc.chunk({
+        strategy: 'recursive',
+        maxSize: CHUNK_CONFIG.childSize,
+        overlap: CHUNK_CONFIG.childOverlap,
       });
-    }
 
-    if (children.length > 0) {
-      parents.push({ parentId, text: parentText, category, pageNumber, children });
-    }
-  }
+      const children: ChildChunk[] = childRaw
+        .map((cr, ci) => ({ cr, ci }))
+        .filter(({ cr }) => cr.text.trim().length >= CHUNK_CONFIG.minChildLength)
+        .map(({ cr, ci }) => ({
+          chunkId:    `${parentId}-C${ci}`,
+          parentId,
+          text:       cr.text.trim(),
+          chunkIndex: ci,
+          category,
+          pageNumber,
+        }));
+
+      if (children.length === 0) return null;
+      return { parentId, text: parentText, category, pageNumber, children } as ParentChunk;
+    })
+  )).filter((p): p is ParentChunk => p !== null);
 
   return parents;
 }

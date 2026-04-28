@@ -11,6 +11,8 @@
 
 import { createSupabaseServerClientReadOnly, createSupabaseServerClient } from "@/lib/supabase/server";
 
+export const maxDuration = 300;
+
 type Params = { params: Promise<{ docId: string }> };
 
 function mastraKbUrl(docId: string, suffix = ""): string {

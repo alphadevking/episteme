@@ -15,6 +15,14 @@ const client = new UnstructuredClient({
   security: { apiKeyAuth: process.env['UNSTRUCTURED_API_KEY']! },
 });
 
+/** HiRes (OCR) only for image formats — everything else uses Fast text extraction. */
+function strategyFor(fileName: string): Strategy {
+  const ext = fileName.toLowerCase().split('.').pop() ?? '';
+  return ['png', 'jpg', 'jpeg', 'tiff', 'tif'].includes(ext)
+    ? Strategy.HiRes
+    : Strategy.Fast;
+}
+
 /**
  * Process a binary document (PDF, DOCX, HTML, scanned image) via Unstructured API.
  * Returns clean structured elements. OCR is applied automatically for scanned docs.
@@ -25,11 +33,17 @@ export async function processDocument(
   fileName: string,
   category: string
 ): Promise<ProcessedElement[]> {
+  const strategy = strategyFor(fileName);
+  const ext = fileName.toLowerCase().split('.').pop() ?? '';
+  const isPdf = ext === 'pdf';
+
   const response = await client.general.partition({
     partitionParameters: {
       files: { content: fileBuffer, fileName },
-      strategy: Strategy.HiRes,
-      splitPdfPage: true,
+      strategy,
+      // splitPdfPage parallelises page processing on Unstructured's side — only worth
+      // the overhead for multi-page PDFs; images and DOCX process as a single unit.
+      splitPdfPage: isPdf,
       languages: ['eng'],
     },
   });

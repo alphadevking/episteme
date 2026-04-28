@@ -14,21 +14,38 @@ const embeddingModel = new ModelRouterEmbeddingModel('mistral/mistral-embed');
  * Same routing mechanism used by the episteme-chat-agent for LLM calls.
  * Outputs 1024-dimension vectors. Batches to stay within API limits.
  */
+/** Run tasks with a max concurrency cap — avoids slamming the Mistral rate limit. */
+async function withConcurrency<T>(
+  tasks: Array<() => Promise<T>>,
+  limit: number,
+): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let next = 0;
+  async function worker() {
+    while (next < tasks.length) {
+      const i = next++;
+      results[i] = await tasks[i]();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
+  return results;
+}
+
 export async function embedTexts(texts: string[]): Promise<number[][]> {
   const BATCH_SIZE = EMBED_CONFIG.batchSize;
-  const allEmbeddings: number[][] = [];
 
+  const batches: string[][] = [];
   for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-    const batch = texts.slice(i, i + BATCH_SIZE);
-    const { embeddings } = await embedMany({
-      model: embeddingModel,
-      values: batch,
-      maxRetries: 3, // exponential backoff on transient API failures
-    });
-    allEmbeddings.push(...embeddings);
+    batches.push(texts.slice(i, i + BATCH_SIZE));
   }
 
-  return allEmbeddings;
+  // Max 3 concurrent Mistral embed calls — fast enough, under rate-limit ceiling.
+  const results = await withConcurrency(
+    batches.map((batch) => () => embedMany({ model: embeddingModel, values: batch, maxRetries: 3 })),
+    3,
+  );
+
+  return results.flatMap((r) => r.embeddings);
 }
 
 /**

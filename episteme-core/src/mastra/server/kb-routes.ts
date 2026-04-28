@@ -12,7 +12,7 @@
  *   POST   /api/kb/documents/:docId/freshness      — update freshness timestamp only
  */
 import type { Context } from 'hono';
-import { ingestDocument, deleteDocument, GLOBAL_INSTITUTION } from '../ingestion/ingest';
+import { ingestDocument, deleteDocument, GLOBAL_INSTITUTION, type IngestProgressEvent } from '../ingestion/ingest';
 import {
   saveDocument,
   saveFreshnessResult,
@@ -62,21 +62,77 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
   const {
     docId, fileName, category, namespace, faculty, source, roles,
     updatedAt, contentType, markdownContent, plainTextContent, fileBufferBase64,
+    programme, level,
   } = body;
 
-  if (!docId || !fileName || !category || !namespace || !faculty || !source || !roles || !updatedAt) {
-    return c.json({ error: 'Missing required fields: docId, fileName, category, namespace, faculty, source, roles, updatedAt' }, 400);
+  const VALID_ROLES      = new Set(['prospective', 'student', 'parent', 'staff', 'hod']);
+  const VALID_LEVELS     = new Set(['100L', '200L', '300L', '400L', '500L', '600L', 'MSc', 'PhD', 'PGD']);
+  const VALID_NAMESPACES = new Set(['admissions', 'academic-policy', 'financial-aid', 'programmes', 'staff-internal', 'general']);
+  const VALID_CATEGORIES = VALID_NAMESPACES;
+  const VALID_CONTENT_TYPES = new Set(['general', 'policy', 'handbook', 'faq', 'announcement', 'catalogue', 'markdown']);
+
+  // ── Required field presence ──────────────────────────────────────────────────
+  const missing = (
+    [
+      ['docId',     docId],
+      ['fileName',  fileName],
+      ['category',  category],
+      ['namespace', namespace],
+      ['source',    source],
+      ['updatedAt', updatedAt],
+    ] as [string, unknown][]
+  )
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+
+  // roles must be a non-empty array
+  const rolesRaw = Array.isArray(roles) ? roles as string[] : (typeof roles === 'string' ? [roles] : []);
+  if (rolesRaw.length === 0) missing.push('roles');
+
+  if (missing.length > 0) {
+    console.error('[kb-routes] ingestDocumentHandler — missing fields:', missing, {
+      docId, fileName, category, namespace, faculty, source, roles, updatedAt, contentType,
+    });
+    return c.json({ error: `Missing required fields: ${missing.join(', ')}` }, 400);
   }
 
-  const institutionId = resolveInstitutionId(c);
-  const rolesArray = Array.isArray(roles) ? roles as string[] : [roles as string];
+  // ── Enum validation ──────────────────────────────────────────────────────────
+  if (!VALID_NAMESPACES.has(namespace as string))
+    return c.json({ error: `Invalid namespace: ${namespace}` }, 400);
+  if (!VALID_CATEGORIES.has(category as string))
+    return c.json({ error: `Invalid category: ${category}` }, 400);
+  if (contentType && !VALID_CONTENT_TYPES.has(contentType as string))
+    return c.json({ error: `Invalid contentType: ${contentType}` }, 400);
 
+  const invalidRoles = rolesRaw.filter((r) => !VALID_ROLES.has(r));
+  if (invalidRoles.length > 0)
+    return c.json({ error: `Invalid roles: ${invalidRoles.join(', ')}` }, 400);
+
+  const resolvedLevel = (level as string | undefined)?.trim() || undefined;
+  if (resolvedLevel && !VALID_LEVELS.has(resolvedLevel))
+    return c.json({ error: `Invalid level: ${resolvedLevel}` }, 400);
+
+  // ── Date validation ──────────────────────────────────────────────────────────
+  const updatedAtDate = new Date(updatedAt as string);
+  if (isNaN(updatedAtDate.getTime()))
+    return c.json({ error: 'Invalid updatedAt: must be a valid date string' }, 400);
+
+  // faculty is optional — institution-wide docs have no faculty scope
+  const resolvedFaculty = (faculty as string | undefined)?.trim() || 'general';
+
+  const institutionId = resolveInstitutionId(c);
+
+  // ── Base64 decode ────────────────────────────────────────────────────────────
   let fileBuffer: Uint8Array | undefined;
   if (fileBufferBase64) {
-    const binaryString = atob(fileBufferBase64 as string);
-    fileBuffer = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      fileBuffer[i] = binaryString.charCodeAt(i);
+    try {
+      const binaryString = atob(fileBufferBase64 as string);
+      fileBuffer = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        fileBuffer[i] = binaryString.charCodeAt(i);
+      }
+    } catch {
+      return c.json({ error: 'Invalid fileBufferBase64: not valid base64' }, 400);
     }
   }
 
@@ -84,46 +140,76 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
     return c.json({ error: 'One of fileBufferBase64, markdownContent, or plainTextContent must be provided' }, 400);
   }
 
-  // Ghost vector fix: if this docId already exists with a DIFFERENT namespace,
-  // delete its vectors from the old namespace before ingesting into the new one.
-  // ingestDocument only deletes from its own namespace (idempotency for same-namespace
-  // re-ingests), so we must handle cross-namespace cleanup here.
-  const existing = await getDocument(docId as string);
-  if (existing && existing.namespace !== namespace) {
-    await deleteDocument(docId as string, existing.namespace);
-  }
+  // All validation passed — stream progress via SSE so the client never times out
+  // and can display each pipeline step in real-time.
+  const encoder = new TextEncoder();
 
-  try {
-    const audit = await ingestDocument({
-      docId: docId as string,
-      fileName: fileName as string,
-      category: category as string,
-      namespace: namespace as string,
-      faculty: faculty as string,
-      source: source as string,
-      roles: rolesArray,
-      updatedAt: updatedAt as string,
-      institutionId,
-      contentType: (contentType as ContentType | undefined) ?? 'general',
-      fileBuffer,
-      markdownContent: markdownContent as string | undefined,
-      plainTextContent: plainTextContent as string | undefined,
-    });
+  const stream = new ReadableStream({
+    async start(controller) {
+      function emit(event: string, data: unknown) {
+        try {
+          controller.enqueue(
+            encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+          );
+        } catch { /* stream already closed */ }
+      }
 
-    const record = {
-      ...audit,
-      markdownContent:  (markdownContent  as string | undefined) ?? null,
-      plainTextContent: (plainTextContent as string | undefined) ?? null,
-      sourceUrl:     null,
-      contentHash:   null,
-      lastFetchedAt: null,
-    } satisfies KbDocument;
-    await saveDocument(record);
+      emit('progress', { step: 'extracting' });
 
-    return c.json({ success: true, audit });
-  } catch (err) {
-    return c.json({ error: String(err) }, 500);
-  }
+      try {
+        // Ghost vector fix: cross-namespace cleanup before ingestion.
+        const existing = await getDocument(docId as string);
+        if (existing && existing.namespace !== namespace) {
+          await deleteDocument(docId as string, existing.namespace);
+        }
+
+        const audit = await ingestDocument({
+          docId:       docId as string,
+          fileName:    fileName as string,
+          category:    category as string,
+          namespace:   namespace as string,
+          faculty:     resolvedFaculty,
+          source:      source as string,
+          roles:       rolesRaw,
+          updatedAt:   updatedAtDate.toISOString(),
+          institutionId,
+          contentType: (contentType as ContentType | undefined) ?? 'general',
+          programme:   (programme as string | undefined) || undefined,
+          level:       resolvedLevel,
+          fileBuffer,
+          markdownContent:  markdownContent  as string | undefined,
+          plainTextContent: plainTextContent as string | undefined,
+          onProgress:  (p: IngestProgressEvent) => emit('progress', p),
+        });
+
+        emit('progress', { step: 'saving' });
+
+        const record: KbDocument = {
+          ...audit,
+          markdownContent:  (markdownContent  as string | undefined) ?? null,
+          plainTextContent: (plainTextContent as string | undefined) ?? null,
+          sourceUrl:     null,
+          contentHash:   null,
+          lastFetchedAt: null,
+        };
+        await saveDocument(record);
+
+        emit('done', { success: true, audit });
+      } catch (err) {
+        emit('error', { error: String(err) });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type':  'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection':    'keep-alive',
+    },
+  });
 }
 
 // ── DELETE /api/kb/documents/:docId ─────────────────────────────────────────
@@ -203,8 +289,10 @@ export async function reingestDocumentHandler(c: Context): Promise<Response> {
       updatedAt:        nowIso,
       institutionId:    institutionId === GLOBAL_INSTITUTION ? undefined : institutionId,
       contentType:      doc.contentType as ContentType,
-      markdownContent:  freshMarkdown  ?? undefined,
-      plainTextContent: freshText      ?? undefined,
+      programme:        doc.programme   ?? undefined,
+      level:            doc.level       ?? undefined,
+      markdownContent:  freshMarkdown   ?? undefined,
+      plainTextContent: freshText       ?? undefined,
     });
 
     const updated: KbDocument = {

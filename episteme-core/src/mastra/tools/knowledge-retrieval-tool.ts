@@ -224,6 +224,13 @@ export const knowledgeRetrievalTool = createTool({
       .string()
       .optional()
       .describe('Optional programme scope to narrow results e.g. "Computer Science".'),
+    level: z
+      .string()
+      .optional()
+      .describe(
+        'Optional academic level scope e.g. "300L", "MSc". ' +
+        'Read from system context field level=<value>. Omit if unknown.'
+      ),
     trust_level: z
       .number()
       .int()
@@ -249,10 +256,11 @@ export const knowledgeRetrievalTool = createTool({
       ),
   }),
   execute: async (inputData) => {
-    const { query, role, programme, trust_level, institution_id, namespace_allowlist } = inputData as {
+    const { query, role, programme, level, trust_level, institution_id, namespace_allowlist } = inputData as {
       query: string;
       role: z.infer<typeof UserRole>;
       programme?: string;
+      level?: string;
       trust_level?: number;
       institution_id?: string;
       namespace_allowlist?: string[];
@@ -261,6 +269,7 @@ export const knowledgeRetrievalTool = createTool({
       query,
       role,
       programme,
+      level,
       trustLevel:         trust_level,
       institutionId:      institution_id,
       namespaceAllowlist: namespace_allowlist,

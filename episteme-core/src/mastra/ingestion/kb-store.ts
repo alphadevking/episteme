@@ -20,6 +20,10 @@ export interface KbDocument {
   updatedAt: string;
   /** Resolved institution UUID or GLOBAL_INSTITUTION. Always present. */
   institutionId: string;
+  /** Programme scope stored for re-ingest fidelity. Null = institution-wide. */
+  programme: string | null;
+  /** Level scope stored for re-ingest fidelity. Null = all levels. */
+  level: string | null;
   vectorsUpserted: number;
   parentChunks: number;
   childChunks: number;
@@ -67,6 +71,8 @@ export async function ensureKbTable(): Promise<void> {
     'content_hash    TEXT',
     'last_fetched_at TEXT',
     `institution_id  TEXT NOT NULL DEFAULT '${GLOBAL_INSTITUTION}'`,
+    'programme       TEXT',
+    'level           TEXT',
   ];
   for (const col of newColumns) {
     try {
@@ -88,10 +94,11 @@ export async function saveDocument(doc: KbDocument): Promise<void> {
     sql: `
       INSERT INTO kb_documents (
         doc_id, file_name, namespace, category, content_type, faculty, source,
-        roles, updated_at, institution_id, vectors_upserted, parent_chunks, child_chunks,
+        roles, updated_at, institution_id, programme, level,
+        vectors_upserted, parent_chunks, child_chunks,
         ingested_at, markdown_content, plain_text_content,
         source_url, content_hash, last_fetched_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(doc_id) DO UPDATE SET
         file_name          = excluded.file_name,
         namespace          = excluded.namespace,
@@ -102,6 +109,8 @@ export async function saveDocument(doc: KbDocument): Promise<void> {
         roles              = excluded.roles,
         updated_at         = excluded.updated_at,
         institution_id     = excluded.institution_id,
+        programme          = excluded.programme,
+        level              = excluded.level,
         vectors_upserted   = excluded.vectors_upserted,
         parent_chunks      = excluded.parent_chunks,
         child_chunks       = excluded.child_chunks,
@@ -123,6 +132,8 @@ export async function saveDocument(doc: KbDocument): Promise<void> {
       JSON.stringify(doc.roles),
       doc.updatedAt,
       doc.institutionId,
+      doc.programme ?? null,
+      doc.level     ?? null,
       doc.vectorsUpserted,
       doc.parentChunks,
       doc.childChunks,
@@ -190,6 +201,8 @@ function rowToDocument(row: Record<string, unknown>): KbDocument {
     roles:             JSON.parse(row['roles'] as string) as string[],
     updatedAt:         row['updated_at'] as string,
     institutionId:     (row['institution_id'] as string | null) ?? GLOBAL_INSTITUTION,
+    programme:         (row['programme']       as string | null) ?? null,
+    level:             (row['level']           as string | null) ?? null,
     vectorsUpserted:   row['vectors_upserted'] as number,
     parentChunks:      row['parent_chunks'] as number,
     childChunks:       row['child_chunks'] as number,

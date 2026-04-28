@@ -18,6 +18,9 @@
 
 import { createSupabaseServerClientReadOnly, createSupabaseServerClient } from "@/lib/supabase/server";
 
+// Ingestion pipelines can take minutes for large PDFs (Unstructured + embedding + Pinecone upsert).
+export const maxDuration = 300;
+
 function mastraKbUrl(path = ""): string {
   const base = process.env.MASTRA_BASE_URL ?? "http://localhost:4111";
   return `${base.replace(/\/$/, "")}/api/kb/documents${path}`;
@@ -84,6 +87,9 @@ export async function GET() {
 }
 
 // ── POST /api/admin/kb ───────────────────────────────────────────────────────
+// Proxies to Mastra's SSE ingest endpoint and forwards the stream to the browser.
+// Intercepts the `done` event to sync Supabase (kb_document_sources + audit log)
+// without blocking the stream — the browser sees all progress in real-time.
 export async function POST(req: Request) {
   let body: Record<string, unknown>;
   try {
@@ -98,46 +104,91 @@ export async function POST(req: Request) {
   const { error, institutionId } = await assertAdmin(requestedInstitutionId);
   if (error) return error;
 
+  let mastraRes: Response;
   try {
-    const res  = await fetch(mastraKbUrl(), {
+    mastraRes = await fetch(mastraKbUrl(), {
       method:  "POST",
       headers: { "Content-Type": "application/json", ...adminHeaders(institutionId) },
       body:    JSON.stringify(body),
     });
-    const data = await res.json();
-
-    if (res.ok) {
-      const supabase = await createSupabaseServerClient();
-
-      // Upsert into kb_document_sources — Supabase source of truth for the admin dashboard.
-      // source_url is populated only when source is a URL (URL-sourced docs tracked for freshness).
-      const docId    = body.docId as string | undefined;
-      const source   = body.source as string | undefined;
-      const sourceUrl = source?.startsWith("http") ? source : null;
-
-      if (docId && institutionId) {
-        await supabase
-          .from("kb_document_sources")
-          .upsert(
-            {
-              doc_id:         docId,
-              institution_id: institutionId,
-              source_url:     sourceUrl,
-              updated_at:     new Date().toISOString(),
-            },
-            { onConflict: "doc_id" },
-          );
-      }
-
-      await supabase.rpc("fn_write_audit_log_for_kb", {
-        p_action:        "kb_document_created",
-        p_resource_type: "kb_document",
-        p_new_value:     { doc_id: docId ?? null, source: source ?? null },
-      });
-    }
-
-    return Response.json(data, { status: res.status });
   } catch (err) {
     return Response.json({ error: String(err) }, { status: 503 });
   }
+
+  // Mastra returns JSON (not SSE) for validation errors — forward as-is.
+  const mastraContentType = mastraRes.headers.get("content-type") ?? "";
+  if (!mastraContentType.includes("text/event-stream")) {
+    const data = await mastraRes.json();
+    return Response.json(data, { status: mastraRes.status });
+  }
+
+  if (!mastraRes.body) {
+    return Response.json({ error: "No stream from ingestion service" }, { status: 503 });
+  }
+
+  // Capture scope for the Supabase side-effect.
+  const docId     = body.docId     as string | undefined;
+  const source    = body.source    as string | undefined;
+  const sourceUrl = source?.startsWith("http") ? source : null;
+  const supabase  = await createSupabaseServerClient();
+
+  // Pipe Mastra's SSE stream to the browser.
+  // Parse each event block to detect `done` and fire Supabase ops fire-and-forget.
+  const decoder = new TextDecoder();
+  let sseBuffer  = "";
+
+  const readable = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const reader = mastraRes.body!.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          // Forward raw bytes immediately — browser sees events as they arrive.
+          controller.enqueue(value);
+
+          // Parse for the `done` event to trigger Supabase sync.
+          sseBuffer += decoder.decode(value, { stream: true });
+          const blocks  = sseBuffer.split("\n\n");
+          sseBuffer     = blocks.pop() ?? "";
+
+          for (const block of blocks) {
+            const evtMatch  = block.match(/^event: (\w+)/m);
+            const dataMatch = block.match(/^data: (.+)/m);
+            if (evtMatch?.[1] !== "done" || !dataMatch) continue;
+
+            try {
+              const payload = JSON.parse(dataMatch[1]) as { success?: boolean };
+              if (payload.success && docId && institutionId) {
+                // Fire-and-forget — stream is already flowing, don't block it.
+                Promise.all([
+                  supabase.from("kb_document_sources").upsert(
+                    { doc_id: docId, institution_id: institutionId, source_url: sourceUrl, updated_at: new Date().toISOString() },
+                    { onConflict: "doc_id" },
+                  ),
+                  supabase.rpc("fn_write_audit_log_for_kb", {
+                    p_action:        "kb_document_created",
+                    p_resource_type: "kb_document",
+                    p_new_value:     { doc_id: docId ?? null, source: source ?? null },
+                  }),
+                ]).catch((err) => console.error("[admin/kb] Supabase sync failed:", err));
+              }
+            } catch { /* malformed data — skip */ }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(readable, {
+    headers: {
+      "Content-Type":      "text/event-stream",
+      "Cache-Control":     "no-cache",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }
