@@ -4,6 +4,7 @@ import {
   retrieveKnowledge,
   type KnowledgeRetrievalResponse,
 } from './knowledge-retrieval-tool';
+import { RETRIEVAL_CONFIG } from '../config';
 
 const UserRole = z
   .enum(['prospective', 'student', 'parent', 'staff', 'hod'])
@@ -58,14 +59,8 @@ function buildGroundedContext(retrieval: KnowledgeRetrievalResponse & { found: t
   return lines.join('\n');
 }
 
-function buildAbstentionAnswer(): string {
-  return [
-    'I do not have verified information in the official documentation to answer that question.',
-    '',
-    'For accurate details, please contact the relevant faculty office directly.',
-    '',
-    'Is there anything else I can help you with?',
-  ].join('\n');
+function buildAbstentionAnswer(query: string): string {
+  return `NO_RESULTS: The knowledge base does not contain verified information matching this query ("${query}"). Use this signal to acknowledge the gap and offer the user 2–3 concrete retrieval refinements based on their context and what was asked.`;
 }
 
 // ── Tool definition ───────────────────────────────────────────────────────────
@@ -75,7 +70,7 @@ export const groundedResponseTool = createTool({
   description:
     'Retrieves role-appropriate verified knowledge chunks from the institutional knowledge base. ' +
     'When confidence=high, returns numbered source chunks for the agent to synthesize into a coherent answer. ' +
-    'When confidence=low, returns an abstention message to output verbatim.',
+    'When confidence=low, returns a NO_RESULTS signal — the agent should acknowledge the gap and offer the user 2–3 concrete retrieval refinements as (A)/(B)/(C) options.',
   inputSchema: z.object({
     query: z.string().describe('The user question or topic to retrieve information about.'),
     role: UserRole.describe(
@@ -85,15 +80,19 @@ export const groundedResponseTool = createTool({
       .string()
       .optional()
       .describe(
-        'The user\'s student programme e.g. "Computer Science". ' +
-        'Read from system context field programme=<value>. Omit for prospective users.'
+        'Programme scope for retrieval e.g. "Computer Science", "Engineering". ' +
+        'Normally read from system context field programme=<value>. ' +
+        'Override with the programme the user explicitly requested if they selected a cross-context option. ' +
+        'Omit only when genuinely unknown.'
       ),
     level: z
       .string()
       .optional()
       .describe(
-        'The user\'s academic level e.g. "300L". ' +
-        'Read from system context field level=<value>. Omit if unknown.'
+        'Academic level scope e.g. "300L", "200L", "Postgraduate". ' +
+        'Normally read from system context field level=<value>. ' +
+        'Override with the level the user explicitly requested if they selected a cross-context option. ' +
+        'Omit only when genuinely unknown.'
       ),
     department: z
       .string()
@@ -143,7 +142,7 @@ export const groundedResponseTool = createTool({
       .enum(['high', 'low'])
       .describe(
         '"high" = verified KB chunks returned — synthesize a clear answer from them, preserving all citation tags. ' +
-        '"low" = no results found — output the abstention message exactly, do not supplement.'
+        '"low" = no results found — the answer field is a NO_RESULTS signal. Write a response that acknowledges the gap and offers 2–3 concrete refinement options the user can choose from.'
       ),
   }),
   execute: async (inputData) => {
@@ -170,17 +169,19 @@ export const groundedResponseTool = createTool({
       institutionId: institution_id,
     });
 
-    // KB found authoritative results
-    if (retrieval.found) {
+    // KB found results — but only surface them if the best score clears the relevance gate.
+    // A maxScore below relevanceThreshold means retrieval found the "best available" match,
+    // not a genuinely on-topic one. Treat it as not found rather than mislead with off-topic chunks.
+    if (retrieval.found && retrieval.maxScore >= RETRIEVAL_CONFIG.relevanceThreshold) {
       return {
         answer: buildGroundedContext(retrieval),
         confidence: 'high' as const,
       };
     }
 
-    // Nothing in the KB — return abstention. No web fallback.
+    // No results, or best match below relevance threshold — return abstention. No web fallback.
     return {
-      answer: buildAbstentionAnswer(),
+      answer: buildAbstentionAnswer(query),
       confidence: 'low' as const,
     };
   },

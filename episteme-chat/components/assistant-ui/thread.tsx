@@ -22,6 +22,7 @@ import {
   MessagePrimitive,
   ThreadPrimitive,
   useThreadRuntime,
+  useAuiState,
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
@@ -38,7 +39,7 @@ import {
   ArrowUpIcon,
   Sparkles,
 } from "lucide-react";
-import type { FC } from "react";
+import { type FC, useSyncExternalStore } from "react";
 import { useUser } from "@/lib/hooks/use-user";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import type { Suggestion } from "@/lib/suggestions";
@@ -401,6 +402,85 @@ const MessageError: FC = () => {
   );
 };
 
+// ── Clarification option chips ────────────────────────────────────────────
+
+function parseClarificationOptions(text: string): { label: string; full: string }[] {
+  // Split on (A)/(B)/(C) markers — avoids needing the ES2018 `s` flag.
+  // e.g. "...(A) apply for a bed space, (B) priority criteria, or (C) charges?"
+  // → parts: [before, "A", "apply for a bed space, ", "B", "priority criteria, or ", "C", "charges?"]
+  const parts = text.split(/\(([A-C])\)\s+/);
+  const results: { label: string; full: string }[] = [];
+  for (let i = 1; i + 1 < parts.length; i += 2) {
+    const label = parts[i];
+    const body  = parts[i + 1]
+      .replace(/,?\s*(?:or\s+)?$/i, "") // strip trailing ", or " before next option
+      .replace(/[?.!,]+$/, "")           // strip trailing punctuation on last option
+      .trim();
+    if (body) results.push({ label, full: body });
+  }
+  return results;
+}
+
+const ClarificationOptions: FC = () => {
+  const runtime = useThreadRuntime();
+
+  // Subscribe reactively to thread state via useSyncExternalStore so the component
+  // re-renders whenever messages or isRunning change.
+  const { messages, isRunning } = useSyncExternalStore(
+    runtime.subscribe,
+    () => runtime.getState(),
+    () => runtime.getState(),
+  );
+
+  const messageId = useAuiState((s) => s.message.id);
+  const role      = useAuiState((s) => s.message.role);
+
+  if (role !== "assistant" || isRunning) return null;
+
+  // Only render on the last assistant message — options disappear once the user replies.
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+  if (lastAssistant?.id !== messageId) return null;
+
+  // Extract plain text from message parts.
+  const text = lastAssistant.content
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join("");
+
+  const options = parseClarificationOptions(text);
+  if (options.length < 2) return null;
+
+  const handleSelect = (full: string) => {
+    runtime.append({
+      role: "user",
+      content: [{ type: "text", text: full }],
+    });
+  };
+
+  return (
+    <div className="mt-3 flex flex-wrap gap-2">
+      {options.map(({ label, full }) => (
+        <button
+          key={label}
+          type="button"
+          onClick={() => handleSelect(full)}
+          className={cn(
+            "flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/5",
+            "px-3.5 py-1.5 text-sm font-medium text-primary",
+            "transition-colors hover:border-primary/60 hover:bg-primary/10",
+            "fade-in animate-in duration-150",
+          )}
+        >
+          <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[10px] font-semibold leading-none">
+            {label}
+          </span>
+          {full}
+        </button>
+      ))}
+    </div>
+  );
+};
+
 // ── Assistant message ─────────────────────────────────────────────────────
 
 const AssistantMessage: FC = () => {
@@ -422,6 +502,7 @@ const AssistantMessage: FC = () => {
               },
             }}
           />
+          <ClarificationOptions />
           <MessageError />
         </div>
 

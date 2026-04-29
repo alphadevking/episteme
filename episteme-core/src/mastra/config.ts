@@ -84,6 +84,13 @@ export const RETRIEVAL_CONFIG = {
    * Override with RETRIEVAL_ALPHA env var to tune per-environment.
    */
   alpha: envFloat('RETRIEVAL_ALPHA', 0.75),
+  /**
+   * Minimum maxScore to treat results as genuinely relevant (not just "above noise floor").
+   * When the best match scores below this, retrieval returns abstention even if found=true.
+   * Prevents off-topic chunks that barely clear scoreThreshold from surfacing as high-confidence.
+   * 0.55 is calibrated for mistral-embed — tune up to cut false positives, down if over-abstaining.
+   */
+  relevanceThreshold: envFloat('RETRIEVAL_RELEVANCE_THRESHOLD', 0.55),
 } as const;
 
 // ---------------------------------------------------------------------------

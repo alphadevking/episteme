@@ -211,10 +211,10 @@ export async function retrieveKnowledge(inputData: {
 export const knowledgeRetrievalTool = createTool({
   id: 'knowledgeRetrievalTool',
   description:
-    'Searches the knowledge base for the Faculty of Computing, University of Benin (Uniben). ' +
+    'Low-level knowledge base search for the University of Benin (Uniben). ' +
     'Covers policies, admissions, academic regulations, financial aid, programmes, announcements, and general information. ' +
-    'Always call this tool before answering any domain-specific question. ' +
-    'Pass the user\'s role so only appropriate information is returned.',
+    'For agent use, prefer groundedResponseTool which wraps this with query rewriting, relevance gating, and grounded context formatting. ' +
+    'Use this tool directly only when raw retrieval results are needed without synthesis.',
   inputSchema: z.object({
     query: z.string().describe('The user question or topic to retrieve information about.'),
     role: UserRole.describe(

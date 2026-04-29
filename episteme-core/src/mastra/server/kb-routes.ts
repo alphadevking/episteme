@@ -276,44 +276,72 @@ export async function reingestDocumentHandler(c: Context): Promise<Response> {
   // Institution from header takes precedence; fall back to stored value.
   const institutionId = resolveInstitutionId(c) ?? doc.institutionId;
 
-  try {
-    const nowIso = new Date().toISOString();
-    const audit = await ingestDocument({
-      docId:            doc.docId,
-      fileName:         doc.fileName,
-      category:         doc.category,
-      namespace:        doc.namespace,
-      faculty:          doc.faculty,
-      source:           doc.source,
-      roles:            doc.roles,
-      updatedAt:        nowIso,
-      institutionId:    institutionId === GLOBAL_INSTITUTION ? undefined : institutionId,
-      contentType:      doc.contentType as ContentType,
-      programme:        doc.programme   ?? undefined,
-      level:            doc.level       ?? undefined,
-      markdownContent:  freshMarkdown   ?? undefined,
-      plainTextContent: freshText       ?? undefined,
-    });
+  // Stream via SSE — mirrors ingestDocumentHandler so large docs don't hit gateway timeouts.
+  const encoder = new TextEncoder();
 
-    const updated: KbDocument = {
-      ...doc,
-      ...audit,
-      // Preserve freshness metadata
-      sourceUrl:      doc.sourceUrl,
-      contentHash:    override.contentHash ?? doc.contentHash,
-      lastFetchedAt:  override.contentHash ? nowIso : doc.lastFetchedAt,
-    };
-    await saveDocument(updated);
+  const stream = new ReadableStream({
+    async start(controller) {
+      function emit(event: string, data: unknown) {
+        try {
+          controller.enqueue(
+            encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+          );
+        } catch { /* stream already closed */ }
+      }
 
-    // Also write freshness result if a new hash was provided
-    if (override.contentHash) {
-      await saveFreshnessResult(docId, override.contentHash, nowIso);
-    }
+      emit('progress', { step: 'extracting' });
 
-    return c.json({ success: true, audit });
-  } catch (err) {
-    return c.json({ error: String(err) }, 500);
-  }
+      try {
+        const nowIso = new Date().toISOString();
+        const audit = await ingestDocument({
+          docId:            doc.docId,
+          fileName:         doc.fileName,
+          category:         doc.category,
+          namespace:        doc.namespace,
+          faculty:          doc.faculty,
+          source:           doc.source,
+          roles:            doc.roles,
+          updatedAt:        nowIso,
+          institutionId:    institutionId === GLOBAL_INSTITUTION ? undefined : institutionId,
+          contentType:      doc.contentType as ContentType,
+          programme:        doc.programme   ?? undefined,
+          level:            doc.level       ?? undefined,
+          markdownContent:  freshMarkdown   ?? undefined,
+          plainTextContent: freshText       ?? undefined,
+          onProgress:       (p: IngestProgressEvent) => emit('progress', p),
+        });
+
+        emit('progress', { step: 'saving' });
+
+        const updated: KbDocument = {
+          ...doc,
+          ...audit,
+          sourceUrl:     doc.sourceUrl,
+          contentHash:   override.contentHash ?? doc.contentHash,
+          lastFetchedAt: override.contentHash ? nowIso : doc.lastFetchedAt,
+        };
+        await saveDocument(updated);
+
+        if (override.contentHash) {
+          await saveFreshnessResult(docId, override.contentHash, nowIso);
+        }
+
+        emit('done', { success: true, audit });
+      } catch (err) {
+        emit('error', { error: String(err) });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type':  'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection':    'keep-alive',
+    },
+  });
 }
 
 // ── POST /api/kb/documents/:docId/freshness ──────────────────────────────────

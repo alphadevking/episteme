@@ -173,7 +173,7 @@ export async function POST(req: Request) {
   const mastraAgentId = process.env.MASTRA_AGENT_ID ?? "episteme-chat-agent";
   const upstreamUrl   = `${mastraBaseUrl.replace(/\/$/, "")}/chat/${encodeURIComponent(mastraAgentId)}`;
 
-  const requestStart = Date.now();
+  // const requestStart = Date.now();
 
   let upstreamResponse: Response;
   try {
@@ -203,13 +203,13 @@ export async function POST(req: Request) {
     transform(chunk, controller) {
       if (!firstChunkLogged) {
         firstChunkLogged = true;
-        const ttftMs = Date.now() - requestStart;
-        console.log(JSON.stringify({
-          event:        "ttft",
-          ttft_ms:      ttftMs,
-          role,
-          meets_nfr101: ttftMs < 2000,
-        }));
+        // const ttftMs = Date.now() - requestStart;
+        // console.log(JSON.stringify({
+        //   event:        "ttft",
+        //   ttft_ms:      ttftMs,
+        //   role,
+        //   meets_nfr101: ttftMs < 2000,
+        // }));
       }
       controller.enqueue(chunk);
     },
