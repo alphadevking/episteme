@@ -7,18 +7,54 @@
  *
  * Both run at ratio sampling so cost stays bounded.
  */
-import { z } from 'zod';
 import { createScorer } from '@mastra/core/evals';
-import { createToolCallAccuracyScorerCode } from '@mastra/evals/scorers/prebuilt';
 import { getAssistantMessageFromRunOutput } from '@mastra/evals/scorers/utils';
 
-// ── P1 scorer: tool was called ────────────────────────────────────────────────
-export const groundedToolUsageScorer = createToolCallAccuracyScorerCode({
-  expectedTool: 'groundedResponseTool',
-  strictMode: true,
-});
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+function wasToolCalled(run: Record<string, any>, toolName: string): boolean {
+  const output = run?.output;
+  if (!output) return false;
+  const messages: any[] = Array.isArray(output) ? output : (output?.messages ?? []);
+  return messages.some((msg) => {
+    const calls: any[] = msg?.toolInvocations ?? msg?.toolCalls ?? [];
+    return calls.some((c) => c?.toolName === toolName || c?.function?.name === toolName);
+  });
+}
+
+// A clarification turn is one where the agent asked an options-style question
+// instead of calling groundedResponseTool. Detected by the presence of lettered
+// options in the response — "(A)" … "(B)" — which the instructions mandate.
+function isClarificationTurn(response: string, toolCalled: boolean): boolean {
+  if (toolCalled) return false;
+  return /\(A\)/.test(response) && /\(B\)/.test(response);
+}
+
+// ── P1 scorer: tool was called (or a valid clarification was issued) ──────────
+export const groundedToolUsageScorer = createScorer({
+  id: 'episteme-grounded-tool-usage',
+  name: 'Episteme Grounded Tool Usage',
+  description:
+    'Checks that groundedResponseTool was called for Uniben questions. ' +
+    'Passes when the tool was called OR when the agent issued a valid option-style clarification ' +
+    '(asking "(A)…(B)…" before retrieval). Fails only when the agent answered without grounding.',
+})
+  .preprocess(({ run }) => {
+    const toolCalled = wasToolCalled(run as Record<string, any>, 'groundedResponseTool');
+    const response   = getAssistantMessageFromRunOutput((run as Record<string, any>)?.output) ?? '';
+    const clarifying = isClarificationTurn(response, toolCalled);
+    return { toolCalled, clarifying, response };
+  })
+  .generateScore(({ results }) => {
+    const { toolCalled, clarifying } = results.preprocessStepResult;
+    return toolCalled || clarifying ? 1 : 0;
+  })
+  .generateReason(({ results, score }) => {
+    const { toolCalled, clarifying } = results.preprocessStepResult;
+    if (toolCalled)   return 'groundedResponseTool was called — grounded response.';
+    if (clarifying)   return 'Agent issued a valid option-style clarification — tool call deferred correctly.';
+    return 'groundedResponseTool was not called and no valid clarification was issued.';
+  });
 
 /**
  * Extracts the `answer` field from the most recent groundedResponseTool result
