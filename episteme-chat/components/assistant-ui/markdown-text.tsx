@@ -79,15 +79,24 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
-  h2: ({ className, ...props }) => (
-    <h2
-      className={cn(
-        "aui-md-h2 mt-3 mb-1.5 scroll-m-20 font-semibold text-sm first:mt-0 last:mb-0",
-        className,
-      )}
-      {...props}
-    />
-  ),
+  h2: ({ className, children, ...props }) => {
+    const isSources =
+      typeof children === 'string'
+        ? children.trim() === 'Sources'
+        : Array.isArray(children) && children.length === 1 && children[0] === 'Sources';
+    return (
+      <h2
+        className={cn(
+          "aui-md-h2 mt-3 mb-1.5 scroll-m-20 font-semibold text-sm first:mt-0 last:mb-0",
+          isSources && "mt-5 border-t border-border pt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground",
+          className,
+        )}
+        {...props}
+      >
+        {children}
+      </h2>
+    );
+  },
   h3: ({ className, ...props }) => (
     <h3
       className={cn(
@@ -133,15 +142,30 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
-  a: ({ className, ...props }) => (
-    <a
-      className={cn(
-        "aui-md-a text-primary underline underline-offset-2 hover:text-primary/80",
-        className,
-      )}
-      {...props}
-    />
-  ),
+  a: ({ className, href, children, ...props }) => {
+    // Citation superscript: [N](cite:N) links rendered as inline badge chips
+    if (href?.startsWith('cite:')) {
+      return (
+        <sup className="mx-0.5 inline-flex -translate-y-0.5 cursor-default items-center justify-center rounded bg-primary/10 px-[5px] py-px text-[10px] font-semibold leading-none text-primary ring-1 ring-inset ring-primary/20">
+          {children}
+        </sup>
+      );
+    }
+    return (
+      <a
+        className={cn(
+          "aui-md-a text-primary underline underline-offset-2 hover:text-primary/80",
+          className,
+        )}
+        href={href}
+        target={href?.startsWith('http') ? '_blank' : undefined}
+        rel={href?.startsWith('http') ? 'noopener noreferrer' : undefined}
+        {...props}
+      >
+        {children}
+      </a>
+    );
+  },
    blockquote: ({ className, ...props }) => (
     <blockquote
       className={cn(
