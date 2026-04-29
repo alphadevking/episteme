@@ -41,22 +41,21 @@ function rewriteQuery(
 
 // ── Answer builders ───────────────────────────────────────────────────────────
 
-function buildGroundedAnswer(retrieval: KnowledgeRetrievalResponse & { found: true }): string {
+function buildGroundedContext(retrieval: KnowledgeRetrievalResponse & { found: true }): string {
   const staleWarnings = Array.from(
     new Set(retrieval.results.map((r) => r.staleWarning).filter((w): w is string => Boolean(w)))
   );
 
-  const lines: string[] = [];
-  if (staleWarnings.length > 0) lines.push(...staleWarnings, '');
+  const lines: string[] = ['VERIFIED SOURCES (synthesize your answer exclusively from these):'];
+  if (staleWarnings.length > 0) lines.push('', ...staleWarnings);
 
-  for (const r of retrieval.results) {
-    lines.push(`${r.content} [${r.chunkId}]`);
-    lines.push(`(Source: ${r.source}; Updated: ${r.updatedAt})`);
+  retrieval.results.forEach((r, i) => {
     lines.push('');
-  }
+    lines.push(`[${i + 1}] ${r.content}`);
+    lines.push(`    Citation: [${r.chunkId}] — Source: ${r.source}; Updated: ${r.updatedAt}`);
+  });
 
-  lines.push('Is there anything else I can help you with?');
-  return lines.join('\n').trimEnd();
+  return lines.join('\n');
 }
 
 function buildAbstentionAnswer(): string {
@@ -74,8 +73,9 @@ function buildAbstentionAnswer(): string {
 export const groundedResponseTool = createTool({
   id: 'groundedResponseTool',
   description:
-    'Returns a strictly grounded answer built ONLY from retrieved, role-appropriate verified knowledge chunks. ' +
-    'The output is extractive: it only repeats retrieved content verbatim and attaches chunk citations and sources.',
+    'Retrieves role-appropriate verified knowledge chunks from the institutional knowledge base. ' +
+    'When confidence=high, returns numbered source chunks for the agent to synthesize into a coherent answer. ' +
+    'When confidence=low, returns an abstention message to output verbatim.',
   inputSchema: z.object({
     query: z.string().describe('The user question or topic to retrieve information about.'),
     role: UserRole.describe(
@@ -136,13 +136,14 @@ export const groundedResponseTool = createTool({
     answer: z
       .string()
       .describe(
-        'A grounded, citation-bearing answer. Output this verbatim without modification.'
+        'When confidence=high: verified source chunks to synthesize from — numbered, each with a citation tag and source. ' +
+        'When confidence=low: the abstention message to output verbatim.'
       ),
     confidence: z
       .enum(['high', 'low'])
       .describe(
-        '"high" = answer from verified KB. ' +
-        '"low" = no results found — abstention message only, do not supplement.'
+        '"high" = verified KB chunks returned — synthesize a clear answer from them, preserving all citation tags. ' +
+        '"low" = no results found — output the abstention message exactly, do not supplement.'
       ),
   }),
   execute: async (inputData) => {
@@ -172,7 +173,7 @@ export const groundedResponseTool = createTool({
     // KB found authoritative results
     if (retrieval.found) {
       return {
-        answer: buildGroundedAnswer(retrieval),
+        answer: buildGroundedContext(retrieval),
         confidence: 'high' as const,
       };
     }
