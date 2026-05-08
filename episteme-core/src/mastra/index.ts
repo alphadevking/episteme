@@ -10,6 +10,7 @@ import { groundedToolUsageScorer, faithfulnessScorer } from './scorers/episteme-
 import { epistemeChatAgent } from './agents/episteme-chat-agent';
 import { verificationWorkflow } from './workflows/verification-workflow';
 import { chatRoute } from '@mastra/ai-sdk';
+import { VercelDeployer } from '@mastra/deployer-vercel';
 import {
   listDocumentsHandler,
   ingestDocumentHandler,
@@ -99,6 +100,7 @@ export const mastra = new Mastra({
       },
     },
   }),
+  deployer: new VercelDeployer(),
   server: {
     apiRoutes: [
       chatRoute({ path: '/chat/:agentId' }),
