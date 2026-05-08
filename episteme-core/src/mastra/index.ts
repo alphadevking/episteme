@@ -4,7 +4,6 @@ import { PinoLogger } from '@mastra/loggers';
 import { LibSQLStore, MemoryLibSQL } from '@mastra/libsql';
 import { MastraCompositeStore } from '@mastra/core/storage';
 import { dbClient } from './db';
-import { Observability, DefaultExporter, CloudExporter, SensitiveDataFilter } from '@mastra/observability';
 import { Memory } from '@mastra/memory';
 import { groundedToolUsageScorer, faithfulnessScorer } from './scorers/episteme-scorer';
 import { epistemeChatAgent } from './agents/episteme-chat-agent';
@@ -83,20 +82,6 @@ export const mastra = new Mastra({
         if ('error' in anyObj) anyObj.error = compactError(anyObj.error);
 
         return anyObj;
-      },
-    },
-  }),
-  observability: new Observability({
-    configs: {
-      default: {
-        serviceName: 'mastra',
-        exporters: [
-          new DefaultExporter(), // Persists traces to storage for Mastra Studio
-          new CloudExporter(), // Sends traces to Mastra Cloud (if MASTRA_CLOUD_ACCESS_TOKEN is set)
-        ],
-        spanOutputProcessors: [
-          new SensitiveDataFilter(), // Redacts sensitive data like passwords, tokens, keys
-        ],
       },
     },
   }),
