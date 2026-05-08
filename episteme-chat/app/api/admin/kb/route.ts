@@ -23,7 +23,7 @@ export const maxDuration = 300;
 
 function mastraKbUrl(path = ""): string {
   const base = process.env.MASTRA_BASE_URL ?? "http://localhost:4111";
-  return `${base.replace(/\/$/, "")}/api/kb/documents${path}`;
+  return `${base.replace(/\/$/, "")}/kb/documents${path}`;
 }
 
 function adminKey(): string {

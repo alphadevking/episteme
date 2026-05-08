@@ -11,7 +11,7 @@ async function fetchDocuments(): Promise<KbDocument[]> {
   const adminKey = process.env.MASTRA_ADMIN_KEY ?? "";
 
   try {
-    const res = await fetch(`${base.replace(/\/$/, "")}/api/kb/documents`, {
+    const res = await fetch(`${base.replace(/\/$/, "")}/kb/documents`, {
       headers: { "x-episteme-admin-key": adminKey },
       cache: "no-store",
     });

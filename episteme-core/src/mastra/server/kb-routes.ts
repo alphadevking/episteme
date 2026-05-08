@@ -5,11 +5,11 @@
  * This is a shared secret for server-to-server calls from episteme-chat.
  *
  * Routes:
- *   GET    /api/kb/documents                       — list all ingested documents
- *   POST   /api/kb/documents                       — ingest a new document
- *   DELETE /api/kb/documents/:docId                — delete from Pinecone + registry
- *   POST   /api/kb/documents/:docId/reingest       — re-ingest a text-based document
- *   POST   /api/kb/documents/:docId/freshness      — update freshness timestamp only
+ *   GET    /kb/documents                       — list all ingested documents
+ *   POST   /kb/documents                       — ingest a new document
+ *   DELETE /kb/documents/:docId                — delete from Pinecone + registry
+ *   POST   /kb/documents/:docId/reingest       — re-ingest a text-based document
+ *   POST   /kb/documents/:docId/freshness      — update freshness timestamp only
  */
 import type { Context } from 'hono';
 import { ingestDocument, deleteDocument, GLOBAL_INSTITUTION, type IngestProgressEvent } from '../ingestion/ingest';
@@ -36,7 +36,7 @@ function resolveInstitutionId(c: Context): string | undefined {
   return c.req.header('x-episteme-institution-id') ?? undefined;
 }
 
-// ── GET /api/kb/documents ────────────────────────────────────────────────────
+// ── GET /kb/documents ────────────────────────────────────────────────────
 export async function listDocumentsHandler(c: Context): Promise<Response> {
   if (!isAuthorized(c)) return c.json({ error: 'Unauthorized' }, 401);
   try {
@@ -48,7 +48,7 @@ export async function listDocumentsHandler(c: Context): Promise<Response> {
   }
 }
 
-// ── POST /api/kb/documents ───────────────────────────────────────────────────
+// ── POST /kb/documents ───────────────────────────────────────────────────
 export async function ingestDocumentHandler(c: Context): Promise<Response> {
   if (!isAuthorized(c)) return c.json({ error: 'Unauthorized' }, 401);
 
@@ -212,7 +212,7 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
   });
 }
 
-// ── DELETE /api/kb/documents/:docId ─────────────────────────────────────────
+// ── DELETE /kb/documents/:docId ─────────────────────────────────────────
 export async function deleteDocumentHandler(c: Context): Promise<Response> {
   if (!isAuthorized(c)) return c.json({ error: 'Unauthorized' }, 401);
 
@@ -241,7 +241,7 @@ export async function deleteDocumentHandler(c: Context): Promise<Response> {
   return c.json({ success: true });
 }
 
-// ── POST /api/kb/documents/:docId/reingest ───────────────────────────────────
+// ── POST /kb/documents/:docId/reingest ───────────────────────────────────
 // Accepts an optional body:
 //   { markdownContentOverride?: string, contentHash?: string }
 // When markdownContentOverride is provided (e.g. from the freshness guardian
@@ -344,7 +344,7 @@ export async function reingestDocumentHandler(c: Context): Promise<Response> {
   });
 }
 
-// ── POST /api/kb/documents/:docId/freshness ──────────────────────────────────
+// ── POST /kb/documents/:docId/freshness ──────────────────────────────────
 // Called by the freshness guardian after a no-change check to update
 // last_fetched_at without triggering a full re-ingest.
 export async function updateFreshnessHandler(c: Context): Promise<Response> {

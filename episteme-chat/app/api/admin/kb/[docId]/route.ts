@@ -17,7 +17,7 @@ type Params = { params: Promise<{ docId: string }> };
 
 function mastraKbUrl(docId: string, suffix = ""): string {
   const base = process.env.MASTRA_BASE_URL ?? "http://localhost:4111";
-  return `${base.replace(/\/$/, "")}/api/kb/documents/${encodeURIComponent(docId)}${suffix}`;
+  return `${base.replace(/\/$/, "")}/kb/documents/${encodeURIComponent(docId)}${suffix}`;
 }
 
 function adminKey(): string {

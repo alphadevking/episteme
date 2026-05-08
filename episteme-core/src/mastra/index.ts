@@ -89,11 +89,11 @@ export const mastra = new Mastra({
   server: {
     apiRoutes: [
       chatRoute({ path: '/chat/:agentId' }),
-      { path: '/api/kb/documents',                     method: 'GET',    handler: listDocumentsHandler },
-      { path: '/api/kb/documents',                     method: 'POST',   handler: ingestDocumentHandler },
-      { path: '/api/kb/documents/:docId',              method: 'DELETE', handler: deleteDocumentHandler },
-      { path: '/api/kb/documents/:docId/reingest',     method: 'POST',   handler: reingestDocumentHandler },
-      { path: '/api/kb/documents/:docId/freshness',    method: 'POST',   handler: updateFreshnessHandler },
+      { path: '/kb/documents',                     method: 'GET',    handler: listDocumentsHandler },
+      { path: '/kb/documents',                     method: 'POST',   handler: ingestDocumentHandler },
+      { path: '/kb/documents/:docId',              method: 'DELETE', handler: deleteDocumentHandler },
+      { path: '/kb/documents/:docId/reingest',     method: 'POST',   handler: reingestDocumentHandler },
+      { path: '/kb/documents/:docId/freshness',    method: 'POST',   handler: updateFreshnessHandler },
     ],
   },
 });
