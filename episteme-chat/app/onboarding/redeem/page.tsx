@@ -6,7 +6,7 @@
 // On success, they are redirected to their role-appropriate dashboard.
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { Logo } from "@/components/logo";
@@ -15,7 +15,7 @@ import { Loader2Icon, CheckCircleIcon, XCircleIcon } from "lucide-react";
 
 type State = "loading" | "success" | "error" | "unauthenticated";
 
-export default function RedeemInvitePage() {
+function RedeemInvitePageInner() {
   const router       = useRouter();
   const searchParams = useSearchParams();
   const token        = searchParams.get("token");
@@ -137,5 +137,17 @@ export default function RedeemInvitePage() {
 
       </div>
     </div>
+  );
+}
+
+export default function RedeemInvitePage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-dvh flex items-center justify-center">
+        <Loader2Icon className="size-8 text-primary animate-spin" />
+      </div>
+    }>
+      <RedeemInvitePageInner />
+    </Suspense>
   );
 }
