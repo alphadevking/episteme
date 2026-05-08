@@ -26,8 +26,8 @@ export function ClaimReviewPanel({ claimId }: Props) {
     const { error } = await supabase.rpc("fn_hod_review_claim", {
       p_claim_id:         claimId,
       p_action:           action,
-      p_notes:            notes.trim() || null,
-      p_rejection_reason: action === "reject" ? rejection.trim() : null,
+      p_notes:            notes.trim() || undefined,
+      p_rejection_reason: action === "reject" ? rejection.trim() : undefined,
     });
 
     setSaving(false);

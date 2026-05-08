@@ -66,7 +66,8 @@ export default async function HodClaimsPage({ searchParams }: Props) {
       <FilterBar
         filters={[
           {
-            param:   "status",
+            type:    "select",
+            key:     "status",
             label:   "Status",
             options: STATUS_OPTIONS,
           },

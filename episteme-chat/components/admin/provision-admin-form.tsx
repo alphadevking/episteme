@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import type { Database } from "@/lib/types/database";
 import { ShieldCheckIcon } from "lucide-react";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
@@ -51,7 +52,7 @@ export function ProvisionAdminForm() {
 
     const { error: updateErr } = await supabase
       .from("users")
-      .update({ primary_role: "admin", roles: updatedRoles })
+      .update({ primary_role: "admin", roles: updatedRoles as Database["public"]["Enums"]["user_role"][] })
       .eq("id", target.id);
 
     setSaving(false);

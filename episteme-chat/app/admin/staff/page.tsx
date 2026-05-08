@@ -176,7 +176,7 @@ export default async function StaffPage({ searchParams }: Props) {
           <p className="text-sm text-muted-foreground">No pending invites.</p>
         ) : (
           <div className="divide-y rounded-lg border bg-card overflow-hidden">
-            {(pendingInvites as InviteRow[]).map((inv) => (
+            {(pendingInvites as unknown as InviteRow[]).map((inv) => (
               <div key={inv.id} className="flex items-center justify-between gap-4 px-4 py-3">
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium text-foreground truncate">{inv.email}</p>
@@ -254,7 +254,7 @@ export default async function StaffPage({ searchParams }: Props) {
             </h2>
           </div>
           <div className="divide-y rounded-lg border bg-card overflow-hidden opacity-60">
-            {(expiredInvites as InviteRow[]).map((inv) => (
+            {(expiredInvites as unknown as InviteRow[]).map((inv) => (
               <div key={inv.id} className="flex items-center gap-4 px-4 py-3">
                 <div className="min-w-0 flex-1">
                   <p className="text-sm text-foreground truncate">{inv.email}</p>

@@ -2,6 +2,7 @@
 "use client";
 
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import type { Database } from "@/lib/types/database";
 import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
 
@@ -201,7 +202,7 @@ export function useOnboarding({
           .update({
             institution_id: merged.institutionId,
             primary_role: merged.role,
-            roles: mergedRoles,
+            roles: mergedRoles as Database["public"]["Enums"]["user_role"][],
             first_name: merged.firstName,
             last_name: merged.lastName ?? null,
             phone: merged.phone ?? null,

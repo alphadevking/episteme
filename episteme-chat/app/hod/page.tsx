@@ -28,7 +28,7 @@ export default async function HodOverviewPage() {
 
   const [
     { data: programs },
-    { data: students },
+    { count: studentsCount },
     { count: pendingCount },
     { count: inReviewCount },
     { count: urgentCount },
@@ -74,7 +74,7 @@ export default async function HodOverviewPage() {
     },
     {
       label: "Verified Students",
-      value: students ?? 0,
+      value: studentsCount ?? 0,
       icon: UsersIcon,
       color: "bg-info-bg text-info",
     },

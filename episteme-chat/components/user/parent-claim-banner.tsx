@@ -121,7 +121,7 @@ export function ParentClaimBanner() {
             className="h-7 text-xs"
             autoFocus
           />
-          <Button size="sm" className="h-7 text-xs px-2" onClick={handleUpdate} disabled={view === "saving"}>
+          <Button size="sm" className="h-7 text-xs px-2" onClick={handleUpdate} disabled={(view as View) === "saving"}>
             Save
           </Button>
           <Button size="sm" variant="ghost" className="h-7 text-xs px-2" onClick={() => setView("idle")}>
@@ -143,7 +143,7 @@ export function ParentClaimBanner() {
             size="sm" variant="ghost"
             className="h-6 text-[11px] px-2 text-destructive hover:text-destructive"
             onClick={handleCancel}
-            disabled={view === "cancelling"}
+            disabled={(view as View) === "cancelling"}
           >
             <XCircleIcon className="size-3" />
           </Button>

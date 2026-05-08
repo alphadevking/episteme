@@ -4,6 +4,7 @@
 
 import { Button } from "@/components/ui/button";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import type { Database } from "@/lib/types/database";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -31,7 +32,7 @@ export function UserActions({ userId, currentStatus, currentRole }: Props) {
     setSaving(true);
     const { error: e } = await supabase
       .from("users")
-      .update({ status })
+      .update({ status: status as Database["public"]["Enums"]["account_status"] })
       .eq("auth_id", userId);
     setSaving(false);
     if (e) { setError(e.message); return; }
@@ -42,7 +43,7 @@ export function UserActions({ userId, currentStatus, currentRole }: Props) {
     setSaving(true);
     const { error: e } = await supabase
       .from("users")
-      .update({ primary_role: role, roles: [role] })
+      .update({ primary_role: role as Database["public"]["Enums"]["user_role"], roles: [role] as Database["public"]["Enums"]["user_role"][] })
       .eq("auth_id", userId);
     setSaving(false);
     if (e) { setError(e.message); return; }

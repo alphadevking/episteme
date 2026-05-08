@@ -21,7 +21,7 @@ export function ClaimReopenButton({ claimId }: Props) {
     setSaving(true);
     const { error } = await supabase.rpc("fn_admin_reopen_claim", {
       p_claim_id: claimId,
-      p_notes:    null,
+      p_notes:    undefined,
     });
     setSaving(false);
     if (error) { toast.error(error.message); return; }

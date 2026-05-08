@@ -40,7 +40,7 @@ export default function RedeemInvitePage() {
         return;
       }
 
-      const { data, error } = await supabase.rpc("fn_redeem_invite_token", {
+      const { data, error } = await (supabase as any).rpc("fn_redeem_invite_token", {
         p_token: token,
       });
 

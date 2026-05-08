@@ -13,6 +13,7 @@ import type {
   MessageStorageEntry,
 } from "@assistant-ui/react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import type { Json } from "@/lib/types/database";
 
 export function useSupabaseHistoryAdapter(): ThreadHistoryAdapter {
   // Stabilize the client — createSupabaseBrowserClient() returns a new object
@@ -108,7 +109,7 @@ export function useSupabaseHistoryAdapter(): ThreadHistoryAdapter {
                   format:         formatAdapter.format,
                   role:           msg.role ?? "unknown",
                   content:        plainText,
-                  content_json:   encoded,
+                  content_json:   encoded as unknown as Json,
                   metadata:       {},
                 },
                 { onConflict: "thread_id,sdk_message_id" },

@@ -83,8 +83,8 @@ export async function GET(req: Request, { params }: Params) {
       .select(`
         id, claim_type, status, is_urgent, created_at, reviewed_at,
         review_notes, rejection_reason, user_id,
-        department:department_id(name),
-        reviewer:reviewer_id(first_name, last_name)
+        department:verification_claims_department_id_fkey(name),
+        reviewer:users!reviewer_id(first_name, last_name)
       `)
       .eq("id", id)
       .eq("user_id", serviceUserId)   // ownership enforced in query (service role bypasses RLS)
@@ -107,8 +107,8 @@ export async function GET(req: Request, { params }: Params) {
     .select(`
       id, claim_type, status, is_urgent, created_at, reviewed_at,
       review_notes, rejection_reason,
-      department:department_id(name),
-      reviewer:reviewer_id(first_name, last_name)
+      department:verification_claims_department_id_fkey(name),
+      reviewer:users!reviewer_id(first_name, last_name)
     `)
     .eq("id", id)
     .maybeSingle();

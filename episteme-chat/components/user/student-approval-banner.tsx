@@ -26,7 +26,7 @@ export function StudentApprovalBanner() {
   useEffect(() => {
     supabase
       .from("parent_student_links")
-      .select("id, relationship_type, parent:parent_user_id(first_name, last_name, email)")
+      .select("id, relationship_type, parent:users!parent_user_id(first_name, last_name, email)")
       .eq("verification_status", "awaiting_student_approval")
       .then(({ data }) => setLinks((data as PendingLink[]) ?? []));
   }, [supabase]);
