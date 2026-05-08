@@ -3,7 +3,7 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { type UIMessage } from "ai";
 import { NextResponse } from "next/server";
 
-type Params = { params: { threadId: string } };
+type Params = { params: Promise<{ threads: string }> };
 
 // Load messages for a thread
 export async function GET(_req: Request, { params }: Params) {
@@ -11,7 +11,7 @@ export async function GET(_req: Request, { params }: Params) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { threadId } = params;
+  const { threads: threadId } = await params;
 
   const { data, error } = await supabase
     .from("thread_messages")
@@ -42,7 +42,7 @@ export async function POST(req: Request, { params }: Params) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { threadId } = params;
+  const { threads: threadId } = await params;
   const messages: UIMessage[] = await req.json();
 
   const rows = messages.map((m) => ({
