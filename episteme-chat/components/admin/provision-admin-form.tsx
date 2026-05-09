@@ -48,7 +48,7 @@ export function ProvisionAdminForm() {
 
     const updatedRoles = Array.from(
       new Set([...(target.roles ?? []), "admin"]),
-    );
+    ).filter((r) => r !== "prospective");
 
     const { error: updateErr } = await supabase
       .from("users")

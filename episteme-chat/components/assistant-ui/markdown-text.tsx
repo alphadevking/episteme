@@ -13,17 +13,22 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
 
-const MarkdownTextImpl = () => {
+type MarkdownTextProps = {
+  preprocess?: (text: string) => string;
+};
+
+const MarkdownTextImpl = ({ preprocess }: MarkdownTextProps) => {
   return (
     <MarkdownTextPrimitive
       remarkPlugins={[remarkGfm]}
       className="aui-md"
       components={defaultComponents}
+      preprocess={preprocess}
     />
   );
 };
 
-export const MarkdownText = memo(MarkdownTextImpl);
+export const MarkdownText = memo(MarkdownTextImpl) as FC<MarkdownTextProps>;
 
 const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   const { isCopied, copyToClipboard } = useCopyToClipboard();

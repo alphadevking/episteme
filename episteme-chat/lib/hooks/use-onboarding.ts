@@ -194,7 +194,7 @@ export function useOnboarding({
         const existingRoles = (currentUser?.roles ?? []) as string[];
         const mergedRoles = Array.from(
           new Set([...existingRoles, merged.role]),
-        );
+        ).filter((r) => r !== "prospective");
 
         // 2. Activate the user account
         const { error: userErr } = await supabase

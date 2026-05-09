@@ -39,7 +39,7 @@ import {
   ArrowUpIcon,
   Sparkles,
 } from "lucide-react";
-import { type FC, useSyncExternalStore } from "react";
+import { type FC, useSyncExternalStore, Fragment } from "react";
 import { useUser } from "@/lib/hooks/use-user";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import type { Suggestion } from "@/lib/suggestions";
@@ -464,6 +464,39 @@ function parseClarificationOptions(text: string): { label: string; full: string 
   return results;
 }
 
+// Strips the "(A) ... (B) ... (C) ..." options from the text, leaving only the leading question.
+// Applied as a preprocess to MarkdownText so options only appear in the pills, not twice.
+function stripClarificationOptionsFromText(text: string): string {
+  if (parseClarificationOptions(text).length < 2) return text;
+  const idx = text.search(/\([A-C]\)\s/);
+  return idx > 0 ? text.slice(0, idx).trimEnd() : text;
+}
+
+const AssistantText: FC = () => (
+  <MarkdownText preprocess={stripClarificationOptionsFromText} />
+);
+
+// Renders inline bold/italic markdown (e.g. **text**, *text*) as React elements.
+function InlineMarkdown({ text }: { text: string }) {
+  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
+  return (
+    <>
+      {parts.map((part, i) => {
+        if (part.startsWith("**") && part.endsWith("**"))
+          return <strong key={i}>{part.slice(2, -2)}</strong>;
+        if (part.startsWith("*") && part.endsWith("*"))
+          return <em key={i}>{part.slice(1, -1)}</em>;
+        return <Fragment key={i}>{part}</Fragment>;
+      })}
+    </>
+  );
+}
+
+// Strips markdown syntax from text for use in plain-text contexts (e.g. sent user messages).
+function stripInlineMarkdown(text: string): string {
+  return text.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/\*([^*]+)\*/g, "$1");
+}
+
 const ClarificationOptions: FC = () => {
   const runtime = useThreadRuntime();
 
@@ -496,28 +529,28 @@ const ClarificationOptions: FC = () => {
   const handleSelect = (full: string) => {
     runtime.append({
       role: "user",
-      content: [{ type: "text", text: full }],
+      content: [{ type: "text", text: stripInlineMarkdown(full) }],
     });
   };
 
   return (
-    <div className="mt-3 flex flex-wrap gap-2">
+    <div className="mt-3 flex flex-col gap-2">
       {options.map(({ label, full }) => (
         <button
           key={label}
           type="button"
           onClick={() => handleSelect(full)}
           className={cn(
-            "flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/5",
-            "px-3.5 py-1.5 text-sm font-medium text-primary",
-            "transition-colors hover:border-primary/60 hover:bg-primary/10",
+            "flex items-center gap-2.5 rounded-xl border border-border",
+            "bg-card px-4 py-2.5 text-left text-sm text-foreground",
+            "transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-primary",
             "fade-in animate-in duration-150",
           )}
         >
-          <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[10px] font-semibold leading-none">
+          <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[11px] font-bold leading-none text-muted-foreground">
             {label}
           </span>
-          {full}
+          <span className="font-medium"><InlineMarkdown text={full} /></span>
         </button>
       ))}
     </div>
@@ -534,10 +567,10 @@ const AssistantMessage: FC = () => {
     >
       <AssistantAvatar />
       <div className="flex-1 min-w-0">
-        <div className="aui-assistant-message-content wrap-break-word pr-2 text-foreground leading-relaxed">
+        <div className="aui-assistant-message-content wrap-break-word pr-2 text-foreground leading-relaxed space-y-2">
           <MessagePrimitive.Parts
             components={{
-              Text: MarkdownText,
+              Text: AssistantText,
               Reasoning,
               ReasoningGroup,
               tools: {

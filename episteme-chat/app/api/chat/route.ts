@@ -44,6 +44,29 @@ const DATA_TIER: Record<number, string> = {
   4: "full-access(verified)",
 };
 
+// Higher number = more privilege. "prospective" is a default state, not an elevated role.
+const ROLE_PRIORITY: Record<string, number> = {
+  superadmin: 7,
+  admin:      6,
+  hod:        5,
+  staff:      4,
+  student:    3,
+  parent:     2,
+  guardian:   2,
+  prospective: 1,
+};
+
+// Returns the most privileged role from primary_role + roles array,
+// ignoring "prospective" when any elevated role is present.
+function resolveEffectiveRole(primaryRole: string, roles: string[]): string {
+  const candidates = [primaryRole, ...roles].filter(Boolean);
+  const elevated   = candidates.filter((r) => r !== "prospective");
+  const pool       = elevated.length > 0 ? elevated : candidates;
+  return pool.reduce((best, r) =>
+    (ROLE_PRIORITY[r] ?? 0) > (ROLE_PRIORITY[best] ?? 0) ? r : best,
+  );
+}
+
 export async function POST(req: Request) {
   const supabase = await createSupabaseServerClientReadOnly();
   const { data: { user } } = await supabase.auth.getUser();
@@ -78,8 +101,9 @@ export async function POST(req: Request) {
       return Response.json({ error: "Account is not active." }, { status: 403 });
     }
 
-    role = profile?.primary_role ?? role;
-    const roles: string[] = (profile?.roles as string[]) ?? [];
+    const rawRoles: string[] = (profile?.roles as string[]) ?? [];
+    role = resolveEffectiveRole(profile?.primary_role ?? role, rawRoles);
+    const roles = rawRoles;
     const isParent = role === "parent" || role === "guardian"
       || roles.includes("parent") || roles.includes("guardian");
 
