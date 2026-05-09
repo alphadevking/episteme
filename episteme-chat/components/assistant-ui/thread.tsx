@@ -71,24 +71,67 @@ const UserAvatar: FC = () => {
   );
 };
 
-// ── Thinking indicator (shown between user send and first streaming token) ─
-
+// ── Thinking indicator ────────────────────────────────────────────────────
+// ThinkingDots: standalone row shown between user send and the moment the
+// assistant message shell is created (Phase 1, typically <100 ms).
 const ThinkingDots: FC = () => (
   <div className="mx-auto flex w-full max-w-(--thread-max-width) items-start gap-4 py-4">
-    <div className="flex size-8 shrink-0 items-center justify-center rounded-full border border-primary/20 bg-gradient-to-br from-primary/15 to-primary/5 text-primary shadow-sm shadow-primary/10">
-      <Bot className="size-4" />
+    <AssistantAvatar />
+    <div className="mt-1.5">
+      <ThinkingBubble />
     </div>
-    <div className="flex items-center gap-1.5 pt-2.5">
+  </div>
+);
+
+// ThinkingBubble: chat-bubble-pulse shape — speech bubble with bouncing dots.
+// border-radius: top-left top-right bottom-right bottom-left
+// The small bottom-left radius creates the speech-bubble tail pointing at the avatar.
+const ThinkingBubble: FC = () => (
+  <div
+    className="relative bg-muted shadow-sm"
+    style={{
+      width: 54,
+      height: 32,
+      borderRadius: "14px 14px 14px 4px",
+      animation: "bubble-scale 1.5s ease-in-out infinite",
+    }}
+  >
+    <div className="absolute inset-0 flex items-center justify-center gap-[5px]">
       {[0, 1, 2].map((i) => (
         <span
           key={i}
-          className="size-2 rounded-full bg-primary/50 animate-bounce"
-          style={{ animationDelay: `${i * 180}ms`, animationDuration: "900ms" }}
+          className="size-[6px] rounded-full bg-muted-foreground/70"
+          style={{ animation: `thinking-bounce 1.2s ease-in-out ${i * 150}ms infinite` }}
         />
       ))}
     </div>
   </div>
 );
+
+// AssistantMessageThinking: rendered INSIDE AssistantMessage while the thread
+// is running and this message has no text content yet (Phase 2 — shell created,
+// first token not yet received). Hides the moment text starts streaming.
+const AssistantMessageThinking: FC = () => {
+  const runtime   = useThreadRuntime();
+  const messageId = useAuiState((s) => s.message.id);
+
+  const show = useSyncExternalStore(
+    runtime.subscribe,
+    () => {
+      const { isRunning, messages } = runtime.getState();
+      if (!isRunning) return false;
+      const last = messages[messages.length - 1];
+      if (!last || last.id !== messageId) return false;
+      return !last.content.some(
+        (p) => p.type === "text" && (p as { type: "text"; text: string }).text.length > 0,
+      );
+    },
+    () => false,
+  );
+
+  if (!show) return null;
+  return <ThinkingBubble />;
+};
 
 // ── Thread root ───────────────────────────────────────────────────────────
 
@@ -131,7 +174,7 @@ export const Thread: FC<ThreadProps> = ({ suggestions, initialMessage, threadId 
         <AuiIf condition={(s) => {
           if (!s.thread.isRunning) return false;
           const msgs = s.thread.messages;
-          if (!msgs.length) return false;
+          if (!msgs.length) return true;
           return msgs[msgs.length - 1]?.role === "user";
         }}>
           <ThinkingDots />
@@ -502,6 +545,7 @@ const AssistantMessage: FC = () => {
               },
             }}
           />
+          <AssistantMessageThinking />
           <ClarificationOptions />
           <MessageError />
         </div>

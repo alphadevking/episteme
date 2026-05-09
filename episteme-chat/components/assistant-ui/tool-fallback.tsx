@@ -274,6 +274,9 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   result,
   status,
 }) => {
+  // While the tool is running the ThinkingDots bubble handles the loading state.
+  if (status?.type === "running") return null;
+
   const isCancelled =
     status?.type === "incomplete" && status.reason === "cancelled";
 

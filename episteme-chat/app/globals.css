@@ -71,6 +71,22 @@
   }
 }
 
+@keyframes thinking-bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  30% {
+    transform: translateY(-5px);
+    opacity: 1;
+  }
+}
+
+@keyframes bubble-scale {
+  0%, 100% { transform: scale(1); }
+  50%       { transform: scale(1.05); }
+}
+
 :root {
   --radius: 4px;
   /* Exact Stitch Radius */
@@ -255,4 +271,29 @@
 
 .dark [data-sonner-toast] {
   box-shadow: 0 2px 16px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3) !important;
+}
+
+/* ── Streaming cursor — replaces @assistant-ui dot.css ───────────────────────
+   Targets the same data-status="running" hook the library uses, but with the
+   brand primary colour and a clean blink instead of the default slow pulse.
+   ──────────────────────────────────────────────────────────────────────── */
+@keyframes episteme-cursor {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+.aui-md[data-status="running"] > :not(ol):not(ul):not(pre):last-child::after,
+.aui-md[data-status="running"] > pre:last-child code::after,
+.aui-md[data-status="running"] > :is(ol, ul):last-child > li:last-child:not(:has(* > li))::after,
+.aui-md[data-status="running"] > :is(ol, ul):last-child > li:last-child > :is(ol, ul):last-child > li:last-child:not(:has(* > li))::after,
+.aui-md[data-status="running"] > :is(ol, ul):last-child > li:last-child > :is(ol, ul):last-child > li:last-child > :is(ol, ul):last-child > li:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  background-color: var(--primary);
+  border-radius: 1px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: episteme-cursor 0.8s step-start infinite;
 }
