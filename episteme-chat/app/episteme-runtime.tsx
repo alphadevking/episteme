@@ -13,7 +13,7 @@ import { useAISDKRuntime, AssistantChatTransport } from "@assistant-ui/react-ai-
 import { useChat } from "@ai-sdk/react";
 import { lastAssistantMessageIsCompleteWithToolCalls } from "ai";
 import type { FC, ReactNode } from "react";
-import { useMemo, useEffect, Fragment } from "react";
+import { useMemo, useCallback, useEffect, Fragment } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { SupabaseThreadListAdapter } from "@/lib/runtime/supabase-thread-list-adapter";
 import { useSupabaseHistoryAdapter } from "@/lib/runtime/use-supabase-history-adapter";
@@ -106,48 +106,48 @@ export const EpistemeRuntimeProvider: FC<Props> = ({ children }) => {
     // cross-context issue (two @assistant-ui/core instances resolved by pnpm).
     runtimeHook: function ChatRuntimeHook() {
       const historyAdapter = useSupabaseHistoryAdapter();
-      const chat = useChat({
-        transport:             new AssistantChatTransport({ api: "/api/chat" }),
-        sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
-        onError: (error) => {
-          // Classify the error so the user gets an actionable message, not a crash.
-          // The chat route returns structured status codes:
-          //   503 — Mastra backend unreachable (service down / cold start)
-          //   429 — Rate limited
-          //   401 — Session expired
-          //   5xx — Upstream LLM or backend error
-          const status = (error as { status?: number }).status
-            ?? ((error as { cause?: { status?: number } }).cause?.status);
+      // Memoize transport — creating a new object every render causes useChat to
+      // reinitialize, which fires thread.initialize and scrolls to bottom mid-conversation.
+      const transport = useMemo(() => new AssistantChatTransport({ api: "/api/chat" }), []);
+      const onError = useCallback((error: Error) => {
+        const status = (error as { status?: number }).status
+          ?? ((error as { cause?: { status?: number } }).cause?.status);
 
-          if (status === 503) {
-            toast.error("Assistant unavailable", {
-              description: "The AI service is temporarily unreachable. Please try again in a moment.",
-              duration: 8000,
-            });
-          } else if (status === 429) {
-            toast.error("Too many requests", {
-              description: "You've sent messages too quickly. Please wait a moment before continuing.",
-              duration: 6000,
-            });
-          } else if (status === 401) {
-            toast.error("Session expired", {
-              description: "Your session has expired. Please refresh the page to continue.",
-              duration: 0, // persistent — requires action
-              action: { label: "Refresh", onClick: () => window.location.reload() },
-            });
-          } else if (status && status >= 500) {
-            toast.error("Something went wrong", {
-              description: "The assistant encountered an error. Your conversation is safe — please try again.",
-              duration: 6000,
-            });
-          } else {
-            toast.error("Connection issue", {
-              description: "Couldn't reach the assistant. Please check your connection and try again.",
-              duration: 6000,
-            });
-          }
-        },
+        if (status === 503) {
+          toast.error("Assistant unavailable", {
+            description: "The AI service is temporarily unreachable. Please try again in a moment.",
+            duration: 8000,
+          });
+        } else if (status === 429) {
+          toast.error("Too many requests", {
+            description: "You've sent messages too quickly. Please wait a moment before continuing.",
+            duration: 6000,
+          });
+        } else if (status === 401) {
+          toast.error("Session expired", {
+            description: "Your session has expired. Please refresh the page to continue.",
+            duration: 0,
+            action: { label: "Refresh", onClick: () => window.location.reload() },
+          });
+        } else if (status && status >= 500) {
+          toast.error("Something went wrong", {
+            description: "The assistant encountered an error. Your conversation is safe — please try again.",
+            duration: 6000,
+          });
+        } else {
+          toast.error("Connection issue", {
+            description: "Couldn't reach the assistant. Please check your connection and try again.",
+            duration: 6000,
+          });
+        }
+      }, []);
+
+      const chat = useChat({
+        transport,
+        sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
+        onError,
       });
+
       return useAISDKRuntime(chat, { adapters: { history: historyAdapter as never } });
     },
   });

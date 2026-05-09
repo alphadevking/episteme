@@ -153,6 +153,7 @@ export const Thread: FC<ThreadProps> = ({ suggestions, initialMessage, threadId 
     >
       <ThreadPrimitive.Viewport
         turnAnchor="top"
+        scrollToBottomOnRunStart={false}
         className="aui-thread-viewport relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth px-4 pt-4"
       >
         <AuiIf condition={(s) => s.thread.isEmpty}>
@@ -197,9 +198,9 @@ const ThreadScrollToBottom: FC = () => {
       <TooltipIconButton
         tooltip="Scroll to bottom"
         variant="outline"
-        className="aui-thread-scroll-to-bottom absolute -top-12 z-10 self-center rounded-full p-4 disabled:invisible dark:border-border dark:bg-background dark:hover:bg-accent"
+        className="aui-thread-scroll-to-bottom absolute -top-14 left-1/2 -translate-x-1/2 z-10 rounded-full p-4 shadow-lg disabled:invisible border border-border/60 bg-background/60 backdrop-blur-md hover:bg-accent/60 transition-all duration-200 cursor-pointer"
       >
-        <ArrowDownIcon />
+        <ArrowDownIcon className="size-4" />
       </TooltipIconButton>
     </ThreadPrimitive.ScrollToBottom>
   );
