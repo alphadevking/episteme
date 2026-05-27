@@ -99,7 +99,7 @@ export const EpistemeRuntimeProvider: FC<Props> = ({ children }) => {
       delete:          threadAdapter.delete.bind(threadAdapter),
       generateTitle:   threadAdapter.generateTitle.bind(threadAdapter),
       unstable_Provider: Fragment,
-    } as never,
+    } as unknown as Parameters<typeof useRemoteThreadListRuntime>[0]["adapter"],
 
     // runtimeHook: runs per-thread inside ThreadListItemRuntimeProvider context.
     // History adapter passed directly here — avoids the broken RuntimeAdapterProvider
@@ -148,7 +148,7 @@ export const EpistemeRuntimeProvider: FC<Props> = ({ children }) => {
         onError,
       });
 
-      return useAISDKRuntime(chat, { adapters: { history: historyAdapter as never } });
+      return useAISDKRuntime(chat, { adapters: { history: historyAdapter as unknown as NonNullable<NonNullable<Parameters<typeof useAISDKRuntime>[1]>["adapters"]>["history"] } });
     },
   });
 

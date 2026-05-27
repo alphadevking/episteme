@@ -40,9 +40,18 @@ function RedeemInvitePageInner() {
         return;
       }
 
-      const { data, error } = await (supabase as any).rpc("fn_redeem_invite_token", {
-        p_token: token,
-      });
+      type RedeemResult = { role: string; department_id: string | null };
+      type RedeemRpc = {
+        rpc(
+          fn: "fn_redeem_invite_token",
+          args: { p_token: string },
+        ): Promise<{ data: RedeemResult | null; error: { code: string; message: string } | null }>;
+      };
+
+      const { data, error } = await (supabase as unknown as RedeemRpc).rpc(
+        "fn_redeem_invite_token",
+        { p_token: token },
+      );
 
       if (error) {
         setState("error");
@@ -56,7 +65,13 @@ function RedeemInvitePageInner() {
         return;
       }
 
-      const result = data as { role: string; department_id: string | null };
+      if (!data) {
+        setState("error");
+        setMessage("Unexpected response from server.");
+        return;
+      }
+
+      const result = data;
       setRole(result.role);
       setState("success");
 
