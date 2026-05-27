@@ -12,13 +12,15 @@ import { getAssistantMessageFromRunOutput } from '@mastra/evals/scorers/utils';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function wasToolCalled(run: Record<string, any>, toolName: string): boolean {
+type RunMessage = Record<string, unknown>;
+
+function wasToolCalled(run: Record<string, unknown>, toolName: string): boolean {
   const output = run?.output;
   if (!output) return false;
-  const messages: any[] = Array.isArray(output) ? output : (output?.messages ?? []);
+  const messages: RunMessage[] = Array.isArray(output) ? output : ((output as Record<string, unknown>)?.messages as RunMessage[] ?? []);
   return messages.some((msg) => {
-    const calls: any[] = msg?.toolInvocations ?? msg?.toolCalls ?? [];
-    return calls.some((c) => c?.toolName === toolName || c?.function?.name === toolName);
+    const calls: RunMessage[] = (msg?.toolInvocations ?? msg?.toolCalls ?? []) as RunMessage[];
+    return calls.some((c) => c?.toolName === toolName || (c?.function as Record<string, unknown>)?.name === toolName);
   });
 }
 
@@ -49,7 +51,7 @@ export const groundedToolUsageScorer = createScorer({
     const { toolCalled, clarifying } = results.preprocessStepResult;
     return toolCalled || clarifying ? 1 : 0;
   })
-  .generateReason(({ results, score }) => {
+  .generateReason(({ results }) => {
     const { toolCalled, clarifying } = results.preprocessStepResult;
     if (toolCalled)   return 'groundedResponseTool was called — grounded response.';
     if (clarifying)   return 'Agent issued a valid option-style clarification — tool call deferred correctly.';

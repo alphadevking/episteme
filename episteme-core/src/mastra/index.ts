@@ -69,8 +69,8 @@ export const mastra = new Mastra({
         const anyObj = object as Record<string, unknown>;
         const compactError = (value: unknown) => {
           if (!(value instanceof Error)) return value;
-          const e = value as Error & { code?: unknown; cause?: unknown };
-          const code = (e as any)?.code ?? (e as any)?.cause?.code;
+          const e = value as Error & { code?: unknown; cause?: Record<string, unknown> };
+          const code = e.code ?? e.cause?.code;
           return {
             name: e.name,
             message: e.message,
