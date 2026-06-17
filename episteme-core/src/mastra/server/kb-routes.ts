@@ -1,3 +1,4 @@
+// episteme-core/src/mastra/server/kb-routes.ts
 /**
  * Knowledge Base admin API routes — mounted on the Mastra server as Hono handlers.
  *

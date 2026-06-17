@@ -1,3 +1,4 @@
+// episteme-core/src/mastra/config.ts
 /**
  * Centralised runtime configuration for Episteme.
  * All tunable constants are read from environment variables at startup.
@@ -111,4 +112,12 @@ export const WEB_SEARCH_CONFIG = {
   searchDepth: envString('WEB_SEARCH_DEPTH', 'advanced') as 'basic' | 'advanced',
   /** Score threshold — Tavily scores range 0.0–1.0 */
   scoreThreshold: envFloat('WEB_SEARCH_SCORE_THRESHOLD', 0.5),
+} as const;
+
+// ---------------------------------------------------------------------------
+// UNIBEN Live News — WP REST API fetch settings
+// ---------------------------------------------------------------------------
+export const UNIBEN_NEWS_CONFIG = {
+  maxResults: envInt('UNIBEN_NEWS_MAX_RESULTS', 5),
+  timeoutMs:  envInt('UNIBEN_NEWS_TIMEOUT_MS', 8000),
 } as const;

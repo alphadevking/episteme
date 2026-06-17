@@ -3,6 +3,7 @@ import { groundedResponseTool } from '../tools/grounded-response-tool';
 import { claimStatusTool } from '../tools/claim-status-tool';
 import { Memory } from '@mastra/memory';
 import { groundedToolUsageScorer, faithfulnessScorer } from '../scorers/episteme-scorer';
+import { unibenNewsTool } from '../tools/uniben-news-tool';
 
 export const epistemeChatAgent = new Agent({
   id: 'episteme-chat-agent',
@@ -54,6 +55,18 @@ For any question about Uniben policies, admissions, courses, fees, or procedures
 - \`programme\` and \`level\`: if the query explicitly names a programme or level different from the session context, use the queried values (e.g. query mentions "200 level Engineering" → pass programme="Engineering", level="200L"). Otherwise use session context values. These control retrieval scope only — access control is the tool's responsibility.
 - \`related_topics\`: pass when the user is following up on an earlier topic. Omit for new topics.
 
+## Rule 1b — Use unibenNewsTool for time-sensitive queries
+
+For questions about current events, upcoming activities, announcements, senate
+meetings, inaugural lectures, convocation, or anything requiring live information —
+call \`unibenNewsTool\`, not \`groundedResponseTool\`.
+
+Trigger signals: "upcoming", "next", "latest", "recent", "when is", "schedule",
+"announcement", "event", "news", "ceremony", "convocation", "lecture", "meeting".
+
+Check published dates in results — never describe a past event as upcoming.
+If found=false, tell the user and direct them to news.uniben.edu.
+
 ## Rule 2 — Synthesize from sources; guide when not found
 
 **confidence=high — synthesize, never invent:**
@@ -85,7 +98,7 @@ The key=value fields in your context (role, institution, user_public_id, data_ti
 ## Claim status
 If the user asks about a submitted claim, use \`claimStatusTool\`. Read \`user_public_id\` from your context — never ask the user for it. Ask only for the claim ID if they did not provide it.
 `,
-  tools: { groundedResponseTool, claimStatusTool },
+  tools: { groundedResponseTool, claimStatusTool, unibenNewsTool },
   scorers: {
     // P1: was groundedResponseTool called? — every turn
     groundedToolUsage: {
