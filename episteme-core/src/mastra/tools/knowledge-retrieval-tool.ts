@@ -4,6 +4,7 @@ import { Pinecone } from '@pinecone-database/pinecone';
 import { embedTexts, buildSparseVector } from '../ingestion/embedder';
 import { RETRIEVAL_CONFIG } from '../config';
 import { GLOBAL_INSTITUTION } from '../ingestion/ingest';
+import { getSessionContext } from '../server/session-context';
 
 declare const process: { env: Record<string, string | undefined> };
 
@@ -213,13 +214,12 @@ export const knowledgeRetrievalTool = createTool({
   description:
     'Low-level knowledge base search for the University of Benin (Uniben). ' +
     'Covers policies, admissions, academic regulations, financial aid, programmes, announcements, and general information. ' +
+    'The caller\'s role, trust level, institution, and namespace allowlist are attached server-side ' +
+    'from the authenticated session — they are not parameters and cannot be chosen. ' +
     'For agent use, prefer groundedResponseTool which wraps this with query rewriting, relevance gating, and grounded context formatting. ' +
     'Use this tool directly only when raw retrieval results are needed without synthesis.',
   inputSchema: z.object({
     query: z.string().describe('The user question or topic to retrieve information about.'),
-    role: UserRole.describe(
-      'The authenticated role of the user. Defaults to prospective student if unknown.'
-    ),
     programme: z
       .string()
       .optional()
@@ -231,48 +231,24 @@ export const knowledgeRetrievalTool = createTool({
         'Optional academic level scope e.g. "300L", "MSc". ' +
         'Read from system context field level=<value>. Omit if unknown.'
       ),
-    trust_level: z
-      .number()
-      .int()
-      .min(1)
-      .max(4)
-      .optional()
-      .describe('Trust level (1–4) from session context. Hard-gates namespace access.'),
-    institution_id: z
-      .string()
-      .optional()
-      .describe(
-        'Institution UUID from session context. ' +
-        'Scopes retrieval to this institution\'s documents plus globally shared ones. ' +
-        'Read from system context field institution_id=<value>. Omit only if not available.'
-      ),
-    namespace_allowlist: z
-      .array(z.string())
-      .optional()
-      .describe(
-        'Explicit namespace allowlist for parent users. ' +
-        'Computed server-side from parent_student_links permissions. ' +
-        'Pass from the system prompt field parent_namespace_allowlist (comma-separated).'
-      ),
   }),
-  execute: async (inputData) => {
-    const { query, role, programme, level, trust_level, institution_id, namespace_allowlist } = inputData as {
+  execute: async (inputData, context) => {
+    const { query, programme, level } = inputData as {
       query: string;
-      role: z.infer<typeof UserRole>;
       programme?: string;
       level?: string;
-      trust_level?: number;
-      institution_id?: string;
-      namespace_allowlist?: string[];
     };
+    // Security-critical values come ONLY from the server-injected session
+    // context (chat-security middleware) — never from model-controlled input.
+    const session = getSessionContext(context?.requestContext);
     return await retrieveKnowledge({
       query,
-      role,
+      role:               session.role,
       programme,
       level,
-      trustLevel:         trust_level,
-      institutionId:      institution_id,
-      namespaceAllowlist: namespace_allowlist,
+      trustLevel:         session.trustLevel,
+      institutionId:      session.institutionId,
+      namespaceAllowlist: session.namespaceAllowlist,
     });
   },
 });

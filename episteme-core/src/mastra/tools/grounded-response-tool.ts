@@ -5,10 +5,7 @@ import {
   type KnowledgeRetrievalResponse,
 } from './knowledge-retrieval-tool';
 import { RETRIEVAL_CONFIG } from '../config';
-
-const UserRole = z
-  .enum(['prospective', 'student', 'parent', 'staff', 'hod'])
-  .default('prospective');
+import { getSessionContext } from '../server/session-context';
 
 // ── Query rewriting ───────────────────────────────────────────────────────────
 // Prepends available session context to the user's query before embedding.
@@ -104,13 +101,12 @@ export const groundedResponseTool = createTool({
   id: 'groundedResponseTool',
   description:
     'Retrieves role-appropriate verified knowledge chunks from the institutional knowledge base. ' +
+    'The caller\'s role, trust level, and institution are attached server-side from the authenticated ' +
+    'session — they are not parameters and cannot be chosen. ' +
     'When confidence=high, returns numbered source chunks for the agent to synthesize into a coherent answer. ' +
     'When confidence=low, returns a NO_RESULTS signal — the agent should acknowledge the gap and offer the user 2–3 concrete retrieval refinements as (A)/(B)/(C) options.',
   inputSchema: z.object({
     query: z.string().describe('The user question or topic to retrieve information about.'),
-    role: UserRole.describe(
-      'The authenticated role of the user. Defaults to prospective student if unknown.'
-    ),
     programme: z
       .string()
       .optional()
@@ -146,25 +142,6 @@ export const groundedResponseTool = createTool({
         'pass ["registration deadlines"]. This boosts retrieval for follow-up questions. ' +
         'Omit if this is a new topic or first message.'
       ),
-    trust_level: z
-      .number()
-      .int()
-      .min(1)
-      .max(4)
-      .optional()
-      .describe(
-        'The user\'s verified trust level (1–4). ' +
-        'Read from system context field trust_level=<value>. Defaults to 1 (public-only). ' +
-        'This is a hard security gate — do not infer or guess this value.'
-      ),
-    institution_id: z
-      .string()
-      .optional()
-      .describe(
-        'Institution UUID from session context. ' +
-        'Read from system context field institution_id=<value>. ' +
-        'Pass this through to scope retrieval to the correct institution\'s documents.'
-      ),
   }),
   outputSchema: z.object({
     answer: z
@@ -180,28 +157,30 @@ export const groundedResponseTool = createTool({
         '"low" = no results found — the answer field is a NO_RESULTS signal. Write a response that acknowledges the gap and offers 2–3 concrete refinement options the user can choose from.'
       ),
   }),
-  execute: async (inputData) => {
-    const { query, role, programme, level, department, related_topics, trust_level, institution_id } =
+  execute: async (inputData, context) => {
+    const { query, programme, level, department, related_topics } =
       inputData as {
         query: string;
-        role: string;
         programme?: string;
         level?: string;
         department?: string;
         related_topics?: string[];
-        trust_level?: number;
-        institution_id?: string;
       };
+
+    // Security-critical values come ONLY from the server-injected session
+    // context (chat-security middleware) — never from model-controlled input.
+    const session = getSessionContext(context?.requestContext);
 
     const enrichedQuery = rewriteQuery(query, { programme, level, department, related_topics });
 
     const retrieval = await retrieveKnowledge({
-      query:         enrichedQuery,
-      role:          role as z.infer<typeof UserRole>,
+      query:              enrichedQuery,
+      role:               session.role,
       programme,
       level,
-      trustLevel:    trust_level ?? 1,
-      institutionId: institution_id,
+      trustLevel:         session.trustLevel,
+      institutionId:      session.institutionId,
+      namespaceAllowlist: session.namespaceAllowlist,
     });
 
     // KB found results — but only surface them if the best score clears the relevance gate.

@@ -20,7 +20,7 @@ async function resolveAuthCta(): Promise<{ href: string; label: string }> {
     .maybeSingle();
 
   const roles = (profile?.roles as string[]) ?? [];
-  if (profile?.is_superadmin) return { href: "/superadmin", label: "Go to Dashboard" };
+  // if (profile?.is_superadmin) return { href: "/superadmin", label: "Go to Dashboard" };
   if (roles.includes("admin"))  return { href: "/chat",      label: "Start Chat" };
   if (roles.includes("hod"))    return { href: "/hod",        label: "Go to Dashboard" };
   return { href: "/chat", label: "Go to Chat" };

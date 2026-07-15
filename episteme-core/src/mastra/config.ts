@@ -118,6 +118,6 @@ export const WEB_SEARCH_CONFIG = {
 // UNIBEN Live News — WP REST API fetch settings
 // ---------------------------------------------------------------------------
 export const UNIBEN_NEWS_CONFIG = {
-  maxResults: envInt('UNIBEN_NEWS_MAX_RESULTS', 5),
+  maxResults: envInt('UNIBEN_NEWS_MAX_RESULTS', 10),
   timeoutMs:  envInt('UNIBEN_NEWS_TIMEOUT_MS', 8000),
 } as const;

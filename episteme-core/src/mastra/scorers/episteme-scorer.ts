@@ -99,7 +99,7 @@ function extractToolAnswer(run: Record<string, any>): string {
  *   - Numeric values: GPA, percentages, deadlines, policy numbers
  *   - Multi-word proper nouns (department names, policy titles, person names)
  */
-function extractEntities(text: string): string[] {
+export function extractEntities(text: string): string[] {
   const entities: Set<string> = new Set();
 
   // Years and structured dates

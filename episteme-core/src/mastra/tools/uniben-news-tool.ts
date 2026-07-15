@@ -20,6 +20,18 @@ interface RssItem {
     summary: string;
 }
 
+// Below this length, the RSS excerpt is embed-only ("Watch Live:", a flyer
+// caption, etc.) — deep-fetching the article page won't yield more text,
+// since the real content lives in an embedded video/image, not in markup.
+const MIN_CONTENT_LENGTH = 50;
+
+// Cap deep-fetched article text to control token cost per tool call.
+const MAX_ARTICLE_CHARS = 2000;
+
+function isThinContent(text: string): boolean {
+    return text.trim().length < MIN_CONTENT_LENGTH;
+}
+
 // ── HTML stripping ────────────────────────────────────────────────────────────
 
 function stripHtml(html: string): string {
@@ -63,11 +75,64 @@ function parseRss(xml: string): RssItem[] {
     return items;
 }
 
+// ── Article deep-fetch ────────────────────────────────────────────────────────
+// Reuses the same Worker (already bypasses Cloudflare) with a ?url= param
+// to fetch full article HTML for posts that have substantive RSS content.
+
+function extractArticleText(html: string): string {
+    // Strip non-content blocks first regardless of selector success —
+    // these would otherwise leak into the fallback path.
+    const cleaned = html
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<head[\s\S]*?<\/head>/gi, ' ')
+        .replace(/<nav[\s\S]*?<\/nav>/gi, ' ')
+        .replace(/<footer[\s\S]*?<\/footer>/gi, ' ')
+        .replace(/<!--[\s\S]*?-->/g, ' ');
+
+    // Try the WordPress entry-content wrapper first — best signal-to-noise.
+    const match = cleaned.match(
+        /<div[^>]*class="[^"]*entry-content[^"]*"[^>]*>([\s\S]*?)<\/div>\s*(?:<\/article|<footer|<div[^>]*class="[^"]*(?:comments|sharedaddy|jp-relatedposts))/i,
+    );
+    console.log('[unibenNewsTool] entry-content matched:', !!match?.[1]);
+    if (match?.[1]) {
+        return stripHtml(match[1]).slice(0, MAX_ARTICLE_CHARS);
+    }
+
+    // Fallback — strip the body only, never the full document
+    const bodyMatch = cleaned.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+    const raw = bodyMatch?.[1] ?? cleaned;
+    return stripHtml(raw).slice(0, MAX_ARTICLE_CHARS);
+}
+
+async function fetchArticleContent(
+    articleUrl: string,
+    workerUrl: string,
+    proxyKey: string,
+    timeoutMs: number,
+): Promise<string | null> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetch(`${workerUrl}?url=${encodeURIComponent(articleUrl)}`, {
+            signal: controller.signal,
+            headers: { 'x-episteme-proxy-key': proxyKey },
+        });
+        if (!res.ok) return null;
+        const html = await res.text();
+        return extractArticleText(html);
+    } catch {
+        return null;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 async function fetchNewsPosts(query: string): Promise<NewsResult[]> {
     const { maxResults, timeoutMs } = UNIBEN_NEWS_CONFIG;
 
     // Use the Worker URL and the Secret Key from your env
-    const workerUrl = process.env['UNIBEN_NEWS_CLOUDFLARE_WORKER_URL']; 
+    const workerUrl = process.env['UNIBEN_NEWS_CLOUDFLARE_WORKER_URL'];
     const proxyKey = process.env['UNIBEN_NEWS_CLOUDFLARE_PROXY_SECRET'];
 
     if (!workerUrl || !proxyKey) {
@@ -92,14 +157,14 @@ async function fetchNewsPosts(query: string): Promise<NewsResult[]> {
 
     // Now use the parseRss logic (which you should keep in the tool) 
     // to turn that XML into the NewsResult[] array.
-    const items = parseRss(xml); 
-    
+    const items = parseRss(xml);
+
     const queryTokens = query
         .toLowerCase()
         .split(/\s+/)
         .filter((t) => t.length > 2);
 
-    return items
+    const topItems = items
         .map((item) => ({
             item,
             score: queryTokens.length === 0 ? 1
@@ -110,14 +175,28 @@ async function fetchNewsPosts(query: string): Promise<NewsResult[]> {
                 })(),
         }))
         .sort((a, b) => b.score - a.score)
-        .slice(0, maxResults)
-        .map(({ item }) => ({
-            id: 0,
-            title: item.title,
-            summary: item.summary,
-            url: item.link,
-            published: item.pubDate,
-        }));
+        .slice(0, maxResults);
+
+    return Promise.all(
+        topItems.map(async ({ item }) => {
+            if (isThinContent(item.summary)) {
+                return {
+                    title: item.title,
+                    summary: `${item.title} — full details (including any live stream or flyer) are on the linked page, not available as text.`,
+                    url: item.link,
+                    published: item.pubDate,
+                };
+            }
+
+            const fullText = await fetchArticleContent(item.link, workerUrl, proxyKey, timeoutMs);
+            return {
+                title: item.title,
+                summary: fullText ?? item.summary,
+                url: item.link,
+                published: item.pubDate,
+            };
+        }),
+    );
 }
 
 // ── Context builders ──────────────────────────────────────────────────────────

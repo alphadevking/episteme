@@ -1,5 +1,6 @@
 // episteme-core/src/mastra/index.ts
 import { Mastra } from '@mastra/core/mastra';
+import { Observability, MastraStorageExporter } from '@mastra/observability';
 import { PinoLogger } from '@mastra/loggers';
 import { LibSQLStore, MemoryLibSQL } from '@mastra/libsql';
 import { MastraCompositeStore } from '@mastra/core/storage';
@@ -17,6 +18,7 @@ import {
   reingestDocumentHandler,
   updateFreshnessHandler,
 } from './server/kb-routes';
+import { chatSecurityMiddleware } from './server/chat-security';
 
 // MCP server removed in favor of direct REST API communication
 
@@ -34,6 +36,17 @@ export const mastra = new Mastra({
       },
     }),
   },
+  // Traces every agent turn, tool call, and eval score to the LibSQL store —
+  // viewable in Studio (Observability tab) and queried by experiments.
+  // Explicit exporter config; `default: { enabled: true }` is deprecated.
+  observability: new Observability({
+    configs: {
+      episteme: {
+        serviceName: 'episteme-core',
+        exporters: [new MastraStorageExporter()],
+      },
+    },
+  }),
   storage: new MastraCompositeStore({
     id: 'composite',
     default: new LibSQLStore({
@@ -87,6 +100,9 @@ export const mastra = new Mastra({
   }),
   deployer: new VercelDeployer(),
   server: {
+    // Authenticates the episteme-chat proxy and injects the trusted session
+    // context (role/trust/institution/user) before the chat route runs.
+    middleware: [chatSecurityMiddleware],
     apiRoutes: [
       chatRoute({ path: '/chat/:agentId' }),
       { path: '/kb/documents',                     method: 'GET',    handler: listDocumentsHandler },

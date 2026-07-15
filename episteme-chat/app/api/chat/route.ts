@@ -37,11 +37,18 @@ function buildSystem(parts: (string | null | undefined)[]): string {
   return parts.filter(Boolean).join(" ").trim();
 }
 
-const DATA_TIER: Record<number, string> = {
-  1: "public-only",
-  2: "programme-info(unverified)",
-  3: "personal-academic(portal-verified)",
-  4: "full-access(verified)",
+// Maps the effective app role onto the retrieval role space understood by
+// episteme-core (ROLE_NAMESPACES). Sent as a trusted header — never via the
+// system prompt, so the model can neither see nor alter it.
+const RETRIEVAL_ROLE: Record<string, string> = {
+  superadmin:  "staff",
+  admin:       "staff",
+  hod:         "hod",
+  staff:       "staff",
+  student:     "student",
+  parent:      "parent",
+  guardian:    "parent",
+  prospective: "prospective",
 };
 
 // Higher number = more privilege. "prospective" is a default state, not an elevated role.
@@ -84,6 +91,14 @@ export async function POST(req: Request) {
 
   let role   = "prospective";
   let system = "";
+
+  // Trusted session values — forwarded to Mastra as headers (never in the
+  // prompt). The chat-security middleware in episteme-core injects them into
+  // the tools' request context, out of the model's reach.
+  let trustLevel                     = 1;
+  let institutionId: string | null   = null;
+  let userPublicId:  string | null   = null;
+  let parentAllowlist: string[] | null = null;
 
   try {
     const [profileResult] = await Promise.all([
@@ -131,8 +146,8 @@ export async function POST(req: Request) {
     const link  = parentLinkResult.data;
 
     // ── Parent context + namespace allowlist ──────────────────────────────
-    let parentCtx:          string | null = null;
-    let parentNamespaceCtx: string | null = null;
+    // The allowlist is sent as a trusted header, never via the prompt.
+    let parentCtx: string | null = null;
 
     if (isParent) {
       if (link?.student_user_id) {
@@ -148,11 +163,16 @@ export async function POST(req: Request) {
         const allowedNs: string[] = ["admissions", "general"];
         if (link.can_view_fees)     allowedNs.push("financial-aid");
         if (link.can_view_academic) allowedNs.push("academic-policy", "programmes");
-        parentNamespaceCtx = `parent_namespace_allowlist=${allowedNs.join(",")}`;
+        parentAllowlist = allowedNs;
       } else {
-        parentNamespaceCtx = "parent_namespace_allowlist=admissions,general";
+        parentAllowlist = ["admissions", "general"];
       }
     }
+
+    // Trusted values → headers. Personalization-only values → system prompt.
+    trustLevel    = (aiCtx?.trust_level as number) ?? 1;
+    institutionId = profile?.institution_id ?? null;
+    userPublicId  = profile?.id ?? null;
 
     if (aiCtx) {
       const effectiveRole = aiCtx.role ?? role;
@@ -160,7 +180,8 @@ export async function POST(req: Request) {
       const verbosity     = prefs.verbosity  ?? "concise";
       const department    = prefs.department ?? null;
       const staffTitle    = prefs.staffTitle ?? null;
-      const trust         = (aiCtx.trust_level as number) ?? 1;
+
+      role = effectiveRole;
 
       system = buildSystem([
         `role=${effectiveRole}`,
@@ -170,26 +191,21 @@ export async function POST(req: Request) {
         department        ? `dept=${department}`               : null,
         staffTitle        ? `title=${staffTitle}`              : null,
         parentCtx,
-        parentNamespaceCtx,
-        `trust_level=${trust}`,
-        `data_tier=${DATA_TIER[trust] ?? DATA_TIER[1]}`,
-        `grounded_role=${effectiveRole}`,
-        profile?.id             ? `user_public_id=${profile.id}`             : null,
-        profile?.institution_id ? `institution_id=${profile.institution_id}` : null,
         verbosity === "detailed" ? "verbosity=detailed" : null,
       ]);
     } else {
       system = buildSystem([
         `role=${role}`,
-        `grounded_role=${role}`,
         parentCtx,
-        parentNamespaceCtx,
-        profile?.id             ? `user_public_id=${profile.id}`             : null,
-        profile?.institution_id ? `institution_id=${profile.institution_id}` : null,
       ]);
     }
   } catch {
-    system = `role=${role} grounded_role=${role}`;
+    // Fail closed: public tier, no institution, no user identity.
+    trustLevel      = 1;
+    institutionId   = null;
+    userPublicId    = null;
+    parentAllowlist = null;
+    system = `role=${role}`;
   }
 
   const trimmed       = trimMessages(messages);
@@ -197,13 +213,32 @@ export async function POST(req: Request) {
   const mastraAgentId = process.env.MASTRA_AGENT_ID ?? "episteme-chat-agent";
   const upstreamUrl   = `${mastraBaseUrl.replace(/\/$/, "")}/chat/${encodeURIComponent(mastraAgentId)}`;
 
+  const adminKey = process.env.MASTRA_ADMIN_KEY;
+  if (!adminKey) {
+    console.error("MASTRA_ADMIN_KEY is not set — cannot authenticate to the Mastra chat endpoint.");
+    return Response.json({ error: "Chat service is not configured." }, { status: 503 });
+  }
+
+  // Trusted session context — consumed by the chat-security middleware in
+  // episteme-core, which injects it into the tools' request context. These
+  // values never pass through the model.
+  const upstreamHeaders: Record<string, string> = {
+    "Content-Type":            "application/json",
+    "x-episteme-admin-key":    adminKey,
+    "x-episteme-role":         RETRIEVAL_ROLE[role] ?? "prospective",
+    "x-episteme-trust-level":  String(trustLevel),
+  };
+  if (institutionId)   upstreamHeaders["x-episteme-institution-id"]      = institutionId;
+  if (userPublicId)    upstreamHeaders["x-episteme-user-public-id"]      = userPublicId;
+  if (parentAllowlist) upstreamHeaders["x-episteme-namespace-allowlist"] = parentAllowlist.join(",");
+
   const requestStart = Date.now();
 
   let upstreamResponse: Response;
   try {
     upstreamResponse = await fetch(upstreamUrl, {
       method:  "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: upstreamHeaders,
       body:    JSON.stringify({ messages: trimmed, system, tools }),
     });
   } catch (e) {

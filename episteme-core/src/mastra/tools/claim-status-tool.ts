@@ -3,11 +3,14 @@
 // Returns claim status for a user's own claim by claim ID.
 //
 // Auth: service-to-service via x-episteme-admin-key + x-episteme-user-id headers.
-// The agent reads user_public_id from the system prompt context (injected by chat route).
+// The user's identity is read from the server-injected session context
+// (chat-security middleware) — never from a model-controlled tool argument,
+// so a prompt injection cannot read another user's claims.
 // MASTRA_ADMIN_KEY is shared via environment — never sent to the model.
 // This tool never mutates state and never falls back to web search.
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
+import { getSessionContext } from '../server/session-context';
 
 declare const process: { env: Record<string, string | undefined> };
 
@@ -32,8 +35,8 @@ export type ClaimStatusResult = z.infer<typeof ClaimStatusSchema>;
  * Fetches claim status via the episteme-chat /api/claims/:id/status endpoint.
  * Uses service-to-service auth (admin key + user public ID) — no session cookie needed.
  *
- * The chat route injects `user_public_id=<uuid>` into the system prompt so the agent
- * can pass it here. Ownership is enforced server-side by filtering on user_id.
+ * The user's public ID comes from the trusted session context injected by the
+ * chat-security middleware. Ownership is enforced server-side by filtering on user_id.
  */
 export const claimStatusTool = createTool({
   id: 'claimStatusTool',
@@ -47,18 +50,20 @@ export const claimStatusTool = createTool({
       .string()
       .uuid()
       .describe('The UUID of the claim to check. Ask the user for this if they did not provide it.'),
-    user_public_id: z
-      .string()
-      .uuid()
-      .describe(
-        'The public database ID of the authenticated user. ' +
-        'Read this from the system context field user_public_id=<value>. ' +
-        'Never ask the user for this — it is always present in the system context.'
-      ),
   }),
   outputSchema: ClaimStatusSchema,
-  execute: async (input) => {
-    const { claim_id, user_public_id } = input as { claim_id: string; user_public_id: string };
+  execute: async (input, context) => {
+    const { claim_id } = input as { claim_id: string };
+
+    // Identity comes ONLY from the server-injected session context — a model
+    // cannot look up claims on behalf of an arbitrary user ID.
+    const { userPublicId } = getSessionContext(context?.requestContext);
+    if (!userPublicId) {
+      return {
+        found:   false,
+        message: 'Claim status is only available to signed-in users with a completed profile.',
+      };
+    }
 
     const chatBase  = process.env['EPISTEME_CHAT_BASE_URL'] ?? 'http://localhost:3000';
     const adminKey  = process.env['MASTRA_ADMIN_KEY'];
@@ -75,7 +80,7 @@ export const claimStatusTool = createTool({
       res = await fetch(`${chatBase}/api/claims/${encodeURIComponent(claim_id)}/status`, {
         headers: {
           'x-episteme-admin-key': adminKey,
-          'x-episteme-user-id':   user_public_id,
+          'x-episteme-user-id':   userPublicId,
         },
       });
     } catch {
