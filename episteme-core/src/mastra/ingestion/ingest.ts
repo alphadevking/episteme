@@ -11,8 +11,12 @@ declare const process: { env: Record<string, string | undefined> };
  * Every vector is tagged with either a real institution UUID or this sentinel,
  * so retrieval can always filter with { $in: [institutionId, GLOBAL_INSTITUTION] }
  * without silent cross-tenant leaks.
+ *
+ * Defined in security/retrieval-gate.ts — the ingestion tag and the retrieval
+ * filter must never drift apart, so they read the same constant. Re-exported
+ * here because existing importers (kb-routes) expect it from this module.
  */
-export const GLOBAL_INSTITUTION = '__global__';
+export { GLOBAL_INSTITUTION } from '../security/retrieval-gate';
 
 function getEnv(key: string): string {
   const val = process.env[key];

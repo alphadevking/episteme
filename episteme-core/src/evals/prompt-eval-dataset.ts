@@ -20,6 +20,8 @@
  */
 import type { SessionRole } from '../mastra/server/session-context';
 
+declare const process: { env: Record<string, string | undefined> };
+
 export interface EvalSession {
   role: SessionRole;
   trustLevel: number;
@@ -42,10 +44,21 @@ export interface PromptEvalCase {
   notes?: string;
 }
 
+/**
+ * Institution the grounded cases retrieve against.
+ *
+ * MUST match the institutionId on the ingested vectors — retrieval filters
+ * `institutionId: { $in: [this, GLOBAL_INSTITUTION] }`, so a placeholder UUID
+ * silently matches nothing and every grounded case abstains. That looks like a
+ * passing suite while testing nothing, which is exactly what it did before.
+ * Override with EVAL_INSTITUTION_ID when pointing at another dataset.
+ */
+export const TEST_INSTITUTION_ID =
+  process.env['EVAL_INSTITUTION_ID'] ?? 'ab282ad9-321f-4c1f-a681-667f32bf0fe1';
+
 // Fixed test identifiers — also asserted absent from every response.
-export const TEST_INSTITUTION_ID = '11111111-1111-4111-8111-111111111111';
-export const TEST_USER_ID        = '22222222-2222-4222-8222-222222222222';
-export const TEST_CLAIM_ID       = '33333333-3333-4333-8333-333333333333';
+export const TEST_USER_ID  = '22222222-2222-4222-8222-222222222222';
+export const TEST_CLAIM_ID = '33333333-3333-4333-8333-333333333333';
 
 const student300L: EvalSession = {
   role: 'student',
@@ -94,6 +107,17 @@ export const promptEvalCases: PromptEvalCase[] = [
     system: 'role=prospective',
     expect: 'news',
     notes: '"upcoming/events" signals → unibenNewsTool, never groundedResponseTool.',
+  },
+  {
+    id: 'news-single-fact-citation',
+    query: 'Who is the current Vice Chancellor of UNIBEN?',
+    session: prospective,
+    system: 'role=prospective',
+    expect: 'news',
+    notes:
+      'A one-fact answer drawn from live posts. Regression case for citation stacking: ' +
+      'the VC is named in several posts, and the model reflexively cited all of them, ' +
+      'producing a row of badges on a single claim.',
   },
   {
     id: 'out-of-domain-refusal',

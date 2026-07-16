@@ -9,6 +9,7 @@ import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { Reasoning, ReasoningGroup } from "@/components/assistant-ui/reasoning";
 import { FeedbackButtons } from "@/components/assistant-ui/feedback-buttons";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
+import { LiveNewsSource, LiveSourceFrame } from "@/components/assistant-ui/live-source";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -569,16 +570,24 @@ const AssistantMessage: FC = () => {
       <AssistantAvatar />
       <div className="flex-1 min-w-0">
         <div className="aui-assistant-message-content wrap-break-word pr-2 text-foreground leading-relaxed space-y-2">
-          <MessagePrimitive.Parts
-            components={{
-              Text: AssistantText,
-              Reasoning,
-              ReasoningGroup,
-              tools: {
-                Fallback: ToolFallback,
-              },
-            }}
-          />
+          {/* Live-fetched answers get a distinct frame; verified KB answers stay
+              the unmarked default. The tier is derived from the tool-call stream
+              inside the frame — never from the model's prose. */}
+          <LiveSourceFrame>
+            <MessagePrimitive.Parts
+              components={{
+                Text: AssistantText,
+                Reasoning,
+                ReasoningGroup,
+                tools: {
+                  by_name: {
+                    unibenNewsTool: LiveNewsSource,
+                  },
+                  Fallback: ToolFallback,
+                },
+              }}
+            />
+          </LiveSourceFrame>
           <AssistantMessageThinking />
           <ClarificationOptions />
           <MessageError />

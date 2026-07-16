@@ -19,6 +19,14 @@
 try { process.loadEnvFile('.env.local'); } catch { /* fall through */ }
 try { process.loadEnvFile('.env'); } catch { /* rely on ambient env */ }
 
+// Experiments write traces and scores to storage. .env.local points LIBSQL_URL at
+// the production Turso instance, so without this every run would pollute prod
+// observability with test data — and fail on its latency (ECONNRESET mid-run).
+// db.ts reads LIBSQL_URL at module scope, so this must precede the mastra import;
+// that is why the imports below are dynamic. Override with EVAL_LIBSQL_URL.
+process.env['LIBSQL_URL'] = process.env['EVAL_LIBSQL_URL'] ?? 'file:./eval-runs.db';
+delete process.env['LIBSQL_AUTH_TOKEN']; // a local file DB takes no token
+
 const { RequestContext } = await import('@mastra/core/request-context');
 const { runExperiment }  = await import('@mastra/core/datasets');
 const { mastra }         = await import('../mastra/index');
@@ -119,6 +127,16 @@ for (const item of summary.results) {
     const mark = s.error ? '⚠' : (s.score !== null && s.score >= PASS_THRESHOLD ? '·' : '✗');
     const scoreStr = s.score === null ? 'ERR' : s.score.toFixed(2);
     console.log(`    ${mark} ${s.scorerName.padEnd(20)} ${scoreStr}  ${s.error ?? s.reason ?? ''}`);
+  }
+
+  // A score alone rarely explains a prompt regression — show the text that
+  // produced it so the failure is diagnosable without a second run.
+  if (!ok) {
+    const text = (item.output as EvalRunOutput | null)?.text ?? '';
+    const excerpt = text.length > 600 ? `${text.slice(0, 600)}\n    […truncated]` : text;
+    console.log(`    ┌─ response ${'─'.repeat(50)}`);
+    console.log(excerpt.split('\n').map((l) => `    │ ${l}`).join('\n'));
+    console.log(`    └${'─'.repeat(61)}`);
   }
 }
 

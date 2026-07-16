@@ -7,28 +7,132 @@ import {
   useIsMarkdownCodeBlock,
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
-import { type FC, memo, useState } from "react";
+import { type FC, memo, useCallback, useState } from "react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useCitation } from "@/components/assistant-ui/citation-context";
 import { cn } from "@/lib/utils";
 
 type MarkdownTextProps = {
   preprocess?: (text: string) => string;
 };
 
+/**
+ * Rewrite the agent's `[N](cite:N)` markers to `[N](#cite-N)`.
+ *
+ * react-markdown sanitizes link destinations with defaultUrlTransform, which
+ * allows only https/mailto/tel/xmpp/irc and relative URLs — every other scheme
+ * is rewritten to an empty string. `cite:1` was therefore arriving at the link
+ * renderer as href="", which slipped past the `startsWith('cite:')` badge check
+ * and rendered a live <a href=""> — a link that silently reloads the chat when
+ * clicked. A fragment has no colon, so the sanitizer treats it as relative and
+ * passes it through untouched.
+ *
+ * Done here rather than in the prompt so the agent's citation contract (and the
+ * evals asserting it) stay unchanged.
+ */
+function rewriteCiteMarkers(text: string): string {
+  return text.replace(/\]\(cite:(\d+)\)/g, "](#cite-$1)");
+}
+
+/**
+ * Collapse a run of adjacent citation markers to the first one:
+ * `[1](cite:1)[2](cite:2)[3](cite:3)` -> `[1](cite:1)`.
+ *
+ * Each badge is a hover-and-click affordance, so a row of them on one claim is
+ * noise rather than evidence. The model reliably stacks every post that mentions
+ * a fact — asking it not to in the prompt was measured and does not work — so
+ * this is enforced here where it cannot fail.
+ *
+ * Trade-off: the dropped markers were real corroboration, and this hides it.
+ * That's acceptable because the full source list sits directly below the answer,
+ * one click away; nothing becomes unreachable, it just stops shouting.
+ */
+function collapseStackedCitations(text: string): string {
+  return text.replace(
+    /(\[\d+\]\(cite:\d+\))(?:\s*\[\d+\]\(cite:\d+\))+/g,
+    "$1",
+  );
+}
+
 const MarkdownTextImpl = ({ preprocess }: MarkdownTextProps) => {
+  const withCiteRewrite = useCallback(
+    (text: string) =>
+      rewriteCiteMarkers(collapseStackedCitations(preprocess ? preprocess(text) : text)),
+    [preprocess],
+  );
+
   return (
     <MarkdownTextPrimitive
       remarkPlugins={[remarkGfm]}
       className="aui-md"
       components={defaultComponents}
-      preprocess={preprocess}
+      preprocess={withCiteRewrite}
     />
   );
 };
 
 export const MarkdownText = memo(MarkdownTextImpl) as FC<MarkdownTextProps>;
+
+// ── Citation badge ────────────────────────────────────────────────────────
+
+const badgeClass =
+  "mx-0.5 inline-flex -translate-y-0.5 items-center justify-center rounded px-[5px] py-px text-[10px] font-semibold leading-none ring-1 ring-inset";
+
+/**
+ * Renders a [N] marker.
+ *
+ * When the message registered a source for N, the badge is the primary
+ * affordance at the point of doubt: hover previews it, click opens it. That is
+ * what people actually do with citations — they check the one claim they
+ * question, rather than reading a source list.
+ *
+ * When nothing is registered the badge stays inert (no href, cursor-default)
+ * rather than rendering a link that goes nowhere.
+ */
+const CitationBadge: FC<{ n: number; children?: React.ReactNode }> = ({ n, children }) => {
+  const source = useCitation(n);
+
+  if (!source) {
+    return (
+      <sup className={cn(badgeClass, "cursor-default bg-primary/10 text-primary ring-primary/20")}>
+        {children}
+      </sup>
+    );
+  }
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <sup>
+          <a
+            href={source.url}
+            target="_blank"
+            rel="noopener noreferrer nofollow"
+            aria-label={`Source ${n}: ${source.title}`}
+            className={cn(
+              badgeClass,
+              "cursor-pointer no-underline transition-colors",
+              "bg-amber-500/15 text-amber-800 ring-amber-500/30",
+              "hover:bg-amber-500/30 dark:text-amber-300 dark:ring-amber-500/25",
+            )}
+          >
+            {children}
+          </a>
+        </sup>
+      </TooltipTrigger>
+      <TooltipContent side="top" className="max-w-72 px-3 py-2">
+        <p className="font-medium leading-snug">{source.title}</p>
+        <p className="mt-0.5 text-background/70">
+          {source.dateLabel ? `${source.dateLabel} · ` : ""}
+          Live from {(() => { try { return new URL(source.url).hostname; } catch { return "source"; } })()}
+        </p>
+      </TooltipContent>
+    </Tooltip>
+  );
+};
 
 const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   const { isCopied, copyToClipboard } = useCopyToClipboard();
@@ -146,13 +250,11 @@ const defaultComponents = memoizeMarkdownComponents({
     />
   ),
   a: ({ className, href, children, ...props }) => {
-    // Citation superscript: [N](cite:N) links rendered as inline badge chips
-    if (href?.startsWith('cite:')) {
-      return (
-        <sup className="mx-0.5 inline-flex -translate-y-0.5 cursor-default items-center justify-center rounded bg-primary/10 px-[5px] py-px text-[10px] font-semibold leading-none text-primary ring-1 ring-inset ring-primary/20">
-          {children}
-        </sup>
-      );
+    // Citation marker: [N](cite:N), normalised to #cite-N by rewriteCiteMarkers.
+    // `cite:` is still matched in case an unprocessed marker arrives.
+    const citeMatch = href?.match(/^(?:#cite-|cite:)(\d+)$/);
+    if (citeMatch) {
+      return <CitationBadge n={Number(citeMatch[1])}>{children}</CitationBadge>;
     }
     return (
       <a

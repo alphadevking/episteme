@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { embedTexts, buildSparseVector } from '../ingestion/embedder';
 import { RETRIEVAL_CONFIG } from '../config';
-import { GLOBAL_INSTITUTION } from '../ingestion/ingest';
+import { resolveNamespaces, buildRetrievalFilter } from '../security/retrieval-gate';
 import { getSessionContext } from '../server/session-context';
 
 declare const process: { env: Record<string, string | undefined> };
@@ -29,15 +29,23 @@ export type KnowledgeRetrievalResponse =
   | { found: false; results: []; message: string };
 
 /**
- * Scale dense and sparse vectors by alpha to control hybrid weighting.
+ * Scale dense and sparse vectors for Pinecone's convex hybrid blend.
  * alpha=1.0 → pure dense (semantic), alpha=0.0 → pure sparse (keyword).
- * 0.75 is calibrated for academic queries where semantic match dominates.
+ *
+ * Scaling the query vector scales the returned score by the same factor, so the
+ * thresholds in RETRIEVAL_CONFIG are only meaningful while alpha=1.0. See the
+ * note on `alpha` in config.ts before lowering it.
+ *
+ * Returns weightedSparse=null at alpha=1.0: every sparse value would be zero,
+ * so sending it is pure overhead.
  */
 function weightVectors(
   dense: number[],
   sparse: { indices: number[]; values: number[] },
   alpha: number,
 ) {
+  if (alpha >= 1) return { weightedDense: dense, weightedSparse: null };
+
   return {
     weightedDense: dense.map((v) => v * alpha),
     weightedSparse: {
@@ -52,34 +60,6 @@ function isDaysOld(isoDate: string, days: number): boolean {
   const now = Date.now();
   return (now - then) / (1000 * 60 * 60 * 24) > days;
 }
-
-/**
- * Role → namespace access mapping.
- * Controls which knowledge domains each user class can search.
- */
-const ROLE_NAMESPACES: Record<string, string[]> = {
-  prospective: ['admissions', 'programmes', 'general'],
-  student: ['academic-policy', 'financial-aid', 'programmes', 'general'],
-  parent: ['admissions', 'financial-aid', 'general'],
-  staff: ['admissions', 'academic-policy', 'financial-aid', 'programmes', 'staff-internal', 'general'],
-  hod: ['admissions', 'academic-policy', 'financial-aid', 'programmes', 'staff-internal', 'general'],
-};
-
-/**
- * Trust level → maximum allowed namespaces (hard gate).
- * Actual namespaces = intersection(ROLE_NAMESPACES[role], TRUST_NAMESPACES[trust]).
- *
- *  1 = public-only (unverified / prospective)
- *  2 = programme-info (unverified student)
- *  3 = personal-academic (portal-verified student)
- *  4 = full-access (staff / HOD / superadmin)
- */
-const TRUST_NAMESPACES: Record<number, string[]> = {
-  1: ['admissions', 'programmes', 'general'],
-  2: ['admissions', 'programmes', 'general'],
-  3: ['admissions', 'academic-policy', 'financial-aid', 'programmes', 'general'],
-  4: ['admissions', 'academic-policy', 'financial-aid', 'programmes', 'staff-internal', 'general'],
-};
 
 const pinecone = new Pinecone({ apiKey: getEnv('PINECONE_API_KEY') });
 const pineconeIndex = pinecone.index({ name: getEnv('PINECONE_INDEX') });
@@ -113,42 +93,15 @@ export async function retrieveKnowledge(inputData: {
 }): Promise<KnowledgeRetrievalResponse> {
   const { query, role, programme, level, trustLevel = 1, institutionId, namespaceAllowlist } = inputData;
 
-  const roleNs  = ROLE_NAMESPACES[role] ?? ROLE_NAMESPACES['prospective'];
-  const trustNs = TRUST_NAMESPACES[trustLevel] ?? TRUST_NAMESPACES[1];
-  const trustNsSet = new Set(trustNs);
-  let namespaces   = roleNs.filter((ns) => trustNsSet.has(ns));
-
-  if (namespaceAllowlist && namespaceAllowlist.length > 0) {
-    const allowSet = new Set(namespaceAllowlist);
-    namespaces     = namespaces.filter((ns) => allowSet.has(ns));
-  }
+  // Both gates live in security/retrieval-gate.ts — pure and unit-tested there.
+  const namespaces = resolveNamespaces({ role, trustLevel, namespaceAllowlist });
 
   const [denseVector] = await embedTexts([query]);
   const sparseVector  = buildSparseVector(query);
   const { weightedDense, weightedSparse } = weightVectors(denseVector, sparseVector, RETRIEVAL_CONFIG.alpha);
 
-  // Multi-tenant isolation: always include the user's institution AND GLOBAL_INSTITUTION.
-  // Using $in prevents cross-tenant leaks — Institution A never sees Institution B's vectors.
-  const resolvedInstitutionId = institutionId ?? GLOBAL_INSTITUTION;
-  const institutionFilter = {
-    institutionId: { $in: [resolvedInstitutionId, GLOBAL_INSTITUTION] },
-  };
-
-  const programmeClause = programme
-    ? [{ $or: [{ programme: { $eq: programme } }, { programme: { $exists: false } }] }]
-    : [];
-  const levelClause = level
-    ? [{ $or: [{ level: { $eq: level } }, { level: { $exists: false } }] }]
-    : [];
-
-  const pineconeFilter = {
-    $and: [
-      { roles: { $in: [role] } },
-      ...programmeClause,
-      ...levelClause,
-      institutionFilter,
-    ],
-  };
+  // Role scoping + multi-tenant isolation. Institution A never sees B's vectors.
+  const pineconeFilter = buildRetrievalFilter({ role, programme, level, institutionId });
 
   const allMatches: Array<{ score: number; metadata: Record<string, unknown> }> = [];
 
@@ -156,7 +109,7 @@ export async function retrieveKnowledge(inputData: {
     namespaces.map((ns) =>
       pineconeIndex.namespace(ns).query({
         vector: weightedDense,
-        sparseVector: weightedSparse,
+        ...(weightedSparse ? { sparseVector: weightedSparse } : {}),
         topK: RETRIEVAL_CONFIG.topK,
         includeMetadata: true,
         filter: pineconeFilter,

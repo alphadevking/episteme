@@ -38,7 +38,17 @@ export function normalizeSessionRole(raw: unknown): SessionRole {
 }
 
 export function clampTrustLevel(raw: unknown): number {
-  const n = typeof raw === 'number' ? raw : parseInt(String(raw ?? ''), 10);
+  // Strict parse. parseInt is too lenient for a security value — it reads
+  // "4abc" as 4 and "3.7" as 3, so a malformed header could grant a tier.
+  // Only a pure run of digits counts; everything else falls back to 1.
+  const n =
+    typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string' && /^\d+$/.test(raw.trim())
+        ? Number(raw.trim())
+        : NaN;
+
+  // Non-integers (3.7, NaN, Infinity) fail closed rather than round.
   if (!Number.isInteger(n)) return 1;
   return Math.min(4, Math.max(1, n));
 }

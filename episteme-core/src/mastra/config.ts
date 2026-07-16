@@ -71,6 +71,7 @@ export const RETRIEVAL_CONFIG = {
    * Minimum dotproduct score to accept a match.
    * mistral-embed produces normalised vectors → scores in 0.0–1.0.
    * 0.3 filters noise without being overly restrictive.
+   * Only true while alpha=1.0 — see the note on `alpha` below.
    */
   scoreThreshold: envFloat('RETRIEVAL_SCORE_THRESHOLD', 0.3),
   /** Maximum unique parent chunks returned to the LLM */
@@ -80,11 +81,20 @@ export const RETRIEVAL_CONFIG = {
   /**
    * Hybrid search blend factor (0.0–1.0).
    * 1.0 = pure dense (semantic), 0.0 = pure sparse (keyword).
-   * 0.75 is calibrated for academic policy queries where semantic
-   * similarity matters more than exact keyword matching.
-   * Override with RETRIEVAL_ALPHA env var to tune per-environment.
+   *
+   * MUST stay 1.0 until sparse vectors are normalised. Pinecone scores a
+   * convex blend as `alpha*dot(dense) + (1-alpha)*dot(sparse)`, which is only
+   * meaningful when both terms share a scale. They don't: dense is cosine
+   * (~0.7) while buildSparseVector emits raw term frequencies (~0.03), so the
+   * sparse term contributed ~0.002 — 0.2% of the score — while alpha deflated
+   * every dense score by 25%. Measured: a chunk scoring 0.734 arrived as 0.551
+   * against a 0.55 gate, so real matches abstained on a coin flip.
+   *
+   * Restoring hybrid properly means L2-normalising sparse vectors on BOTH the
+   * query and document side (a re-ingest), or switching to reciprocal rank
+   * fusion. Until then a lower alpha only re-introduces the deflation.
    */
-  alpha: envFloat('RETRIEVAL_ALPHA', 0.75),
+  alpha: envFloat('RETRIEVAL_ALPHA', 1.0),
   /**
    * Minimum maxScore to treat results as genuinely relevant (not just "above noise floor").
    * When the best match scores below this, retrieval returns abstention even if found=true.
