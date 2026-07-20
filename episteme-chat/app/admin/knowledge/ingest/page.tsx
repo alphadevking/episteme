@@ -302,7 +302,7 @@ export default function IngestPage() {
     roles:       ["prospective"] as string[],
     updatedAt:   new Date().toISOString().split("T")[0],
     textContent: "",
-    level:       "",
+    levels:      [] as string[],
   });
 
   // ── Pipeline progress ────────────────────────────────────────────────────────
@@ -318,6 +318,13 @@ export default function IngestPage() {
     setForm((f) => ({
       ...f,
       roles: f.roles.includes(role) ? f.roles.filter((r) => r !== role) : [...f.roles, role],
+    }));
+  }
+
+  function toggleLevel(level: string) {
+    setForm((f) => ({
+      ...f,
+      levels: f.levels.includes(level) ? f.levels.filter((l) => l !== level) : [...f.levels, level],
     }));
   }
 
@@ -498,8 +505,8 @@ export default function IngestPage() {
         roles:       form.roles,
         updatedAt:   new Date(form.updatedAt).toISOString(),
         scope:       scopeMeta,
-        ...(programmeValue ? { programme: programmeValue } : {}),
-        ...(form.level     ? { level: form.level }         : {}),
+        ...(programmeValue      ? { programme: programmeValue } : {}),
+        ...(form.levels.length > 0 ? { levels: form.levels }    : {}),
       };
 
       if (mode === "file") {
@@ -943,16 +950,16 @@ export default function IngestPage() {
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-xs font-medium">
-                    Level Scope <span className="text-muted-foreground font-normal">(leave blank for all levels)</span>
+                    Level Scope <span className="text-muted-foreground font-normal">(select all that apply — leave blank for all levels)</span>
                   </Label>
                   <div className="flex flex-wrap gap-2 pt-0.5">
                     {LEVEL_OPTIONS.map((l) => {
-                      const active = form.level === l;
+                      const active = form.levels.includes(l);
                       return (
                         <button
                           key={l}
                           type="button"
-                          onClick={() => setForm((f) => ({ ...f, level: active ? "" : l }))}
+                          onClick={() => toggleLevel(l)}
                           className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
                             active
                               ? "border-primary bg-primary text-primary-foreground"

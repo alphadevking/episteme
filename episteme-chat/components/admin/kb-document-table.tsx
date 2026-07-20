@@ -140,11 +140,11 @@ export function KbDocumentTable({ documents }: Props) {
           ),
         },
         {
-          key: "level",
+          key: "levels",
           label: "Level",
           render: (r) => (
-            <span className={`text-xs ${r.level ? "text-foreground font-medium" : "text-muted-foreground/50 italic"}`}>
-              {r.level ?? "Not available"}
+            <span className={`text-xs ${r.levels.length > 0 ? "text-foreground font-medium" : "text-muted-foreground/50 italic"}`}>
+              {r.levels.length > 0 ? r.levels.join(", ") : "All levels"}
             </span>
           ),
         },

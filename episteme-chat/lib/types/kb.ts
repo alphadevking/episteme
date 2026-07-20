@@ -8,7 +8,7 @@ export type KbDocument = {
   source: string;
   roles: string[];
   programme: string | null;
-  level: string | null;
+  levels: string[];
   updatedAt: string;
   vectorsUpserted: number;
   parentChunks: number;

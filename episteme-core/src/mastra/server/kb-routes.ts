@@ -63,7 +63,7 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
   const {
     docId, fileName, category, namespace, faculty, source, roles,
     updatedAt, contentType, markdownContent, plainTextContent, fileBufferBase64,
-    programme, level,
+    programme, levels,
   } = body;
 
   const VALID_ROLES      = new Set(['prospective', 'student', 'parent', 'staff', 'hod']);
@@ -109,9 +109,12 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
   if (invalidRoles.length > 0)
     return c.json({ error: `Invalid roles: ${invalidRoles.join(', ')}` }, 400);
 
-  const resolvedLevel = (level as string | undefined)?.trim() || undefined;
-  if (resolvedLevel && !VALID_LEVELS.has(resolvedLevel))
-    return c.json({ error: `Invalid level: ${resolvedLevel}` }, 400);
+  const levelsRaw = Array.isArray(levels)
+    ? (levels as string[]).map((l) => l.trim()).filter(Boolean)
+    : (typeof levels === 'string' && levels.trim() ? [levels.trim()] : []);
+  const invalidLevels = levelsRaw.filter((l) => !VALID_LEVELS.has(l));
+  if (invalidLevels.length > 0)
+    return c.json({ error: `Invalid levels: ${invalidLevels.join(', ')}` }, 400);
 
   // ── Date validation ──────────────────────────────────────────────────────────
   const updatedAtDate = new Date(updatedAt as string);
@@ -176,7 +179,7 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
           institutionId,
           contentType: (contentType as ContentType | undefined) ?? 'general',
           programme:   (programme as string | undefined) || undefined,
-          level:       resolvedLevel,
+          levels:      levelsRaw.length > 0 ? levelsRaw : undefined,
           fileBuffer,
           markdownContent:  markdownContent  as string | undefined,
           plainTextContent: plainTextContent as string | undefined,
@@ -305,8 +308,8 @@ export async function reingestDocumentHandler(c: Context): Promise<Response> {
           updatedAt:        nowIso,
           institutionId:    institutionId === GLOBAL_INSTITUTION ? undefined : institutionId,
           contentType:      doc.contentType as ContentType,
-          programme:        doc.programme   ?? undefined,
-          level:            doc.level       ?? undefined,
+          programme:        doc.programme ?? undefined,
+          levels:           doc.levels,
           markdownContent:  freshMarkdown   ?? undefined,
           plainTextContent: freshText       ?? undefined,
           onProgress:       (p: IngestProgressEvent) => emit('progress', p),

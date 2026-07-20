@@ -74,10 +74,12 @@ export interface IngestOptions {
    */
   programme?: string;
   /**
-   * Optional academic level scope e.g. "300L", "MSc", "PhD".
-   * Leave unset for documents that apply to all levels — they are returned regardless of student level.
+   * Optional academic level scope e.g. ["300L"], ["MSc", "PhD", "PGD"].
+   * A document may belong to several levels (e.g. a shared postgraduate handbook).
+   * Leave unset/empty for documents that apply to all levels — they are returned
+   * regardless of student level.
    */
-  level?: string;
+  levels?: string[];
   /** Drives chunking strategy — defaults to 'general' */
   contentType?: ContentType;
 }
@@ -95,7 +97,7 @@ export interface IngestAuditResult {
   /** The resolved institution UUID, or GLOBAL_INSTITUTION for shared docs. */
   institutionId: string;
   programme: string | null;
-  level: string | null;
+  levels: string[];
   vectorsUpserted: number;
   parentChunks: number;
   childChunks: number;
@@ -142,7 +144,7 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
   const {
     fileBuffer, markdownContent, plainTextContent,
     fileName, docId, category, namespace,
-    faculty, source, roles, updatedAt, programme, level,
+    faculty, source, roles, updatedAt, programme, levels,
     contentType = 'general',
     onProgress,
   } = options;
@@ -222,7 +224,7 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
         ...(programme ? { programme } : {}),
         // Only set for level-specific documents (e.g. "Final Year Project handbook").
         // Omitted for docs that apply to all levels — they match all level filter queries.
-        ...(level ? { level } : {}),
+        ...(levels && levels.length > 0 ? { levels } : {}),
       },
     };
   });
@@ -251,7 +253,7 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
     updatedAt,
     institutionId,
     programme: programme ?? null,
-    level:     level     ?? null,
+    levels:    levels    ?? [],
     vectorsUpserted: records.length,
     parentChunks: parents.length,
     childChunks: allChildren.length,

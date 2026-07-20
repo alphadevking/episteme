@@ -110,8 +110,11 @@ export function buildRetrievalFilter(input: {
   const programmeClause = programme
     ? [{ $or: [{ programme: { $eq: programme } }, { programme: { $exists: false } }] }]
     : [];
+  // Documents may be tagged with several levels (e.g. a shared postgraduate
+  // handbook tagged ["MSc", "PhD", "PGD"]) — $in checks list membership,
+  // matching the caller's single level against any element in that list.
   const levelClause = level
-    ? [{ $or: [{ level: { $eq: level } }, { level: { $exists: false } }] }]
+    ? [{ $or: [{ levels: { $in: [level] } }, { levels: { $exists: false } }] }]
     : [];
 
   return {
