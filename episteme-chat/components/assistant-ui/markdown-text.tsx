@@ -12,7 +12,7 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useCitation } from "@/components/assistant-ui/citation-context";
+import { formatPageLabel, useCitation, withPageAnchor } from "@/components/assistant-ui/citation-context";
 import { cn } from "@/lib/utils";
 
 type MarkdownTextProps = {
@@ -103,15 +103,17 @@ const CitationBadge: FC<{ n: number; children?: React.ReactNode }> = ({ n, child
   // nothing, so the marker is dropped rather than rendered as an inert badge.
   if (!source) return null;
 
+  const pageLabel = formatPageLabel(source.pages);
+
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <sup>
           <a
-            href={source.url}
+            href={withPageAnchor(source.url, source.pages)}
             target="_blank"
             rel="noopener noreferrer nofollow"
-            aria-label={`Source ${n}: ${source.title}`}
+            aria-label={`Source ${n}: ${source.title}${pageLabel ? `, ${pageLabel}` : ""}`}
             className={cn(
               badgeClass,
               "cursor-pointer no-underline transition-colors",
@@ -124,7 +126,10 @@ const CitationBadge: FC<{ n: number; children?: React.ReactNode }> = ({ n, child
         </sup>
       </TooltipTrigger>
       <TooltipContent side="top" className="max-w-72 px-3 py-2">
-        <p className="font-medium leading-snug">{source.title}</p>
+        <p className="font-medium leading-snug">
+          {source.title}
+          {pageLabel && <span className="text-background/70"> · {pageLabel}</span>}
+        </p>
         <p className="mt-0.5 text-background/70">
           {source.dateLabel ? `${source.dateLabel} · ` : ""}
           {source.tier === "live" ? "Live from " : ""}

@@ -53,7 +53,7 @@ function deriveTitle(source: string): string {
   }
 }
 
-type GroundedSource = { number: number; title: string; url: string };
+type GroundedSource = { number: number; title: string; url: string; pages: number[] };
 
 /**
  * Builds the model-facing context and the client-facing source list from the
@@ -73,14 +73,17 @@ function buildGroundedContext(
     new Set(retrieval.results.map((r) => r.staleWarning).filter((w): w is string => Boolean(w)))
   );
 
-  // Deduplicate sources by URL so multiple chunks from the same document share one citation number
-  const sourceIndex = new Map<string, { number: number; title: string }>();
+  // Deduplicate sources by URL so multiple chunks from the same document share
+  // one citation number — but a document can still be cited via chunks from
+  // several different pages, so pages accumulate across all of a source's chunks.
+  const sourceIndex = new Map<string, { number: number; title: string; pages: Set<number> }>();
   let sourceCount = 0;
   for (const r of retrieval.results) {
     if (!sourceIndex.has(r.source)) {
       sourceCount++;
-      sourceIndex.set(r.source, { number: sourceCount, title: deriveTitle(r.source) });
+      sourceIndex.set(r.source, { number: sourceCount, title: deriveTitle(r.source), pages: new Set() });
     }
+    if (r.pageNumber != null) sourceIndex.get(r.source)!.pages.add(r.pageNumber);
   }
 
   const lines: string[] = [
@@ -100,7 +103,12 @@ function buildGroundedContext(
 
   const sources: GroundedSource[] = Array.from(
     sourceIndex,
-    ([url, { number, title }]) => ({ number, title, url }),
+    ([url, { number, title, pages }]) => ({
+      number,
+      title,
+      url,
+      pages: Array.from(pages).sort((a, b) => a - b),
+    }),
   );
 
   return { context: lines.join('\n'), sources };
@@ -181,6 +189,9 @@ export const groundedResponseTool = createTool({
       number: z.number().int(),
       title:  z.string(),
       url:    z.string(),
+      /** Page numbers (1-based) this source was cited from, sorted ascending.
+       *  Empty when the document has no page structure (e.g. scraped HTML). */
+      pages:  z.array(z.number().int()),
     })).describe('Source list for client rendering. Empty when confidence=low.'),
   }),
   /**

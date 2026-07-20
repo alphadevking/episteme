@@ -1,5 +1,5 @@
 import { Pinecone } from '@pinecone-database/pinecone';
-import { processDocument, processMarkdown, processPlainText, elementsToText } from './document-processor';
+import { processDocument, processMarkdown, processPlainText, elementsToText, buildPageOffsetMap, type PageOffsetEntry } from './document-processor';
 import { buildHierarchicalChunks, type ParentChunk, type ChildChunk, type ContentType } from './chunker';
 import { embedTexts, buildSparseVector } from './embedder';
 import { INGEST_CONFIG } from '../config';
@@ -152,7 +152,7 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
 
   // 1. Extract full text from input
   let fullText: string;
-  let pageNumber: number | null = null;
+  let pageOffsetMap: PageOffsetEntry[] = [];
 
   if (markdownContent) {
     fullText = elementsToText(processMarkdown(markdownContent, category));
@@ -160,7 +160,7 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
     fullText = elementsToText(processPlainText(plainTextContent, category));
   } else if (fileBuffer) {
     const elements = await processDocument(fileBuffer, fileName, category);
-    pageNumber = elements[0]?.pageNumber ?? null;
+    pageOffsetMap = buildPageOffsetMap(elements);
     fullText = elementsToText(elements);
   } else {
     throw new Error('One of fileBuffer, markdownContent, or plainTextContent must be provided');
@@ -175,7 +175,7 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
 
   // 3. Build hierarchical parent/child chunks via MDocument
   onProgress?.({ step: 'chunking' });
-  const parents = await buildHierarchicalChunks(fullText, docId, category, contentType, pageNumber);
+  const parents = await buildHierarchicalChunks(fullText, docId, category, contentType, pageOffsetMap);
   const allChildren = parents.flatMap((p: ParentChunk) => p.children);
 
   if (allChildren.length === 0) {

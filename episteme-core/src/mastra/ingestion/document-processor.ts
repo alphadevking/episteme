@@ -102,3 +102,43 @@ export function processPlainText(content: string, category: string): ProcessedEl
 export function elementsToText(elements: ProcessedElement[]): string {
   return elements.map((el) => el.text).join('\n\n');
 }
+
+/** Maps a character offset in the flattened text back to the page it came from. */
+export interface PageOffsetEntry {
+  offset: number;
+  pageNumber: number | null;
+}
+
+/**
+ * Records where each element starts in the string elementsToText() produces,
+ * so a chunk's page can be recovered after chunking flattens page boundaries
+ * away. Must use the same join separator ('\n\n', 2 chars) as elementsToText —
+ * the two functions are a pair and have to stay in sync.
+ */
+export function buildPageOffsetMap(elements: ProcessedElement[]): PageOffsetEntry[] {
+  const map: PageOffsetEntry[] = [];
+  let offset = 0;
+  for (const el of elements) {
+    map.push({ offset, pageNumber: el.pageNumber });
+    offset += el.text.length + 2; // + '\n\n'
+  }
+  return map;
+}
+
+/** Page number for the element covering `offset`, via the map above. Binary search — map is offset-sorted by construction. */
+export function pageAtOffset(map: PageOffsetEntry[], offset: number): number | null {
+  if (map.length === 0) return null;
+  let lo = 0;
+  let hi = map.length - 1;
+  let result: number | null = map[0].pageNumber;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (map[mid].offset <= offset) {
+      result = map[mid].pageNumber;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return result;
+}

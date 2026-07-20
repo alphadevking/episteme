@@ -22,6 +22,10 @@ export type KnowledgeRetrievalResult = {
   source: string;
   updatedAt: string;
   staleWarning: string | null;
+  /** Page this chunk was extracted from, when the source document has pages
+   *  (PDFs). Ingestion stores -1 for sourceless content (scraped HTML); that
+   *  sentinel is normalized to null here. */
+  pageNumber: number | null;
 };
 
 export type KnowledgeRetrievalResponse =
@@ -162,6 +166,8 @@ export async function retrieveKnowledge(inputData: {
     seenParents.add(parentId);
 
     const updatedAt = match.metadata['updatedAt'] as string;
+    const rawPage = match.metadata['pageNumber'] as number | undefined;
+    const pageNumber = typeof rawPage === 'number' && rawPage >= 0 ? rawPage : null;
 
     retrievalResults.push({
       chunkId:      match.metadata['chunkId']     as string,
@@ -171,6 +177,7 @@ export async function retrieveKnowledge(inputData: {
       staleWarning: isDaysOld(updatedAt, RETRIEVAL_CONFIG.freshnessThresholdDays)
         ? '⚠️ This information may be outdated. Please verify with the relevant office before acting on it.'
         : null,
+      pageNumber,
     });
   }
 

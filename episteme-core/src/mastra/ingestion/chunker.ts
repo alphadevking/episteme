@@ -1,5 +1,6 @@
 import { MDocument } from '@mastra/rag';
 import { CHUNK_CONFIG } from '../config';
+import { pageAtOffset, type PageOffsetEntry } from './document-processor';
 
 export interface ParentChunk {
   parentId: string;
@@ -62,7 +63,7 @@ export async function buildHierarchicalChunks(
   docId: string,
   category: string,
   contentType: ContentType = 'general',
-  pageNumber: number | null = null,
+  pageOffsetMap: PageOffsetEntry[] = [],
 ): Promise<ParentChunk[]> {
   const strategy = strategyFor(contentType);
 
@@ -77,6 +78,14 @@ export async function buildHierarchicalChunks(
     overlap: CHUNK_CONFIG.parentOverlap,
   });
 
+  // The chunker doesn't report each chunk's offset in fullText, and pages were
+  // flattened away when the elements were joined into fullText. Recover them by
+  // locating each chunk's text in order — offsets only need to be
+  // non-decreasing across chunks (true even with overlap, since the window
+  // always slides forward), so searching from the previous match is enough to
+  // stay correctly positioned without re-finding an earlier occurrence.
+  let parentSearchFrom = 0;
+
   // Step 2 — child chunks for all parents in parallel
   const parents = (await Promise.all(
     parentRaw.map(async (raw, pi) => {
@@ -85,6 +94,10 @@ export async function buildHierarchicalChunks(
 
       const parentId = `${docId}-P${pi}`;
 
+      const parentOffset = fullText.indexOf(raw.text, parentSearchFrom);
+      if (parentOffset >= 0) parentSearchFrom = parentOffset;
+      const parentPage = parentOffset >= 0 ? pageAtOffset(pageOffsetMap, parentOffset) : null;
+
       const childDoc = MDocument.fromText(parentText);
       const childRaw = await childDoc.chunk({
         strategy: 'recursive',
@@ -92,20 +105,31 @@ export async function buildHierarchicalChunks(
         overlap: CHUNK_CONFIG.childOverlap,
       });
 
+      let childSearchFrom = 0;
+
       const children: ChildChunk[] = childRaw
         .map((cr, ci) => ({ cr, ci }))
         .filter(({ cr }) => cr.text.trim().length >= CHUNK_CONFIG.minChildLength)
-        .map(({ cr, ci }) => ({
-          chunkId:    `${parentId}-C${ci}`,
-          parentId,
-          text:       cr.text.trim(),
-          chunkIndex: ci,
-          category,
-          pageNumber,
-        }));
+        .map(({ cr, ci }) => {
+          const text = cr.text.trim();
+          const childOffsetInParent = parentText.indexOf(text, childSearchFrom);
+          if (childOffsetInParent >= 0) childSearchFrom = childOffsetInParent;
+          const childPage = childOffsetInParent >= 0 && parentOffset >= 0
+            ? pageAtOffset(pageOffsetMap, parentOffset + childOffsetInParent)
+            : parentPage;
+
+          return {
+            chunkId:    `${parentId}-C${ci}`,
+            parentId,
+            text,
+            chunkIndex: ci,
+            category,
+            pageNumber: childPage,
+          };
+        });
 
       if (children.length === 0) return null;
-      return { parentId, text: parentText, category, pageNumber, children } as ParentChunk;
+      return { parentId, text: parentText, category, pageNumber: parentPage, children } as ParentChunk;
     })
   )).filter((p): p is ParentChunk => p !== null);
 

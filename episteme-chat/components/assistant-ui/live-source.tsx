@@ -30,7 +30,12 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { CitationProvider, type CitationSource } from "@/components/assistant-ui/citation-context";
+import {
+  CitationProvider,
+  formatPageLabel,
+  withPageAnchor,
+  type CitationSource,
+} from "@/components/assistant-ui/citation-context";
 import { cn } from "@/lib/utils";
 
 // Tool-call parts render in stream order, which puts them ABOVE the answer
@@ -53,7 +58,7 @@ type NewsToolResult = {
 };
 
 /** Mirrors the `sources` field of groundedResponseTool's output schema. */
-type KbSource = { number: number; title: string; url: string };
+type KbSource = { number: number; title: string; url: string; pages: number[] };
 
 type KbToolResult = { sources?: KbSource[] };
 
@@ -172,7 +177,7 @@ function useAnswerSources(): AnswerSourceState {
       // Fallback path: the KB ran and came up empty, news filled the gap.
       return JSON.stringify({
         tier: "kb",
-        sources: posts.map((p, i) => ({ number: i + 1, title: p.title, url: p.url })),
+        sources: posts.map((p, i) => ({ number: i + 1, title: p.title, url: p.url, pages: [] })),
       });
     }
 
@@ -256,30 +261,38 @@ const KbSourceList: FC<{ sources: KbSource[] }> = ({ sources }) => {
         Sources
       </p>
       <ol className="m-0 flex list-none flex-col gap-0.5 p-0">
-        {sources.map((source) => (
-          <li key={source.url}>
-            <a
-              href={source.url}
-              target="_blank"
-              rel="noopener noreferrer nofollow"
-              className={cn(
-                "group flex items-start gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                "hover:bg-muted",
-              )}
-            >
-              <span className="mt-px w-4 shrink-0 text-xs font-semibold tabular-nums text-muted-foreground">
-                {source.number}
-              </span>
-              <span className="min-w-0 flex-1 wrap-break-word text-foreground/90 group-hover:text-foreground">
-                {source.title}
-              </span>
-              <ExternalLinkIcon
-                aria-hidden
-                className="mt-0.5 size-3.5 shrink-0 text-muted-foreground group-hover:text-foreground"
-              />
-            </a>
-          </li>
-        ))}
+        {sources.map((source) => {
+          const pageLabel = formatPageLabel(source.pages);
+          return (
+            <li key={source.url}>
+              <a
+                href={withPageAnchor(source.url, source.pages)}
+                target="_blank"
+                rel="noopener noreferrer nofollow"
+                className={cn(
+                  "group flex items-start gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                  "hover:bg-muted",
+                )}
+              >
+                <span className="mt-px w-4 shrink-0 text-xs font-semibold tabular-nums text-muted-foreground">
+                  {source.number}
+                </span>
+                <span className="min-w-0 flex-1 wrap-break-word text-foreground/90 group-hover:text-foreground">
+                  {source.title}
+                  {pageLabel && (
+                    <span className="ml-1.5 whitespace-nowrap text-xs text-muted-foreground">
+                      · {pageLabel}
+                    </span>
+                  )}
+                </span>
+                <ExternalLinkIcon
+                  aria-hidden
+                  className="mt-0.5 size-3.5 shrink-0 text-muted-foreground group-hover:text-foreground"
+                />
+              </a>
+            </li>
+          );
+        })}
       </ol>
     </div>
   );
@@ -313,6 +326,7 @@ export const AnswerSourceFrame: FC<{ children: ReactNode }> = ({ children }) => 
       number: s.number,
       title: s.title,
       url: s.url,
+      pages: s.pages,
       tier: "kb",
     }));
 
