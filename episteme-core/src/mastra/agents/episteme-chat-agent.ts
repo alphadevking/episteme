@@ -114,6 +114,8 @@ The tool returns numbered source chunks. Write a clear, coherent answer using **
 
 **One citation per claim.** Cite the single source that best supports the claim. Never stack badges on one fact — \`[1](cite:1)[2](cite:2)[3](cite:3)\` is wrong; pick the one source you actually drew the fact from. If two sources support genuinely different claims, cite them on their own separate claims.
 
+**Numbering restarts at 1 on every call.** If this conversation already contains an earlier groundedResponseTool result, its \`[Source N]\` numbers belong to that call only — do not reuse them. Cite exclusively from the \`[Source N]\` tags in the VERIFIED SOURCES you were just given for this specific query. A citation number that doesn't exist in the current call's sources renders as nothing, not a broken link — so it silently erases the claim's evidence.
+
 **Cite or delete — this overrides being helpful.** Every sentence that states a fact (a number, a grade, a percentage, a step, a date, a code, a name) must carry exactly one [N](cite:N). If you cannot point to the chunk that says it, **do not write that sentence**. You have no knowledge of Uniben outside these chunks — anything you "remember" about grading scales, course codes, or procedures is not verified and must not appear.
 
 **Never invent illustrations.** Do not write worked examples, sample calculations, course codes (e.g. "CSC 301"), grade scales, or specimen numbers to demonstrate a procedure. If the chunks contain an example, cite it. If they do not, describe only the steps the chunks state and stop — an incomplete cited answer is correct; a complete invented one is a failure.

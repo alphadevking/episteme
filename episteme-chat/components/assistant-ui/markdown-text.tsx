@@ -95,13 +95,13 @@ const badgeClass =
 const CitationBadge: FC<{ n: number; children?: React.ReactNode }> = ({ n, children }) => {
   const source = useCitation(n);
 
-  if (!source) {
-    return (
-      <sup className={cn(badgeClass, "cursor-default bg-primary/10 text-primary ring-primary/20")}>
-        {children}
-      </sup>
-    );
-  }
+  // Every sourced answer registers its real sources via CitationProvider, so
+  // a number that doesn't resolve is always a stale or hallucinated
+  // reference (e.g. the model reusing a number from an earlier turn, where
+  // numbering also restarts at 1). A numbered pill implies a real citation
+  // backs it — showing one here would be more misleading than showing
+  // nothing, so the marker is dropped rather than rendered as an inert badge.
+  if (!source) return null;
 
   return (
     <Tooltip>
