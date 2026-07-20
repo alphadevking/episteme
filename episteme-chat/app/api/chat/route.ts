@@ -37,6 +37,52 @@ function trimMessages(messages: UIMessage[]): UIMessage[] {
   return messages.slice(-MAX_MESSAGES_TO_MASTRA);
 }
 
+// ── SSE chunk sanitizer ───────────────────────────────────────────────────
+// Drops `data: {...}` frames whose JSON payload has no `type` field, which
+// is what Mastra's internal metadata events (scorer results, memory
+// title-gen) look like. Everything else — including the `data: [DONE]`
+// sentinel and non-JSON lines — passes through byte-for-byte.
+function shouldDropSseLine(line: string): boolean {
+  if (!line.startsWith("data:")) return false;
+  const payload = line.slice(5).trim();
+  if (payload === "[DONE]") return false;
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    return (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as { type?: unknown }).type === undefined
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sseTypeFilterTransform(): TransformStream<Uint8Array, Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+
+  return new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true });
+
+      // Keep the last, possibly-incomplete line in the buffer for next time.
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      const kept = lines.filter((line) => !shouldDropSseLine(line));
+      if (kept.length > 0) controller.enqueue(encoder.encode(kept.join("\n") + "\n"));
+    },
+    flush(controller) {
+      buffer += decoder.decode();
+      if (buffer.length > 0 && !shouldDropSseLine(buffer)) {
+        controller.enqueue(encoder.encode(buffer));
+      }
+    },
+  });
+}
+
 // ── System prompt builder ─────────────────────────────────────────────────
 function buildSystem(parts: (string | null | undefined)[]): string {
   return parts.filter(Boolean).join(" ").trim();
@@ -243,8 +289,18 @@ export async function POST(req: Request) {
     },
   });
 
+  // Mastra's chatRoute() emits internal metadata events (scorer results,
+  // memory title-gen callbacks) as SSE `data:` frames whose JSON has no
+  // `type` field. assistant-ui's stream accumulator has no case for that and
+  // throws "Unsupported chunk type: undefined" — sometimes as an uncaught
+  // render-time error, not a promise rejection, so a client-side try/catch
+  // can't reliably intercept it. Drop those frames here, at the one place
+  // that already owns this stream, so malformed chunks never reach the
+  // client parser at all.
+  const sanitizeTransform = sseTypeFilterTransform();
+
   const instrumentedBody = upstreamResponse.body
-    ? upstreamResponse.body.pipeThrough(ttftTransform)
+    ? upstreamResponse.body.pipeThrough(ttftTransform).pipeThrough(sanitizeTransform)
     : null;
 
   const headers = new Headers(upstreamResponse.headers);

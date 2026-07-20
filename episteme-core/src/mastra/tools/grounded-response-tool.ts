@@ -53,7 +53,22 @@ function deriveTitle(source: string): string {
   }
 }
 
-function buildGroundedContext(retrieval: KnowledgeRetrievalResponse & { found: true }): string {
+type GroundedSource = { number: number; title: string; url: string };
+
+/**
+ * Builds the model-facing context and the client-facing source list from the
+ * same dedup pass, so the two can never drift apart the way a model-copied
+ * "## Sources" markdown list could.
+ *
+ * The source list is NOT included in the text handed to the model — see
+ * `toModelOutput` below. Asking the model to transcribe a source list into
+ * markdown was measured to be unreliable (the same failure mode that led
+ * unibenNewsTool to withhold post URLs from the model entirely); the client
+ * renders `sources` directly instead, which cannot be garbled in transit.
+ */
+function buildGroundedContext(
+  retrieval: KnowledgeRetrievalResponse & { found: true },
+): { context: string; sources: GroundedSource[] } {
   const staleWarnings = Array.from(
     new Set(retrieval.results.map((r) => r.staleWarning).filter((w): w is string => Boolean(w)))
   );
@@ -71,7 +86,8 @@ function buildGroundedContext(retrieval: KnowledgeRetrievalResponse & { found: t
   const lines: string[] = [
     'VERIFIED SOURCES — synthesize your answer exclusively from these chunks.',
     'Cite each fact inline as [N](cite:N) where N is the source number shown below (e.g. [1](cite:1)).',
-    'After your complete answer body, output a ## Sources section as a numbered markdown list copied exactly from the SOURCES LIST below.',
+    'The reader sees a numbered source list rendered below your answer automatically — do not add a',
+    '## Sources section, do not restate the list, and do not paste any URL into your answer.',
   ];
 
   if (staleWarnings.length > 0) lines.push('', ...staleWarnings);
@@ -82,13 +98,12 @@ function buildGroundedContext(retrieval: KnowledgeRetrievalResponse & { found: t
     lines.push(`[Source ${src.number}] ${r.content}`);
   });
 
-  lines.push('');
-  lines.push('SOURCES LIST (copy exactly into ## Sources):');
-  for (const [url, { number, title }] of sourceIndex) {
-    lines.push(`${number}. [${title}](${url})`);
-  }
+  const sources: GroundedSource[] = Array.from(
+    sourceIndex,
+    ([url, { number, title }]) => ({ number, title, url }),
+  );
 
-  return lines.join('\n');
+  return { context: lines.join('\n'), sources };
 }
 
 function buildAbstentionAnswer(query: string): string {
@@ -156,7 +171,27 @@ export const groundedResponseTool = createTool({
         '"high" = verified KB chunks returned — synthesize a clear answer from them, preserving all citation tags. ' +
         '"low" = no results found — the answer field is a NO_RESULTS signal. Write a response that acknowledges the gap and offers 2–3 concrete refinement options the user can choose from.'
       ),
+    /**
+     * Structured source list for the client. The chat UI renders its Sources
+     * list from THIS — never from the model's markdown — mirroring
+     * unibenNewsTool's `posts` field. Withheld from the model; see
+     * `toModelOutput`.
+     */
+    sources: z.array(z.object({
+      number: z.number().int(),
+      title:  z.string(),
+      url:    z.string(),
+    })).describe('Source list for client rendering. Empty when confidence=low.'),
   }),
+  /**
+   * Withhold `sources` from the model — see the comment on buildGroundedContext.
+   * Must be a tagged tool-result envelope ({type,value}), matching
+   * unibenNewsTool's toModelOutput (a bare object 422s against the provider).
+   */
+  toModelOutput: (output) => {
+    const { answer, confidence } = output as { answer: string; confidence: 'high' | 'low' };
+    return { type: 'json' as const, value: { answer, confidence } };
+  },
   execute: async (inputData, context) => {
     const { query, programme, level, department, related_topics } =
       inputData as {
@@ -187,9 +222,11 @@ export const groundedResponseTool = createTool({
     // A maxScore below relevanceThreshold means retrieval found the "best available" match,
     // not a genuinely on-topic one. Treat it as not found rather than mislead with off-topic chunks.
     if (retrieval.found && retrieval.maxScore >= RETRIEVAL_CONFIG.relevanceThreshold) {
+      const { context, sources } = buildGroundedContext(retrieval);
       return {
-        answer: buildGroundedContext(retrieval),
+        answer: context,
         confidence: 'high' as const,
+        sources,
       };
     }
 
@@ -197,6 +234,7 @@ export const groundedResponseTool = createTool({
     return {
       answer: buildAbstentionAnswer(query),
       confidence: 'low' as const,
+      sources: [],
     };
   },
 });

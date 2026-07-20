@@ -134,8 +134,23 @@ export async function retrieveKnowledge(inputData: {
     };
   }
 
-  allMatches.sort((a, b) => b.score - a.score);
-  const maxScore = allMatches[0].score;
+  const maxScore = Math.max(...allMatches.map((m) => m.score));
+
+  // Relevance is the primary signal — Pinecone's score is the only real
+  // measure of "does this chunk answer the question." But within a band of
+  // near-equal relevance, prefer the more recently updated document: two
+  // chunks that are equally on-topic shouldn't leave the answer to pick
+  // whichever happened to embed marginally closer, when one of them is known
+  // to be stale. Outside that band, relevance still wins — a newer but
+  // off-topic chunk must never outrank the actually-relevant one.
+  const RELEVANCE_TIE_EPSILON = 0.02;
+  allMatches.sort((a, b) => {
+    const scoreDiff = b.score - a.score;
+    if (Math.abs(scoreDiff) > RELEVANCE_TIE_EPSILON) return scoreDiff;
+    const aTime = new Date(a.metadata['updatedAt'] as string).getTime();
+    const bTime = new Date(b.metadata['updatedAt'] as string).getTime();
+    return bTime - aTime;
+  });
 
   const seenParents = new Set<string>();
   const retrievalResults: KnowledgeRetrievalResult[] = [];

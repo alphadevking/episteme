@@ -127,7 +127,8 @@ const CitationBadge: FC<{ n: number; children?: React.ReactNode }> = ({ n, child
         <p className="font-medium leading-snug">{source.title}</p>
         <p className="mt-0.5 text-background/70">
           {source.dateLabel ? `${source.dateLabel} · ` : ""}
-          Live from {(() => { try { return new URL(source.url).hostname; } catch { return "source"; } })()}
+          {source.tier === "live" ? "Live from " : ""}
+          {(() => { try { return new URL(source.url).hostname; } catch { return "source"; } })()}
         </p>
       </TooltipContent>
     </Tooltip>

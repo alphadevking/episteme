@@ -94,8 +94,9 @@ export const formatScorer = createScorer({
   name: 'Response Format',
   description:
     'Clarifications and low-confidence abstentions must offer lettered (A)/(B) options on ' +
-    'their own lines; high-confidence grounded answers must cite inline and end with a ' +
-    '## Sources section. Other behaviours pass vacuously.',
+    'their own lines; high-confidence grounded answers must cite inline as (cite:N) and leave ' +
+    'the source list to the client — no ## Sources section, no pasted URLs. Other behaviours ' +
+    'pass vacuously.',
 })
   .preprocess(({ run }) => parts(run as Run))
   .generateScore(({ results }) => {
@@ -118,8 +119,12 @@ export const formatScorer = createScorer({
       // Abstention shape: refinement options, no fabricated Sources section.
       const abstained = hasOptions(out.text) && !/## Sources/.test(out.text);
       if (out.groundedConfidence === 'high') {
-        const cited = /## Sources/.test(out.text)
-          && /\(cite:\d+\)/.test(out.text)
+        // The client renders the source list from tool output now — the model
+        // must cite inline and must NOT reproduce it as prose (## Sources
+        // section, a pasted URL) or stack badges on one claim.
+        const cited = /\(cite:\d+\)/.test(out.text)
+          && !/## Sources/.test(out.text)
+          && !/https?:\/\//.test(out.text)
           && !hasStackedCitations(out.text);
         // Rule 2 lets the agent downgrade high→low when the chunks don't address
         // the question, so a well-formed abstention is also valid here. Both
@@ -153,13 +158,17 @@ export const formatScorer = createScorer({
       if (score !== 1) {
         const why = hasStackedCitations(out.text)
           ? 'stacked cite badges on one claim'
-          : 'neither a cited answer nor a valid (A)/(B) abstention';
+          : /## Sources/.test(out.text)
+            ? 'wrote a ## Sources section — the client renders it now'
+            : /https?:\/\//.test(out.text)
+              ? 'pasted a URL into the answer'
+              : 'neither a cited answer nor a valid (A)/(B) abstention';
         return `confidence=${conf} → format violation: ${why}.`;
       }
       // Surface the Rule 2 downgrade explicitly — it passes, but repeated
       // downgrades on high-confidence retrieval mean over-abstention or a
       // relevanceThreshold set too low, and that should be visible here.
-      if (conf === 'high' && !/## Sources/.test(out.text)) {
+      if (conf === 'high' && !/\(cite:\d+\)/.test(out.text)) {
         return 'confidence=high but agent abstained (Rule 2 downgrade — chunks judged off-topic). Valid, but watch for over-abstention.';
       }
       return `confidence=${conf} → format correct.`;
@@ -213,9 +222,7 @@ export const evalFaithfulnessScorer = createScorer({
       return { applicable: false, hallucinated: [] as string[], total: 0 };
     }
     const sources  = out.toolAnswer.toLowerCase();
-    // Ignore the Sources footer — its titles/URLs are copied from the tool output.
-    const body     = out.text.split(/## Sources/i)[0];
-    const entities = extractEntities(body);
+    const entities = extractEntities(out.text);
     const hallucinated = entities.filter((e) => !sources.includes(e.toLowerCase()));
     return { applicable: true, hallucinated, total: entities.length };
   })

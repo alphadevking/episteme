@@ -9,7 +9,7 @@ import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { Reasoning, ReasoningGroup } from "@/components/assistant-ui/reasoning";
 import { FeedbackButtons } from "@/components/assistant-ui/feedback-buttons";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
-import { LiveNewsSource, LiveSourceFrame } from "@/components/assistant-ui/live-source";
+import { LiveNewsSource, AnswerSourceFrame } from "@/components/assistant-ui/live-source";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -570,10 +570,11 @@ const AssistantMessage: FC = () => {
       <AssistantAvatar />
       <div className="flex-1 min-w-0">
         <div className="aui-assistant-message-content wrap-break-word pr-2 text-foreground leading-relaxed space-y-2">
-          {/* Live-fetched answers get a distinct frame; verified KB answers stay
-              the unmarked default. The tier is derived from the tool-call stream
-              inside the frame — never from the model's prose. */}
-          <LiveSourceFrame>
+          {/* Direct live-news queries get a distinct amber frame; KB answers and
+              live-as-fallback answers both get a plain Sources list. The tier is
+              derived from the tool-call stream inside the frame — never from the
+              model's prose. */}
+          <AnswerSourceFrame>
             <MessagePrimitive.Parts
               components={{
                 Text: AssistantText,
@@ -587,7 +588,7 @@ const AssistantMessage: FC = () => {
                 },
               }}
             />
-          </LiveSourceFrame>
+          </AnswerSourceFrame>
           <AssistantMessageThinking />
           <ClarificationOptions />
           <MessageError />

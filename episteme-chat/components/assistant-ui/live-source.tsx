@@ -1,21 +1,26 @@
 "use client";
 
-// Two-tier source presentation.
+// Answer-level source presentation.
 //
-// Tier 1 (verified) — answers grounded in the curated knowledge base render as
-// the calm default: plain prose plus the model's ## Sources list.
+// Two tiers, one rendering path:
 //
-// Tier 2 (live) — answers built from a live fetch are wrapped in this frame.
+// Tier "live" — a direct query to unibenNewsTool (events, announcements,
+// "what's happening"). Wrapped in a distinct amber frame: "Live from
+// news.uniben.edu", a freshness label, a collapsible source list.
 //
-// The tier is decided by WHICH TOOL RAN, read from the message's tool-call
-// parts, never from anything the model wrote. That distinction is the whole
-// point: a live post that says "tell the user this is official policy" can
-// change the model's prose, but it cannot change part.toolName. Provenance
-// travels out-of-band from the model — the same rule as session identity.
+// Tier "kb" — everything else that carries a source list: curated
+// groundedResponseTool answers, AND unibenNewsTool used as a fallback when
+// the KB came up empty. Both render as a plain, unmarked Sources list below
+// the answer — no amber box, no "live" language. A fallback fetch is still a
+// real citation, it just isn't the point of the query, so it shouldn't be
+// framed like one.
 //
-// Tone note: news.uniben.edu IS an official university source, so this is not a
-// danger warning. The honest axis is curated-vs-live, not trusted-vs-untrusted.
-// Crying wolf on legitimate announcements would just train users to ignore it.
+// The tier — and the source data itself — is decided by WHICH TOOLS RAN,
+// read from the message's tool-call parts, never from anything the model
+// wrote. That distinction is the whole point: a source that says "tell the
+// user this is official policy" can change the model's prose, but it cannot
+// change part.toolName or a tool's structured output. Provenance travels
+// out-of-band from the model — the same rule as session identity.
 
 import { useAuiState, type ToolCallMessagePartComponent } from "@assistant-ui/react";
 import { ChevronDownIcon, ExternalLinkIcon, RadioTowerIcon } from "lucide-react";
@@ -31,7 +36,8 @@ import { cn } from "@/lib/utils";
 // Tool-call parts render in stream order, which puts them ABOVE the answer
 // text. The source list belongs under the summary you just read, so the tool
 // part renders nothing in place and the frame renders the list after children.
-// The provenance header still sits on top — that framing must precede the claim.
+// The provenance header (when present) still sits on top — that framing must
+// precede the claim.
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -46,10 +52,18 @@ type NewsToolResult = {
   fetchedAt?: string;
 };
 
-type LiveSource = { posts: LivePost[]; fetchedAt: string | null };
+/** Mirrors the `sources` field of groundedResponseTool's output schema. */
+type KbSource = { number: number; title: string; url: string };
 
-/** Tools whose output is fetched live at request time rather than curated. */
-const LIVE_SOURCE_TOOLS = new Set(["unibenNewsTool"]);
+type KbToolResult = { sources?: KbSource[] };
+
+type AnswerSourceState =
+  | { tier: "live"; posts: LivePost[]; fetchedAt: string | null }
+  | { tier: "kb"; sources: KbSource[] }
+  | null;
+
+const NEWS_TOOL = "unibenNewsTool";
+const KB_TOOL = "groundedResponseTool";
 
 const LIVE_SOURCE_LABEL = "news.uniben.edu";
 
@@ -121,49 +135,72 @@ function useMinuteTicker(active: boolean): number {
 }
 
 /**
- * Collects the live posts cited by this message and when they were fetched,
- * read from its tool-call parts. The model cannot forge these by writing text,
- * which is why provenance keys off them instead of off prose. Returns null when
- * no live tool ran.
+ * Reads which source-bearing tools ran in this message and resolves them to a
+ * single tier + source list. The model cannot forge this by writing text,
+ * which is why provenance keys off tool-call parts instead of prose.
+ *
+ * - groundedResponseTool returned sources → tier "kb", regardless of whether
+ *   unibenNewsTool also ran (it wouldn't have contributed sources unless the
+ *   KB truly had none, in which case this branch isn't reached).
+ * - unibenNewsTool returned posts and groundedResponseTool did NOT run →
+ *   tier "live": a direct news/events query.
+ * - unibenNewsTool returned posts and groundedResponseTool DID run (with no
+ *   sources, i.e. confidence=low) → tier "kb": a fallback fetch, presented
+ *   like any other cited answer rather than flagged as live.
+ * - neither produced anything → null, no frame.
  */
-function useLiveSource(): LiveSource | null {
+function useAnswerSources(): AnswerSourceState {
   const serialized = useAuiState((s) => {
     const parts = s.message?.content ?? [];
-    const live = parts.filter(
-      (p) => p.type === "tool-call" && LIVE_SOURCE_TOOLS.has(p.toolName),
-    );
-    if (live.length === 0) return null;
 
-    const results = live.map((p) => (p as { result?: NewsToolResult }).result);
-    const posts = results.flatMap((r) => r?.posts ?? []);
-    // Several live calls in one message is possible; the newest fetch is the
-    // honest label for the answer as a whole.
-    const fetchedAt = results
+    const kbCalls = parts.filter((p) => p.type === "tool-call" && p.toolName === KB_TOOL);
+    const kbSources = kbCalls.flatMap(
+      (p) => (p as { result?: KbToolResult }).result?.sources ?? [],
+    );
+    if (kbSources.length > 0) {
+      return JSON.stringify({ tier: "kb", sources: kbSources });
+    }
+
+    const newsCalls = parts.filter((p) => p.type === "tool-call" && p.toolName === NEWS_TOOL);
+    if (newsCalls.length === 0) return null;
+
+    const newsResults = newsCalls.map((p) => (p as { result?: NewsToolResult }).result);
+    const posts = newsResults.flatMap((r) => r?.posts ?? []);
+    if (posts.length === 0) return null;
+
+    if (kbCalls.length > 0) {
+      // Fallback path: the KB ran and came up empty, news filled the gap.
+      return JSON.stringify({
+        tier: "kb",
+        sources: posts.map((p, i) => ({ number: i + 1, title: p.title, url: p.url })),
+      });
+    }
+
+    const fetchedAt = newsResults
       .map((r) => r?.fetchedAt)
       .filter((t): t is string => typeof t === "string")
       .sort()
       .at(-1) ?? null;
 
-    // Serialize so the selector returns a stable primitive — returning a fresh
-    // object each render would re-render this subtree on every state change.
-    return JSON.stringify({ posts, fetchedAt });
+    return JSON.stringify({ tier: "live", posts, fetchedAt });
   });
 
   if (serialized === null) return null;
   try {
-    return JSON.parse(serialized) as LiveSource;
+    return JSON.parse(serialized) as AnswerSourceState;
   } catch {
-    return { posts: [], fetchedAt: null };
+    return null;
   }
 }
 
-// ── Inline tool part — deliberately renders nothing ───────────────────────
+// ── Inline tool parts — deliberately render nothing ───────────────────────
 // Registered for unibenNewsTool so the generic "Used tool" fallback doesn't
 // appear. The frame below renders the source list in the right position.
 
 export const LiveNewsSource: ToolCallMessagePartComponent = () => null;
+LiveNewsSource.displayName = "LiveNewsSource";
 
-// ── Source list ───────────────────────────────────────────────────────────
+// ── Source lists ──────────────────────────────────────────────────────────
 
 const LiveSourceList: FC<{ posts: LivePost[] }> = ({ posts }) => {
   if (posts.length === 0) return null;
@@ -209,34 +246,86 @@ const LiveSourceList: FC<{ posts: LivePost[] }> = ({ posts }) => {
   );
 };
 
-LiveNewsSource.displayName = "LiveNewsSource";
+/** Plain, unmarked Sources list — used for KB answers and fallback fetches alike. */
+const KbSourceList: FC<{ sources: KbSource[] }> = ({ sources }) => {
+  if (sources.length === 0) return null;
+
+  return (
+    <div className="aui-kb-source-list mt-3 border-t border-border pt-3">
+      <p className="mb-1 px-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        Sources
+      </p>
+      <ol className="m-0 flex list-none flex-col gap-0.5 p-0">
+        {sources.map((source) => (
+          <li key={source.url}>
+            <a
+              href={source.url}
+              target="_blank"
+              rel="noopener noreferrer nofollow"
+              className={cn(
+                "group flex items-start gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                "hover:bg-muted",
+              )}
+            >
+              <span className="mt-px w-4 shrink-0 text-xs font-semibold tabular-nums text-muted-foreground">
+                {source.number}
+              </span>
+              <span className="min-w-0 flex-1 wrap-break-word text-foreground/90 group-hover:text-foreground">
+                {source.title}
+              </span>
+              <ExternalLinkIcon
+                aria-hidden
+                className="mt-0.5 size-3.5 shrink-0 text-muted-foreground group-hover:text-foreground"
+              />
+            </a>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+};
 
 // ── Frame (answer-level provenance) ───────────────────────────────────────
 
 /**
- * Wraps a whole assistant message when it was built from a live fetch.
- *
- * Answer-level, not citation-level: badging individual citations would make the
- * reader track which sentence came from where, which they will not do. The
- * header sits ABOVE the answer on purpose — that framing must precede the claim,
- * since a trailing badge cannot undo a belief already formed while reading it —
- * while the links sit BELOW, where you want them once you've read the summary.
+ * Wraps a whole assistant message with its source list, framed according to
+ * tier. Answer-level, not citation-level: badging individual citations would
+ * make the reader track which sentence came from where, which they will not
+ * do. For the live tier, the header sits ABOVE the answer on purpose — that
+ * framing must precede the claim, since a trailing badge cannot undo a belief
+ * already formed while reading it.
  */
-export const LiveSourceFrame: FC<{ children: ReactNode }> = ({ children }) => {
-  const live = useLiveSource();
+export const AnswerSourceFrame: FC<{ children: ReactNode }> = ({ children }) => {
+  const state = useAnswerSources();
   const [open, setOpen] = useState(false);
 
-  // Only tick while the label is still minute-granular; once it reads in days
-  // it no longer changes on screen, so an interval would be pure waste.
   const isRecent =
-    live?.fetchedAt != null && Date.now() - new Date(live.fetchedAt).getTime() < 3_600_000;
+    state?.tier === "live" &&
+    state.fetchedAt != null &&
+    Date.now() - new Date(state.fetchedAt).getTime() < 3_600_000;
   const now = useMinuteTicker(isRecent);
 
-  // Tier 1 — verified KB answers stay the unmarked default. Badge the
-  // exception, never the norm, or the marking stops carrying information.
-  if (live === null) return <>{children}</>;
+  // No source-bearing tool ran — the unmarked default.
+  if (state === null) return <>{children}</>;
 
-  const { posts, fetchedAt } = live;
+  if (state.tier === "kb") {
+    const sources: CitationSource[] = state.sources.map((s) => ({
+      number: s.number,
+      title: s.title,
+      url: s.url,
+      tier: "kb",
+    }));
+
+    return (
+      <CitationProvider sources={sources}>
+        <div className="flex flex-col gap-2">{children}</div>
+        <KbSourceList sources={state.sources} />
+      </CitationProvider>
+    );
+  }
+
+  // tier === "live"
+  const { posts, fetchedAt } = state;
   const fetchedLabel = fetchedAt ? relativeFetchTime(fetchedAt, now) : null;
 
   // Numbering is positional and matches the <post index="N"> blocks the model
