@@ -15,7 +15,6 @@ import { LEVEL_OPTIONS } from "@/lib/constants/academic";
 import { cn } from "@/lib/utils";
 import {
   BookOpenIcon,
-  BuildingIcon,
   CheckCircle2Icon,
   GraduationCapIcon,
   SearchIcon,
@@ -429,12 +428,9 @@ const ROLES: {
       description: "I'm supporting a student",
       icon: <UsersIcon className="size-5" />,
     },
-    {
-      value: "staff",
-      label: "Staff / Faculty",
-      description: "I work at a university",
-      icon: <BuildingIcon className="size-5" />,
-    },
+    // "staff" is intentionally not self-selectable here. Staff/HOD accounts are
+    // provisioned only via an admin-issued invite link (fn_redeem_invite_token),
+    // never through self-service onboarding — see app/onboarding/redeem/page.tsx.
   ];
 
 function StepIdentity({

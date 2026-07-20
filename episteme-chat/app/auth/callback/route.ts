@@ -33,13 +33,12 @@ export async function GET(request: Request) {
     .eq("auth_id", authUser.id)
     .maybeSingle();
 
-  // Audit sign-in (best-effort — never block the redirect).
-  void supabase.rpc("fn_write_audit_log", {
-    p_action:         "user_sign_in",
-    p_resource_type:  "session",
-    p_resource_id:    profile?.id ?? null,
-    p_institution_id: profile?.institution_id ?? null,
-  });
+  // Audit sign-in (best-effort — never block the redirect). Actor + institution
+  // are derived server-side inside fn_log_auth_event from auth.uid(), so the
+  // entry cannot be forged with arbitrary values.
+  void (supabase as unknown as {
+    rpc(fn: "fn_log_auth_event", args: { p_action: string }): Promise<unknown>;
+  }).rpc("fn_log_auth_event", { p_action: "user_sign_in" });
 
   // No profile, inactive, or missing institution → onboarding.
   // Superadmins are exempt from the institution_id requirement.

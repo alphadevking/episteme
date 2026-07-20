@@ -115,18 +115,24 @@ export async function POST(req: Request) {
 
   // ── Mirror trust level into user_ai_context for fast chat-route reads ─
   // Non-fatal — chat route falls back gracefully if this lags behind.
+  // Goes through fn_self_report_student (SECURITY DEFINER), which caps
+  // trust_level at 2 and forces verified=false server-side, regardless of
+  // what's passed here. See
+  // supabase/migrations/DRAFT_lock_down_privilege_columns.sql — depends on
+  // that migration having been applied.
 
-  supabase
-    .from("user_ai_context")
-    .upsert(
-      {
-        user_id: profile.id,   // public.users.id, not auth UUID
-        trust_level: 2,
-        matric_number: normalized,
-        verified: false,
-      },
-      { onConflict: "user_id" },
-    )
+  (
+    supabase as unknown as {
+      rpc(
+        fn: "fn_self_report_student",
+        args: { p_matric_number: string; p_institution_id: string },
+      ): Promise<{ error: { message: string } | null }>;
+    }
+  )
+    .rpc("fn_self_report_student", {
+      p_matric_number: normalized,
+      p_institution_id: institutionId,
+    })
     .then(({ error: e }) => {
       if (e) console.warn("[verify-student] user_ai_context sync skipped:", e.message);
     });

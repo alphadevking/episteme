@@ -5,7 +5,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
-import type { Database } from "@/lib/types/database";
 import { ShieldCheckIcon } from "lucide-react";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
@@ -25,12 +24,13 @@ export function ProvisionAdminForm() {
     setError(null);
     setSaving(true);
 
-    // fn_provision_superadmin is for superadmins — for admin provisioning
-    // we UPDATE the user's roles directly. The user must exist and have
-    // an institution_id set (completed onboarding).
+    // Admin provisioning goes through the gated fn_admin_set_user_role RPC
+    // (SECURITY DEFINER): the DB enforces that the caller is a superadmin (or
+    // same-institution admin) and merges the 'admin' role. The user must exist
+    // and have completed onboarding (institution set).
     const { data: target, error: findErr } = await supabase
       .from("users")
-      .select("id, institution_id, roles")
+      .select("id, institution_id")
       .eq("email", email.trim())
       .maybeSingle();
 
@@ -46,14 +46,14 @@ export function ProvisionAdminForm() {
       return;
     }
 
-    const updatedRoles = Array.from(
-      new Set([...(target.roles ?? []), "admin"]),
-    ).filter((r) => r !== "prospective");
-
-    const { error: updateErr } = await supabase
-      .from("users")
-      .update({ primary_role: "admin", roles: updatedRoles as Database["public"]["Enums"]["user_role"][] })
-      .eq("id", target.id);
+    const { error: updateErr } = await (
+      supabase as unknown as {
+        rpc(
+          fn: "fn_admin_set_user_role",
+          args: { p_target_user_id: string; p_role: string },
+        ): Promise<{ error: { message: string } | null }>;
+      }
+    ).rpc("fn_admin_set_user_role", { p_target_user_id: target.id, p_role: "admin" });
 
     setSaving(false);
 

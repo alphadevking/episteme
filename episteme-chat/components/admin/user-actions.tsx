@@ -4,14 +4,29 @@
 
 import { Button } from "@/components/ui/button";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
-import type { Database } from "@/lib/types/database";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
+// `userId` is the public.users.id (passed as user.id from the detail page),
+// which is what the admin RPCs expect as p_target_user_id.
 type Props = {
   userId: string;
   currentStatus: string;
   currentRole: string;
+};
+
+// Gated SECURITY DEFINER RPCs replace the previous direct users UPDATE (which
+// also had a latent bug: it filtered on auth_id using a users.id value). The
+// DB enforces the admin/superadmin + same-institution authorization.
+type AdminUserRpc = {
+  rpc(
+    fn: "fn_admin_set_user_status",
+    args: { p_target_user_id: string; p_status: string },
+  ): Promise<{ error: { message: string } | null }>;
+  rpc(
+    fn: "fn_admin_set_user_role",
+    args: { p_target_user_id: string; p_role: string },
+  ): Promise<{ error: { message: string } | null }>;
 };
 
 const ROLES = [
@@ -30,10 +45,10 @@ export function UserActions({ userId, currentStatus, currentRole }: Props) {
 
   const setStatus = async (status: string) => {
     setSaving(true);
-    const { error: e } = await supabase
-      .from("users")
-      .update({ status: status as Database["public"]["Enums"]["account_status"] })
-      .eq("auth_id", userId);
+    const { error: e } = await (supabase as unknown as AdminUserRpc).rpc(
+      "fn_admin_set_user_status",
+      { p_target_user_id: userId, p_status: status },
+    );
     setSaving(false);
     if (e) { setError(e.message); return; }
     router.refresh();
@@ -41,10 +56,10 @@ export function UserActions({ userId, currentStatus, currentRole }: Props) {
 
   const saveRole = async () => {
     setSaving(true);
-    const { error: e } = await supabase
-      .from("users")
-      .update({ primary_role: role as Database["public"]["Enums"]["user_role"], roles: [role] as Database["public"]["Enums"]["user_role"][] })
-      .eq("auth_id", userId);
+    const { error: e } = await (supabase as unknown as AdminUserRpc).rpc(
+      "fn_admin_set_user_role",
+      { p_target_user_id: userId, p_role: role },
+    );
     setSaving(false);
     if (e) { setError(e.message); return; }
     setOpen(false);

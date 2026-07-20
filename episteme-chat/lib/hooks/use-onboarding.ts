@@ -2,7 +2,6 @@
 "use client";
 
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
-import type { Database } from "@/lib/types/database";
 import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
 
@@ -183,32 +182,43 @@ export function useOnboarding({
         if (!merged.role) throw new Error("Role is required.");
         if (!merged.firstName) throw new Error("First name is required.");
 
-        // 1. Read current roles so we APPEND rather than replace.
-        //    Guards against overwriting a provisioned admin/superadmin role.
-        const { data: currentUser } = await supabase
-          .from("users")
-          .select("roles")
-          .eq("id", userId)
-          .maybeSingle();
+        // Staff/HOD are provisioned only via admin-issued invite links
+        // (fn_redeem_invite_token), never through self-service onboarding.
+        // This guard is defense-in-depth for this client path; the actual
+        // security boundary is the database grant on users.roles.
+        if (merged.role === "staff") {
+          throw new Error(
+            "Staff accounts must be provisioned via an admin invite link, not self-service onboarding.",
+          );
+        }
 
-        const existingRoles = (currentUser?.roles ?? []) as string[];
-        const mergedRoles = Array.from(
-          new Set([...existingRoles, merged.role]),
-        ).filter((r) => r !== "prospective");
-
-        // 2. Activate the user account
-        const { error: userErr } = await supabase
-          .from("users")
-          .update({
-            institution_id: merged.institutionId,
-            primary_role: merged.role,
-            roles: mergedRoles as Database["public"]["Enums"]["user_role"][],
-            first_name: merged.firstName,
-            last_name: merged.lastName ?? null,
-            phone: merged.phone ?? null,
-            status: "active",
-          })
-          .eq("id", userId);
+        // 1 & 2. Activate the user account — role, institution, roles[] and
+        // status all live behind fn_onboard_self (SECURITY DEFINER), which
+        // rejects staff/admin/superadmin server-side and merges roles[]
+        // itself. See supabase/migrations/DRAFT_lock_down_privilege_columns.sql
+        // — this call depends on that migration having been applied; the
+        // direct `.from("users").update(...)` this replaced worked only
+        // because those columns were (over-)grantable to `authenticated`.
+        const { error: userErr } = await (
+          supabase as unknown as {
+            rpc(
+              fn: "fn_onboard_self",
+              args: {
+                p_role: string;
+                p_institution_id: string;
+                p_first_name: string;
+                p_last_name: string | null;
+                p_phone: string | null;
+              },
+            ): Promise<{ error: { message: string } | null }>;
+          }
+        ).rpc("fn_onboard_self", {
+          p_role: merged.role,
+          p_institution_id: merged.institutionId,
+          p_first_name: merged.firstName,
+          p_last_name: merged.lastName ?? null,
+          p_phone: merged.phone ?? null,
+        });
 
         if (userErr) throw new Error(userErr.message);
 
@@ -266,13 +276,16 @@ export function useOnboarding({
             });
         }
 
-        // 6. Write AI context — non-fatal
+        // 6. Write AI context — non-fatal. Only NON-locked personalization
+        // columns are written here. The locked columns (role, trust_level,
+        // verified) are owned by fn_onboard_self (role) and the verification
+        // flow (trust_level/verified) — never client-set. fn_onboard_self has
+        // already inserted this row with `role`, so this is an UPDATE.
         supabase
           .from("user_ai_context")
           .upsert(
             {
               user_id: userId,
-              role: merged.role,
               institution: merged.institutionName ?? null,
               programme: merged.programmeInterest ?? merged.programmeName ?? null,
               level: merged.level ?? null,
@@ -282,9 +295,7 @@ export function useOnboarding({
                 department: merged.department ?? null,
               },
               topics_seen: [],
-              trust_level: merged.trustLevel ?? 1,
               matric_number: merged.studentId ?? null,
-              verified: (merged.trustLevel ?? 0) >= 3,
             },
             { onConflict: "user_id" },
           )

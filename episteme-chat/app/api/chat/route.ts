@@ -1,6 +1,11 @@
 // app/api/chat/route.ts
 import { JSONSchema7, type UIMessage } from "ai";
 import { createSupabaseServerClientReadOnly } from "@/lib/supabase/server";
+// Role → retrieval space and trust derivation live in a pure, unit-tested
+// module. Both are derived from the verified `users` row only — never from the
+// user-writable `user_ai_context` — and forwarded as trusted headers, never via
+// the system prompt, so the model can neither see nor alter them.
+import { RETRIEVAL_ROLE, resolveEffectiveRole, deriveTrustLevel } from "@/lib/session-derivation";
 
 export const maxDuration = 30;
 
@@ -35,43 +40,6 @@ function trimMessages(messages: UIMessage[]): UIMessage[] {
 // ── System prompt builder ─────────────────────────────────────────────────
 function buildSystem(parts: (string | null | undefined)[]): string {
   return parts.filter(Boolean).join(" ").trim();
-}
-
-// Maps the effective app role onto the retrieval role space understood by
-// episteme-core (ROLE_NAMESPACES). Sent as a trusted header — never via the
-// system prompt, so the model can neither see nor alter it.
-const RETRIEVAL_ROLE: Record<string, string> = {
-  superadmin:  "staff",
-  admin:       "staff",
-  hod:         "hod",
-  staff:       "staff",
-  student:     "student",
-  parent:      "parent",
-  guardian:    "parent",
-  prospective: "prospective",
-};
-
-// Higher number = more privilege. "prospective" is a default state, not an elevated role.
-const ROLE_PRIORITY: Record<string, number> = {
-  superadmin: 7,
-  admin:      6,
-  hod:        5,
-  staff:      4,
-  student:    3,
-  parent:     2,
-  guardian:   2,
-  prospective: 1,
-};
-
-// Returns the most privileged role from primary_role + roles array,
-// ignoring "prospective" when any elevated role is present.
-function resolveEffectiveRole(primaryRole: string, roles: string[]): string {
-  const candidates = [primaryRole, ...roles].filter(Boolean);
-  const elevated   = candidates.filter((r) => r !== "prospective");
-  const pool       = elevated.length > 0 ? elevated : candidates;
-  return pool.reduce((best, r) =>
-    (ROLE_PRIORITY[r] ?? 0) > (ROLE_PRIORITY[best] ?? 0) ? r : best,
-  );
 }
 
 export async function POST(req: Request) {
@@ -170,21 +138,22 @@ export async function POST(req: Request) {
     }
 
     // Trusted values → headers. Personalization-only values → system prompt.
-    trustLevel    = (aiCtx?.trust_level as number) ?? 1;
+    // Trust is derived from the VERIFIED role (elevated → 4), never from the
+    // user-writable aiCtx.trust_level. Role likewise stays the verified value
+    // from resolveEffectiveRole above — aiCtx.role is display-only and must
+    // never override it, or a user could self-promote via their own row.
+    trustLevel    = deriveTrustLevel(role, aiCtx?.trust_level);
     institutionId = profile?.institution_id ?? null;
     userPublicId  = profile?.id ?? null;
 
     if (aiCtx) {
-      const effectiveRole = aiCtx.role ?? role;
-      const prefs         = (aiCtx.preferences as Record<string, string>) ?? {};
-      const verbosity     = prefs.verbosity  ?? "concise";
-      const department    = prefs.department ?? null;
-      const staffTitle    = prefs.staffTitle ?? null;
-
-      role = effectiveRole;
+      const prefs      = (aiCtx.preferences as Record<string, string>) ?? {};
+      const verbosity  = prefs.verbosity  ?? "concise";
+      const department = prefs.department ?? null;
+      const staffTitle = prefs.staffTitle ?? null;
 
       system = buildSystem([
-        `role=${effectiveRole}`,
+        `role=${role}`,
         aiCtx.institution ? `institution=${aiCtx.institution}` : null,
         aiCtx.programme   ? `programme=${aiCtx.programme}`     : null,
         aiCtx.level       ? `level=${aiCtx.level}`             : null,

@@ -142,10 +142,10 @@ export function HodShell({ departmentName, userName, children }: Props) {
     path === "/hod" ? pathname === path : pathname.startsWith(path);
 
   const signOut = async () => {
-    void supabase.rpc("fn_write_audit_log", {
-      p_action:        "user_sign_out",
-      p_resource_type: "session",
-    });
+    // Constrained, non-forgeable auth logger (actor derived server-side).
+    void (supabase as unknown as {
+      rpc(fn: "fn_log_auth_event", args: { p_action: string }): Promise<unknown>;
+    }).rpc("fn_log_auth_event", { p_action: "user_sign_out" });
     await supabase.auth.signOut();
     router.push("/sign-in");
   };
