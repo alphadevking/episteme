@@ -286,15 +286,23 @@ export const groundedResponseTool = createTool({
     const enrichedQuery = rewriteQuery(query, { programme, level, department, related_topics });
 
     // ── Tier 1: knowledge base ──────────────────────────────────────────────
-    let retrieval = await retrieveKnowledge({
-      query:              enrichedQuery,
-      role:               session.role,
-      programme,
-      level,
-      trustLevel:         session.trustLevel,
-      institutionId:      session.institutionId,
-      namespaceAllowlist: session.namespaceAllowlist,
-    });
+    // Embedding/Pinecone errors here must not crash the whole call — degrade
+    // to "not found" and let the cascade continue to news/web, same as every
+    // other tier in this function already does on failure.
+    let retrieval: KnowledgeRetrievalResponse = { found: false, results: [], message: 'Retrieval failed.' };
+    try {
+      retrieval = await retrieveKnowledge({
+        query:              enrichedQuery,
+        role:               session.role,
+        programme,
+        level,
+        trustLevel:         session.trustLevel,
+        institutionId:      session.institutionId,
+        namespaceAllowlist: session.namespaceAllowlist,
+      });
+    } catch (err) {
+      logger?.warn('[groundedResponseTool] KB retrieval failed', { error: (err as Error).message });
+    }
 
     // Enrichment (prepending programme/level/related-topics context) helps
     // scope-specific queries but can dilute a plain factual one — a static
@@ -304,17 +312,21 @@ export const groundedResponseTool = createTool({
     // unenriched query before conceding the KB tier — costs nothing on the
     // (far more common) success path, since this only runs on a miss.
     if ((!retrieval.found || retrieval.maxScore < RETRIEVAL_CONFIG.relevanceThreshold) && enrichedQuery !== query) {
-      const rawRetrieval = await retrieveKnowledge({
-        query:              query,
-        role:               session.role,
-        programme,
-        level,
-        trustLevel:         session.trustLevel,
-        institutionId:      session.institutionId,
-        namespaceAllowlist: session.namespaceAllowlist,
-      });
-      if (rawRetrieval.found && rawRetrieval.maxScore >= RETRIEVAL_CONFIG.relevanceThreshold) {
-        retrieval = rawRetrieval;
+      try {
+        const rawRetrieval = await retrieveKnowledge({
+          query:              query,
+          role:               session.role,
+          programme,
+          level,
+          trustLevel:         session.trustLevel,
+          institutionId:      session.institutionId,
+          namespaceAllowlist: session.namespaceAllowlist,
+        });
+        if (rawRetrieval.found && rawRetrieval.maxScore >= RETRIEVAL_CONFIG.relevanceThreshold) {
+          retrieval = rawRetrieval;
+        }
+      } catch (err) {
+        logger?.warn('[groundedResponseTool] KB raw-query retry failed', { error: (err as Error).message });
       }
     }
 
