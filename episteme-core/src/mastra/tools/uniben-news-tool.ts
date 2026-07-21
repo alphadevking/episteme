@@ -6,7 +6,7 @@ declare const process: { env: Record<string, string | undefined> };
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface NewsResult {
+export interface NewsResult {
     title: string;
     summary: string;
     url: string;
@@ -147,7 +147,7 @@ async function fetchArticleContent(
     }
 }
 
-async function fetchNewsPosts(query: string): Promise<NewsResult[]> {
+export async function fetchNewsPosts(query: string): Promise<NewsResult[]> {
     const { maxResults, timeoutMs } = UNIBEN_NEWS_CONFIG;
 
     // Use the Worker URL and the Secret Key from your env

@@ -81,7 +81,7 @@ export async function searchWeb(query: string): Promise<WebSearchResponse> {
 // it could paste into prose — the client renders the source list from the
 // tool's structured `results` output, never from the model's own words.
 
-function buildWebContext(results: WebSearchResult[]): string {
+export function buildWebContext(results: WebSearchResult[]): string {
   const lines: string[] = [
     'WEB SEARCH RESULTS — from the public internet, NOT an official Uniben database.',
     '',

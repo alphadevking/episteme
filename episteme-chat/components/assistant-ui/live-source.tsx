@@ -63,10 +63,18 @@ type NewsToolResult = {
   fetchedAt?: string;
 };
 
-/** Mirrors the `sources` field of groundedResponseTool's output schema. */
-type KbSource = { number: number; title: string; url: string; pages: number[] };
+/**
+ * Mirrors the `sources` field of groundedResponseTool's output schema. `pages`
+ * is only ever populated for tier "kb"; `published` only for tier "news".
+ */
+type KbSource = { number: number; title: string; url: string; pages: number[]; published?: string };
 
-type KbToolResult = { sources?: KbSource[] };
+/**
+ * groundedResponseTool now cascades through kb → news → web internally and
+ * reports which tier actually answered — the client reads this directly
+ * instead of cross-referencing which of three separate tools ran.
+ */
+type KbToolResult = { tier?: "kb" | "news" | "web" | "none"; sources?: KbSource[] };
 
 /** Mirrors the `results` field of webSearchTool's output schema. */
 type WebResult = { title: string; url: string };
@@ -153,17 +161,24 @@ function useMinuteTicker(active: boolean): number {
 }
 
 /**
- * Reads which source-bearing tools ran in this message and resolves them to a
- * single tier + source list. The model cannot forge WHICH sources these are by
- * writing text — that part is always read from tool-call parts. But a tool
+ * Reads which source-bearing tool(s) ran in this message and resolves them to
+ * a single tier + source list. The model cannot forge WHICH sources these are
+ * by writing text — that part is always read from tool-call parts. But a tool
  * clearing its own relevance gate doesn't mean the model actually used what it
  * got back: groundedResponseTool can return confidence=high with sources that
  * are merely the "best available" match, and the model (correctly, per its
  * own instructions) writes an uncited abstention instead of forcing a citation
  * onto an off-topic chunk. Showing a source list under an answer that cites
- * nothing is worse than showing none, so every tier below also requires at
+ * nothing is worse than showing none, so every branch below also requires at
  * least one literal `[N](cite:N)` marker somewhere in the answer text — not
  * which N, just that a citation was made at all.
+ *
+ * groundedResponseTool's own cascade (kb → news → web internally) reports
+ * which tier answered via its `tier` field — no need to cross-reference
+ * whether other tools also ran. unibenNewsTool and webSearchTool are only
+ * read here for their OWN direct-call cases (a genuine "what's happening"
+ * query, or a direct NUC/JAMB/TETFund query) — never as fallback detection,
+ * since that fallback now happens inside groundedResponseTool itself.
  */
 const CITE_MARKER = /\]\(cite:\d+\)/;
 
@@ -181,26 +196,26 @@ function useAnswerSources(): AnswerSourceState {
     const cited = hasCitationMarker(parts);
 
     const kbCalls = parts.filter((p) => p.type === "tool-call" && p.toolName === KB_TOOL);
-    const kbSources = kbCalls.flatMap(
-      (p) => (p as { result?: KbToolResult }).result?.sources ?? [],
-    );
-    if (kbSources.length > 0 && cited) {
-      return JSON.stringify({ tier: "kb", sources: kbSources });
+    const kbResult = kbCalls
+      .map((p) => (p as { result?: KbToolResult }).result)
+      .find((r) => r && r.tier && r.tier !== "none" && (r.sources?.length ?? 0) > 0);
+
+    if (kbResult && cited) {
+      if (kbResult.tier === "web") {
+        return JSON.stringify({ tier: "web", sources: kbResult.sources });
+      }
+      // "kb" and "news" (used as a fallback) both render as the plain,
+      // unmarked list — a fallback fetch is still a real citation, it just
+      // isn't the point of the query, so it shouldn't be framed like one.
+      return JSON.stringify({ tier: "kb", sources: kbResult.sources });
     }
 
+    // Direct unibenNewsTool call (Rule 1b) — genuine "what's happening" query.
     const newsCalls = parts.filter((p) => p.type === "tool-call" && p.toolName === NEWS_TOOL);
     const newsResults = newsCalls.map((p) => (p as { result?: NewsToolResult }).result);
     const posts = newsResults.flatMap((r) => r?.posts ?? []);
 
     if (posts.length > 0 && cited) {
-      if (kbCalls.length > 0) {
-        // Fallback path: the KB ran and came up empty, news filled the gap.
-        return JSON.stringify({
-          tier: "kb",
-          sources: posts.map((p, i) => ({ number: i + 1, title: p.title, url: p.url, pages: [] })),
-        });
-      }
-
       const fetchedAt = newsResults
         .map((r) => r?.fetchedAt)
         .filter((t): t is string => typeof t === "string")
@@ -210,6 +225,7 @@ function useAnswerSources(): AnswerSourceState {
       return JSON.stringify({ tier: "live", posts, fetchedAt });
     }
 
+    // Direct webSearchTool call (Rule 1c) — a national-regulatory-body query.
     const webCalls = parts.filter((p) => p.type === "tool-call" && p.toolName === WEB_TOOL);
     const webResults = webCalls.flatMap(
       (p) => (p as { result?: WebToolResult }).result?.results ?? [],

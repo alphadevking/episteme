@@ -4,6 +4,8 @@ import {
   retrieveKnowledge,
   type KnowledgeRetrievalResponse,
 } from './knowledge-retrieval-tool';
+import { fetchNewsPosts, buildNewsContext, type NewsResult } from './uniben-news-tool';
+import { searchWeb, buildWebContext } from './web-search-tool';
 import { RETRIEVAL_CONFIG } from '../config';
 import { getSessionContext } from '../server/session-context';
 
@@ -53,7 +55,12 @@ function deriveTitle(source: string): string {
   }
 }
 
-type GroundedSource = { number: number; title: string; url: string; pages: number[] };
+/**
+ * Unified source shape across all three tiers this tool can resolve from.
+ * `pages` is only ever populated for tier "kb" (paginated documents);
+ * `published` is only ever populated for tier "news".
+ */
+type UnifiedSource = { number: number; title: string; url: string; pages: number[]; published?: string };
 
 /**
  * Builds the model-facing context and the client-facing source list from the
@@ -68,7 +75,7 @@ type GroundedSource = { number: number; title: string; url: string; pages: numbe
  */
 function buildGroundedContext(
   retrieval: KnowledgeRetrievalResponse & { found: true },
-): { context: string; sources: GroundedSource[] } {
+): { context: string; sources: UnifiedSource[] } {
   const staleWarnings = Array.from(
     new Set(retrieval.results.map((r) => r.staleWarning).filter((w): w is string => Boolean(w)))
   );
@@ -101,7 +108,7 @@ function buildGroundedContext(
     lines.push(`[Source ${src.number}] ${r.content}`);
   });
 
-  const sources: GroundedSource[] = Array.from(
+  const sources: UnifiedSource[] = Array.from(
     sourceIndex,
     ([url, { number, title, pages }]) => ({
       number,
@@ -123,11 +130,15 @@ function buildAbstentionAnswer(query: string): string {
 export const groundedResponseTool = createTool({
   id: 'groundedResponseTool',
   description:
-    'Retrieves role-appropriate verified knowledge chunks from the institutional knowledge base. ' +
+    'Retrieves a verified answer for any Uniben question. Internally cascades through three tiers ' +
+    'in order — the institutional knowledge base, then live news as a fallback, then a domain-scoped ' +
+    'web search as a last resort — stopping at the first tier that produces a genuine result. ' +
+    'This is a single call: never call unibenNewsTool or webSearchTool yourself to "fill a gap" after ' +
+    'this tool — it already tried them. ' +
     'The caller\'s role, trust level, and institution are attached server-side from the authenticated ' +
     'session — they are not parameters and cannot be chosen. ' +
     'When confidence=high, returns numbered source chunks for the agent to synthesize into a coherent answer. ' +
-    'When confidence=low, returns a NO_RESULTS signal — the agent should acknowledge the gap and offer the user 2–3 concrete retrieval refinements as (A)/(B)/(C) options.',
+    'When confidence=low, all three tiers came up empty — the agent should acknowledge the gap and offer the user 2–3 concrete retrieval refinements as (A)/(B)/(C) options.',
   inputSchema: z.object({
     query: z.string().describe('The user question or topic to retrieve information about.'),
     programme: z
@@ -176,9 +187,18 @@ export const groundedResponseTool = createTool({
     confidence: z
       .enum(['high', 'low'])
       .describe(
-        '"high" = verified KB chunks returned — synthesize a clear answer from them, preserving all citation tags. ' +
-        '"low" = no results found — the answer field is a NO_RESULTS signal. Write a response that acknowledges the gap and offers 2–3 concrete refinement options the user can choose from.'
+        '"high" = a result was found at some tier (kb, news, or web) — synthesize a clear answer from ' +
+        'the context, preserving all citation tags and following any caveat instructions embedded in it. ' +
+        '"low" = all three tiers came up empty — the answer field is a NO_RESULTS signal. Write a ' +
+        'response that acknowledges the gap and offers 2–3 concrete refinement options the user can choose from.'
       ),
+    /**
+     * Which tier actually produced this result — client-rendering metadata
+     * only, withheld from the model (see toModelOutput). The model doesn't
+     * need it: each tier's context text already embeds its own citation and
+     * caveat instructions (e.g. buildWebContext's "state this is unverified").
+     */
+    tier: z.enum(['kb', 'news', 'web', 'none']),
     /**
      * Structured source list for the client. The chat UI renders its Sources
      * list from THIS — never from the model's markdown — mirroring
@@ -190,14 +210,16 @@ export const groundedResponseTool = createTool({
       title:  z.string(),
       url:    z.string(),
       /** Page numbers (1-based) this source was cited from, sorted ascending.
-       *  Empty when the document has no page structure (e.g. scraped HTML). */
+       *  Only ever populated for tier "kb". */
       pages:  z.array(z.number().int()),
+      /** ISO published date — only ever populated for tier "news". */
+      published: z.string().optional(),
     })).describe('Source list for client rendering. Empty when confidence=low.'),
   }),
   /**
-   * Withhold `sources` from the model — see the comment on buildGroundedContext.
-   * Must be a tagged tool-result envelope ({type,value}), matching
-   * unibenNewsTool's toModelOutput (a bare object 422s against the provider).
+   * Withhold `sources` and `tier` from the model — see the comment on
+   * buildGroundedContext. Must be a tagged tool-result envelope ({type,value}),
+   * matching unibenNewsTool's toModelOutput (a bare object 422s against the provider).
    */
   toModelOutput: (output) => {
     const { answer, confidence } = output as { answer: string; confidence: 'high' | 'low' };
@@ -216,9 +238,11 @@ export const groundedResponseTool = createTool({
     // Security-critical values come ONLY from the server-injected session
     // context (chat-security middleware) — never from model-controlled input.
     const session = getSessionContext(context?.requestContext);
+    const logger  = context?.mastra?.getLogger();
 
     const enrichedQuery = rewriteQuery(query, { programme, level, department, related_topics });
 
+    // ── Tier 1: knowledge base ──────────────────────────────────────────────
     const retrieval = await retrieveKnowledge({
       query:              enrichedQuery,
       role:               session.role,
@@ -231,20 +255,50 @@ export const groundedResponseTool = createTool({
 
     // KB found results — but only surface them if the best score clears the relevance gate.
     // A maxScore below relevanceThreshold means retrieval found the "best available" match,
-    // not a genuinely on-topic one. Treat it as not found rather than mislead with off-topic chunks.
+    // not a genuinely on-topic one. Treat it as not found and fall through to the next tier.
     if (retrieval.found && retrieval.maxScore >= RETRIEVAL_CONFIG.relevanceThreshold) {
-      const { context, sources } = buildGroundedContext(retrieval);
-      return {
-        answer: context,
-        confidence: 'high' as const,
-        sources,
-      };
+      const { context: ctx, sources } = buildGroundedContext(retrieval);
+      return { answer: ctx, confidence: 'high' as const, tier: 'kb' as const, sources };
     }
 
-    // No results, or best match below relevance threshold — return abstention. No web fallback.
+    // ── Tier 2: live news, as a fallback — raw query, not the KB-enriched one ──
+    // News search matches on article titles/summaries; the programme/level
+    // prefix that helps embedding retrieval only dilutes a keyword match here.
+    let newsPosts: NewsResult[] = [];
+    try {
+      newsPosts = await fetchNewsPosts(query);
+    } catch (err) {
+      logger?.warn('[groundedResponseTool] news fallback failed', { error: (err as Error).message });
+    }
+
+    if (newsPosts.length > 0) {
+      const sources: UnifiedSource[] = newsPosts.map((p, i) => ({
+        number: i + 1, title: p.title, url: p.url, pages: [], published: p.published,
+      }));
+      return { answer: buildNewsContext(newsPosts), confidence: 'high' as const, tier: 'news' as const, sources };
+    }
+
+    // ── Tier 3: web search, last resort ─────────────────────────────────────
+    let webFound: { title: string; url: string; content: string; score: number }[] = [];
+    try {
+      const webResponse = await searchWeb(query);
+      if (webResponse.found) webFound = webResponse.results;
+    } catch (err) {
+      logger?.warn('[groundedResponseTool] web fallback failed', { error: (err as Error).message });
+    }
+
+    if (webFound.length > 0) {
+      const sources: UnifiedSource[] = webFound.map((r, i) => ({
+        number: i + 1, title: r.title, url: r.url, pages: [],
+      }));
+      return { answer: buildWebContext(webFound), confidence: 'high' as const, tier: 'web' as const, sources };
+    }
+
+    // ── Nothing found at any tier ────────────────────────────────────────────
     return {
       answer: buildAbstentionAnswer(query),
       confidence: 'low' as const,
+      tier: 'none' as const,
       sources: [],
     };
   },
