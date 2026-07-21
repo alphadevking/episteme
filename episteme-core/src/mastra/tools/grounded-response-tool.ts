@@ -286,7 +286,7 @@ export const groundedResponseTool = createTool({
     const enrichedQuery = rewriteQuery(query, { programme, level, department, related_topics });
 
     // ── Tier 1: knowledge base ──────────────────────────────────────────────
-    const retrieval = await retrieveKnowledge({
+    let retrieval = await retrieveKnowledge({
       query:              enrichedQuery,
       role:               session.role,
       programme,
@@ -295,6 +295,28 @@ export const groundedResponseTool = createTool({
       institutionId:      session.institutionId,
       namespaceAllowlist: session.namespaceAllowlist,
     });
+
+    // Enrichment (prepending programme/level/related-topics context) helps
+    // scope-specific queries but can dilute a plain factual one — a static
+    // fact like "WAEC requirements" doesn't need level/programme context, and
+    // adding it anyway shifts the embedding just enough to occasionally miss
+    // a document that clearly answers the bare query. Retry once with the
+    // unenriched query before conceding the KB tier — costs nothing on the
+    // (far more common) success path, since this only runs on a miss.
+    if ((!retrieval.found || retrieval.maxScore < RETRIEVAL_CONFIG.relevanceThreshold) && enrichedQuery !== query) {
+      const rawRetrieval = await retrieveKnowledge({
+        query:              query,
+        role:               session.role,
+        programme,
+        level,
+        trustLevel:         session.trustLevel,
+        institutionId:      session.institutionId,
+        namespaceAllowlist: session.namespaceAllowlist,
+      });
+      if (rawRetrieval.found && rawRetrieval.maxScore >= RETRIEVAL_CONFIG.relevanceThreshold) {
+        retrieval = rawRetrieval;
+      }
+    }
 
     // KB found results — but only surface them if the best score clears the relevance gate.
     // A maxScore below relevanceThreshold means retrieval found the "best available" match,
