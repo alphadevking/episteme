@@ -125,6 +125,49 @@ function buildAbstentionAnswer(query: string): string {
   return `NO_RESULTS: The knowledge base does not contain verified information matching this query ("${query}"). Use this signal to acknowledge the gap and offer the user 2–3 concrete retrieval refinements based on their context and what was asked.`;
 }
 
+type CascadeHit = { answer: string; tier: 'news' | 'web'; sources: UnifiedSource[] };
+
+/** Tier 2 — live news. Raw query, not the KB-enriched one: news search matches
+ *  on article titles/summaries, and the programme/level prefix that helps
+ *  embedding retrieval only dilutes a keyword match here. */
+async function tryNewsFallback(
+  query: string,
+  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
+): Promise<CascadeHit | null> {
+  let newsPosts: NewsResult[] = [];
+  try {
+    newsPosts = await fetchNewsPosts(query);
+  } catch (err) {
+    logger?.warn('[groundedResponseTool] news fallback failed', { error: (err as Error).message });
+  }
+  if (newsPosts.length === 0) return null;
+
+  const sources: UnifiedSource[] = newsPosts.map((p, i) => ({
+    number: i + 1, title: p.title, url: p.url, pages: [], published: p.published,
+  }));
+  return { answer: buildNewsContext(newsPosts), tier: 'news', sources };
+}
+
+/** Tier 3 — web search, last resort. */
+async function tryWebFallback(
+  query: string,
+  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
+): Promise<CascadeHit | null> {
+  let webFound: { title: string; url: string; content: string; score: number }[] = [];
+  try {
+    const webResponse = await searchWeb(query);
+    if (webResponse.found) webFound = webResponse.results;
+  } catch (err) {
+    logger?.warn('[groundedResponseTool] web fallback failed', { error: (err as Error).message });
+  }
+  if (webFound.length === 0) return null;
+
+  const sources: UnifiedSource[] = webFound.map((r, i) => ({
+    number: i + 1, title: r.title, url: r.url, pages: [],
+  }));
+  return { answer: buildWebContext(webFound), tier: 'web', sources };
+}
+
 // ── Tool definition ───────────────────────────────────────────────────────────
 
 export const groundedResponseTool = createTool({
@@ -258,41 +301,35 @@ export const groundedResponseTool = createTool({
     // not a genuinely on-topic one. Treat it as not found and fall through to the next tier.
     if (retrieval.found && retrieval.maxScore >= RETRIEVAL_CONFIG.relevanceThreshold) {
       const { context: ctx, sources } = buildGroundedContext(retrieval);
+
+      // "Relevant" is not the same as "current" — the top match may itself be
+      // flagged stale (retrieveKnowledge's staleWarning, keyed off the source
+      // document's age). A years-old handbook can clear the relevance gate on
+      // a query like "who is the current VC" while being confidently wrong
+      // about a fact that changes over time. Don't let it permanently mask a
+      // fresher answer: try news, then web, and only fall back to this stale
+      // content (still carrying its own caveat in `ctx`) if neither produces
+      // anything.
+      const topIsStale = retrieval.results[0]?.staleWarning != null;
+      if (!topIsStale) {
+        return { answer: ctx, confidence: 'high' as const, tier: 'kb' as const, sources };
+      }
+
+      const newsHit = await tryNewsFallback(query, logger);
+      if (newsHit) return { answer: newsHit.answer, confidence: 'high' as const, tier: newsHit.tier, sources: newsHit.sources };
+
+      const webHit = await tryWebFallback(query, logger);
+      if (webHit) return { answer: webHit.answer, confidence: 'high' as const, tier: webHit.tier, sources: webHit.sources };
+
       return { answer: ctx, confidence: 'high' as const, tier: 'kb' as const, sources };
     }
 
-    // ── Tier 2: live news, as a fallback — raw query, not the KB-enriched one ──
-    // News search matches on article titles/summaries; the programme/level
-    // prefix that helps embedding retrieval only dilutes a keyword match here.
-    let newsPosts: NewsResult[] = [];
-    try {
-      newsPosts = await fetchNewsPosts(query);
-    } catch (err) {
-      logger?.warn('[groundedResponseTool] news fallback failed', { error: (err as Error).message });
-    }
+    // Below the relevance gate entirely — same cascade, no stale content to fall back to.
+    const newsHit = await tryNewsFallback(query, logger);
+    if (newsHit) return { answer: newsHit.answer, confidence: 'high' as const, tier: newsHit.tier, sources: newsHit.sources };
 
-    if (newsPosts.length > 0) {
-      const sources: UnifiedSource[] = newsPosts.map((p, i) => ({
-        number: i + 1, title: p.title, url: p.url, pages: [], published: p.published,
-      }));
-      return { answer: buildNewsContext(newsPosts), confidence: 'high' as const, tier: 'news' as const, sources };
-    }
-
-    // ── Tier 3: web search, last resort ─────────────────────────────────────
-    let webFound: { title: string; url: string; content: string; score: number }[] = [];
-    try {
-      const webResponse = await searchWeb(query);
-      if (webResponse.found) webFound = webResponse.results;
-    } catch (err) {
-      logger?.warn('[groundedResponseTool] web fallback failed', { error: (err as Error).message });
-    }
-
-    if (webFound.length > 0) {
-      const sources: UnifiedSource[] = webFound.map((r, i) => ({
-        number: i + 1, title: r.title, url: r.url, pages: [],
-      }));
-      return { answer: buildWebContext(webFound), confidence: 'high' as const, tier: 'web' as const, sources };
-    }
+    const webHit = await tryWebFallback(query, logger);
+    if (webHit) return { answer: webHit.answer, confidence: 'high' as const, tier: webHit.tier, sources: webHit.sources };
 
     // ── Nothing found at any tier ────────────────────────────────────────────
     return {

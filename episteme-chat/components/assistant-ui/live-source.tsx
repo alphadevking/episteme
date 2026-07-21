@@ -52,13 +52,16 @@ import { cn } from "@/lib/utils";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
-/** Mirrors the `posts` field of unibenNewsTool's output schema. */
-type LivePost = { title: string; published: string; url: string };
+/** Mirrors the `posts` field of unibenNewsTool's output schema, plus a
+ *  `number` this file attaches — the tool itself numbers posts positionally
+ *  (matching the `<post index="N">` blocks the model was given), so that
+ *  position has to survive filtering down to only the cited ones. */
+type LivePost = { number: number; title: string; published: string; url: string };
 
 type NewsToolResult = {
   found?: boolean;
   count?: number;
-  posts?: LivePost[];
+  posts?: Omit<LivePost, "number">[];
   /** ISO timestamp of the fetch — drives the freshness label. */
   fetchedAt?: string;
 };
@@ -76,10 +79,11 @@ type KbSource = { number: number; title: string; url: string; pages: number[]; p
  */
 type KbToolResult = { tier?: "kb" | "news" | "web" | "none"; sources?: KbSource[] };
 
-/** Mirrors the `results` field of webSearchTool's output schema. */
-type WebResult = { title: string; url: string };
+/** Mirrors the `results` field of webSearchTool's output schema, plus a
+ *  `number` this file attaches for the same reason as LivePost above. */
+type WebResult = { number: number; title: string; url: string };
 
-type WebToolResult = { results?: WebResult[] };
+type WebToolResult = { results?: Omit<WebResult, "number">[] };
 
 type AnswerSourceState =
   | { tier: "live"; posts: LivePost[]; fetchedAt: string | null }
@@ -165,13 +169,14 @@ function useMinuteTicker(active: boolean): number {
  * a single tier + source list. The model cannot forge WHICH sources these are
  * by writing text — that part is always read from tool-call parts. But a tool
  * clearing its own relevance gate doesn't mean the model actually used what it
- * got back: groundedResponseTool can return confidence=high with sources that
- * are merely the "best available" match, and the model (correctly, per its
- * own instructions) writes an uncited abstention instead of forcing a citation
- * onto an off-topic chunk. Showing a source list under an answer that cites
- * nothing is worse than showing none, so every branch below also requires at
- * least one literal `[N](cite:N)` marker somewhere in the answer text — not
- * which N, just that a citation was made at all.
+ * got back: groundedResponseTool can return confidence=high with several
+ * sources (e.g. every news post it fetched), and the model may only end up
+ * citing one of them. Showing the rest anyway is exactly the clutter this was
+ * built to avoid, so every branch below filters the tool's own source list
+ * down to the numbers actually referenced by a literal `[N](cite:N)` marker —
+ * never adds a source the model didn't cite, only ever removes ones it didn't.
+ * If a tool ran but nothing it returned was ever cited, that's the same as no
+ * frame at all.
  *
  * groundedResponseTool's own cascade (kb → news → web internally) reports
  * which tier answered via its `tier` field — no need to cross-reference
@@ -180,42 +185,49 @@ function useMinuteTicker(active: boolean): number {
  * query, or a direct NUC/JAMB/TETFund query) — never as fallback detection,
  * since that fallback now happens inside groundedResponseTool itself.
  */
-const CITE_MARKER = /\]\(cite:\d+\)/;
+const CITE_MARKER = /\]\(cite:(\d+)\)/g;
 
-function hasCitationMarker(parts: readonly { type: string }[]): boolean {
+function extractCitedNumbers(parts: readonly { type: string }[]): Set<number> {
   const text = parts
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
     .map((p) => p.text)
     .join("");
-  return CITE_MARKER.test(text);
+  const numbers = new Set<number>();
+  for (const match of text.matchAll(CITE_MARKER)) numbers.add(Number(match[1]));
+  return numbers;
 }
 
 function useAnswerSources(): AnswerSourceState {
   const serialized = useAuiState((s) => {
     const parts = s.message?.content ?? [];
-    const cited = hasCitationMarker(parts);
+    const citedNumbers = extractCitedNumbers(parts);
 
     const kbCalls = parts.filter((p) => p.type === "tool-call" && p.toolName === KB_TOOL);
     const kbResult = kbCalls
       .map((p) => (p as { result?: KbToolResult }).result)
       .find((r) => r && r.tier && r.tier !== "none" && (r.sources?.length ?? 0) > 0);
 
-    if (kbResult && cited) {
-      if (kbResult.tier === "web") {
-        return JSON.stringify({ tier: "web", sources: kbResult.sources });
+    if (kbResult) {
+      const cited = (kbResult.sources ?? []).filter((s) => citedNumbers.has(s.number));
+      if (cited.length > 0) {
+        // "kb" and "news" (used as a fallback) both render as the plain,
+        // unmarked list — a fallback fetch is still a real citation, it just
+        // isn't the point of the query, so it shouldn't be framed like one.
+        return JSON.stringify({ tier: kbResult.tier === "web" ? "web" : "kb", sources: cited });
       }
-      // "kb" and "news" (used as a fallback) both render as the plain,
-      // unmarked list — a fallback fetch is still a real citation, it just
-      // isn't the point of the query, so it shouldn't be framed like one.
-      return JSON.stringify({ tier: "kb", sources: kbResult.sources });
     }
 
     // Direct unibenNewsTool call (Rule 1b) — genuine "what's happening" query.
+    // Numbered positionally BEFORE filtering, matching the <post index="N">
+    // blocks the model saw — filtering must never shift what [N] resolves to.
     const newsCalls = parts.filter((p) => p.type === "tool-call" && p.toolName === NEWS_TOOL);
     const newsResults = newsCalls.map((p) => (p as { result?: NewsToolResult }).result);
-    const posts = newsResults.flatMap((r) => r?.posts ?? []);
+    const numberedPosts: LivePost[] = newsResults
+      .flatMap((r) => r?.posts ?? [])
+      .map((p, i) => ({ ...p, number: i + 1 }));
+    const posts = numberedPosts.filter((p) => citedNumbers.has(p.number));
 
-    if (posts.length > 0 && cited) {
+    if (posts.length > 0) {
       const fetchedAt = newsResults
         .map((r) => r?.fetchedAt)
         .filter((t): t is string => typeof t === "string")
@@ -226,11 +238,14 @@ function useAnswerSources(): AnswerSourceState {
     }
 
     // Direct webSearchTool call (Rule 1c) — a national-regulatory-body query.
+    // Same positional-numbering-before-filtering reasoning as news above.
     const webCalls = parts.filter((p) => p.type === "tool-call" && p.toolName === WEB_TOOL);
-    const webResults = webCalls.flatMap(
-      (p) => (p as { result?: WebToolResult }).result?.results ?? [],
-    );
-    if (webResults.length > 0 && cited) {
+    const numberedWebResults: WebResult[] = webCalls
+      .flatMap((p) => (p as { result?: WebToolResult }).result?.results ?? [])
+      .map((r, i) => ({ ...r, number: i + 1 }));
+    const webResults = numberedWebResults.filter((r) => citedNumbers.has(r.number));
+
+    if (webResults.length > 0) {
       return JSON.stringify({ tier: "web", sources: webResults });
     }
 
@@ -260,7 +275,7 @@ const LiveSourceList: FC<{ posts: LivePost[] }> = ({ posts }) => {
 
   return (
     <ol className="aui-live-source-list m-0 flex list-none flex-col gap-0.5 p-0">
-      {posts.map((post, i) => {
+      {posts.map((post) => {
         const age = relativeAge(post.published);
         const date = formatDate(post.published);
         return (
@@ -277,7 +292,7 @@ const LiveSourceList: FC<{ posts: LivePost[] }> = ({ posts }) => {
             >
               {/* Number matches the [N] badge in the prose. */}
               <span className="mt-px w-4 shrink-0 text-xs font-semibold tabular-nums text-muted-foreground">
-                {i + 1}
+                {post.number}
               </span>
               <span className="min-w-0 flex-1 wrap-break-word text-foreground/90 group-hover:text-foreground">
                 {post.title}
@@ -299,50 +314,46 @@ const LiveSourceList: FC<{ posts: LivePost[] }> = ({ posts }) => {
   );
 };
 
-/** Plain, unmarked Sources list — used for KB answers and fallback fetches alike. */
+/** Plain, unmarked Sources list — used for KB answers and fallback fetches alike.
+ *  No header of its own; the collapsible trigger it sits under provides that. */
 const KbSourceList: FC<{ sources: KbSource[] }> = ({ sources }) => {
   if (sources.length === 0) return null;
 
   return (
-    <div className="aui-kb-source-list mt-3 border-t border-border pt-3">
-      <p className="mb-1 px-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        Sources
-      </p>
-      <ol className="m-0 flex list-none flex-col gap-0.5 p-0">
-        {sources.map((source) => {
-          const pageLabel = formatPageLabel(source.pages);
-          return (
-            <li key={source.url}>
-              <a
-                href={withPageAnchor(source.url, source.pages)}
-                target="_blank"
-                rel="noopener noreferrer nofollow"
-                className={cn(
-                  "group flex items-start gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                  "hover:bg-muted",
+    <ol className="aui-kb-source-list m-0 flex list-none flex-col gap-0.5 p-0">
+      {sources.map((source) => {
+        const pageLabel = formatPageLabel(source.pages);
+        return (
+          <li key={source.url}>
+            <a
+              href={withPageAnchor(source.url, source.pages)}
+              target="_blank"
+              rel="noopener noreferrer nofollow"
+              className={cn(
+                "group flex items-start gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                "hover:bg-muted",
+              )}
+            >
+              <span className="mt-px w-4 shrink-0 text-xs font-semibold tabular-nums text-muted-foreground">
+                {source.number}
+              </span>
+              <span className="min-w-0 flex-1 wrap-break-word text-foreground/90 group-hover:text-foreground">
+                {source.title}
+                {pageLabel && (
+                  <span className="ml-1.5 whitespace-nowrap text-xs text-muted-foreground">
+                    · {pageLabel}
+                  </span>
                 )}
-              >
-                <span className="mt-px w-4 shrink-0 text-xs font-semibold tabular-nums text-muted-foreground">
-                  {source.number}
-                </span>
-                <span className="min-w-0 flex-1 wrap-break-word text-foreground/90 group-hover:text-foreground">
-                  {source.title}
-                  {pageLabel && (
-                    <span className="ml-1.5 whitespace-nowrap text-xs text-muted-foreground">
-                      · {pageLabel}
-                    </span>
-                  )}
-                </span>
-                <ExternalLinkIcon
-                  aria-hidden
-                  className="mt-0.5 size-3.5 shrink-0 text-muted-foreground group-hover:text-foreground"
-                />
-              </a>
-            </li>
-          );
-        })}
-      </ol>
-    </div>
+              </span>
+              <ExternalLinkIcon
+                aria-hidden
+                className="mt-0.5 size-3.5 shrink-0 text-muted-foreground group-hover:text-foreground"
+              />
+            </a>
+          </li>
+        );
+      })}
+    </ol>
   );
 };
 
@@ -352,7 +363,7 @@ const WebSourceList: FC<{ sources: WebResult[] }> = ({ sources }) => {
 
   return (
     <ol className="aui-web-source-list m-0 flex list-none flex-col gap-0.5 p-0">
-      {sources.map((source, i) => (
+      {sources.map((source) => (
         <li key={source.url}>
           <a
             href={source.url}
@@ -364,7 +375,7 @@ const WebSourceList: FC<{ sources: WebResult[] }> = ({ sources }) => {
             )}
           >
             <span className="mt-px w-4 shrink-0 text-xs font-semibold tabular-nums text-muted-foreground">
-              {i + 1}
+              {source.number}
             </span>
             <span className="min-w-0 flex-1 wrap-break-word text-foreground/90 group-hover:text-foreground">
               {source.title}
@@ -415,14 +426,32 @@ export const AnswerSourceFrame: FC<{ children: ReactNode }> = ({ children }) => 
     return (
       <CitationProvider sources={sources}>
         <div className="flex flex-col gap-2">{children}</div>
-        <KbSourceList sources={state.sources} />
+        {state.sources.length > 0 && (
+          <Collapsible open={open} onOpenChange={setOpen}>
+            <CollapsibleTrigger
+              className={cn(
+                "flex w-full items-center gap-1.5 border-t border-border pt-3 mt-1 text-xs font-medium transition-colors",
+                "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              <ChevronDownIcon
+                aria-hidden
+                className={cn("size-3.5 shrink-0 transition-transform", !open && "-rotate-90")}
+              />
+              {state.sources.length} {state.sources.length === 1 ? "source" : "sources"}
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <KbSourceList sources={state.sources} />
+            </CollapsibleContent>
+          </Collapsible>
+        )}
       </CitationProvider>
     );
   }
 
   if (state.tier === "web") {
-    const sources: CitationSource[] = state.sources.map((s, i) => ({
-      number: i + 1,
+    const sources: CitationSource[] = state.sources.map((s) => ({
+      number: s.number,
       title: s.title,
       url: s.url,
       tier: "web",
@@ -475,10 +504,11 @@ export const AnswerSourceFrame: FC<{ children: ReactNode }> = ({ children }) => 
   const { posts, fetchedAt } = state;
   const fetchedLabel = fetchedAt ? relativeFetchTime(fetchedAt, now) : null;
 
-  // Numbering is positional and matches the <post index="N"> blocks the model
-  // was given, so a [N] badge in the prose resolves to the same post here.
-  const sources: CitationSource[] = posts.map((p, i) => ({
-    number: i + 1,
+  // number is preserved from the original <post index="N">-matching position,
+  // set before filtering in useAnswerSources — a [N] badge in the prose
+  // resolves to the same post here even after unclicked posts were dropped.
+  const sources: CitationSource[] = posts.map((p) => ({
+    number: p.number,
     title: p.title,
     url: p.url,
     dateLabel: formatDate(p.published) ?? undefined,
