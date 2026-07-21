@@ -132,7 +132,8 @@ function ToolFallbackTrigger({
         )}
       >
         <span>
-          {label}: <b>{toolName}</b>
+          {/* {label}:  */}
+          <b>{toolName}</b>
         </span>
         {isRunning && (
           <span
@@ -140,7 +141,8 @@ function ToolFallbackTrigger({
             data-slot="tool-fallback-trigger-shimmer"
             className="aui-tool-fallback-trigger-shimmer shimmer pointer-events-none absolute inset-0 motion-reduce:animate-none"
           >
-            {label}: <b>{toolName}</b>
+            {/* {label}:  */}
+            <b>{toolName}</b>
           </span>
         )}
       </span>

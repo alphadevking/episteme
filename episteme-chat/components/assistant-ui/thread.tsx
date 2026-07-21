@@ -10,6 +10,7 @@ import { Reasoning, ReasoningGroup } from "@/components/assistant-ui/reasoning";
 import { FeedbackButtons } from "@/components/assistant-ui/feedback-buttons";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { SilentToolCall, AnswerSourceFrame } from "@/components/assistant-ui/live-source";
+import { ClaimStatusCard } from "@/components/assistant-ui/claim-status-card";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -616,8 +617,15 @@ const AssistantMessage: FC = () => {
                 ReasoningGroup,
                 tools: {
                   by_name: {
-                    unibenNewsTool: SilentToolCall,
-                    webSearchTool:  SilentToolCall,
+                    // groundedResponseTool's raw args/result are internal
+                    // prompt-engineering text never meant for end users —
+                    // AnswerSourceFrame already gives it a dedicated,
+                    // polished presentation, so the generic disclosure adds
+                    // nothing and would leak that internal text if shown.
+                    groundedResponseTool: SilentToolCall,
+                    unibenNewsTool:       SilentToolCall,
+                    webSearchTool:        SilentToolCall,
+                    claimStatusTool:      ClaimStatusCard,
                   },
                   Fallback: ToolFallback,
                 },
