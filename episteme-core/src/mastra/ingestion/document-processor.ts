@@ -15,25 +15,22 @@ const client = new UnstructuredClient({
   security: { apiKeyAuth: process.env['UNSTRUCTURED_API_KEY']! },
 });
 
-/** HiRes (OCR) only for image formats — everything else uses Fast text extraction. */
-function strategyFor(fileName: string): Strategy {
-  const ext = fileName.toLowerCase().split('.').pop() ?? '';
-  return ['png', 'jpg', 'jpeg', 'tiff', 'tif'].includes(ext)
-    ? Strategy.HiRes
-    : Strategy.Fast;
-}
-
 /**
  * Process a binary document (PDF, DOCX, HTML, scanned image) via Unstructured API.
  * Returns clean structured elements. OCR is applied automatically for scanned docs.
  * Caller is responsible for reading the file buffer.
+ *
+ * Always uses HiRes — Fast's raw text-stream extraction silently scrambles row
+ * alignment in multi-column tables (dates/activities pairs came out shifted
+ * and mismatched in testing). HiRes uses layout-aware detection to preserve
+ * table structure, which this KB depends on for date/fact accuracy.
  */
 export async function processDocument(
   fileBuffer: Uint8Array,
   fileName: string,
   category: string
 ): Promise<ProcessedElement[]> {
-  const strategy = strategyFor(fileName);
+  const strategy = Strategy.HiRes;
   const ext = fileName.toLowerCase().split('.').pop() ?? '';
   const isPdf = ext === 'pdf';
 
