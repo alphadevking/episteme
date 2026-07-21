@@ -117,15 +117,7 @@ const CitationBadge: FC<{ n: number; children?: React.ReactNode }> = ({ n, child
             className={cn(
               badgeClass,
               "cursor-pointer no-underline transition-colors",
-              source.tier === "web"
-                ? [
-                    "bg-muted text-muted-foreground ring-border",
-                    "hover:bg-muted/70 dark:text-muted-foreground",
-                  ]
-                : [
-                    "bg-amber-500/15 text-amber-800 ring-amber-500/30",
-                    "hover:bg-amber-500/30 dark:text-amber-300 dark:ring-amber-500/25",
-                  ],
+              "bg-muted text-muted-foreground ring-border hover:bg-muted/70",
             )}
           >
             {children}

@@ -604,7 +604,7 @@ const AssistantMessage: FC = () => {
       <AssistantAvatar />
       <div className="flex-1 min-w-0">
         <div className="aui-assistant-message-content wrap-break-word pr-2 text-foreground leading-relaxed space-y-2">
-          {/* Direct live-news queries get a distinct amber frame; KB answers and
+          {/* Direct live-news queries get a distinct neutral frame; KB answers and
               live-as-fallback answers both get a plain Sources list. The tier is
               derived from the tool-call stream inside the frame — never from the
               model's prose. */}

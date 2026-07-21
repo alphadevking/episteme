@@ -5,22 +5,21 @@
 // Two tiers, one rendering path:
 //
 // Tier "live" — a direct query to unibenNewsTool (events, announcements,
-// "what's happening"). Wrapped in a distinct amber frame: "Live from
+// "what's happening"). Wrapped in a distinct neutral frame: "Live from
 // news.uniben.edu", a freshness label, a collapsible source list.
 //
 // Tier "kb" — everything else that carries a source list: curated
 // groundedResponseTool answers, AND unibenNewsTool used as a fallback when
 // the KB came up empty. Both render as a plain, unmarked Sources list below
-// the answer — no amber box, no "live" language. A fallback fetch is still a
-// real citation, it just isn't the point of the query, so it shouldn't be
-// framed like one.
+// the answer — no "live" language. A fallback fetch is still a real citation,
+// it just isn't the point of the query, so it shouldn't be framed like one.
 //
 // Tier "web" — webSearchTool contributed the answer (only reachable once both
 // groundedResponseTool and unibenNewsTool came up empty). Unlike the "live"
 // news tier, this is NOT first-party Uniben content — it's the public web,
 // domain-scoped but unverified against official records. It gets its own
-// visibly cautious frame, deliberately less trust-signalling than the amber
-// live box, never folded into the plain "kb" list the way a news fallback is.
+// frame with an explicit caution label, never folded into the plain "kb" list
+// the way a news fallback is.
 //
 // The tier — and the source data itself — is decided by WHICH TOOLS RAN,
 // read from the message's tool-call parts, never from anything the model
@@ -257,11 +256,11 @@ const LiveSourceList: FC<{ posts: LivePost[] }> = ({ posts }) => {
               title={date ?? undefined}
               className={cn(
                 "group flex items-start gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                "hover:bg-amber-500/10 focus-visible:outline-2 focus-visible:outline-amber-600",
+                "hover:bg-muted",
               )}
             >
               {/* Number matches the [N] badge in the prose. */}
-              <span className="mt-px w-4 shrink-0 text-xs font-semibold tabular-nums text-amber-800/70 dark:text-amber-300/60">
+              <span className="mt-px w-4 shrink-0 text-xs font-semibold tabular-nums text-muted-foreground">
                 {i + 1}
               </span>
               <span className="min-w-0 flex-1 wrap-break-word text-foreground/90 group-hover:text-foreground">
@@ -274,7 +273,7 @@ const LiveSourceList: FC<{ posts: LivePost[] }> = ({ posts }) => {
               </span>
               <ExternalLinkIcon
                 aria-hidden
-                className="mt-0.5 size-3.5 shrink-0 text-muted-foreground group-hover:text-amber-700 dark:group-hover:text-amber-500"
+                className="mt-0.5 size-3.5 shrink-0 text-muted-foreground group-hover:text-foreground"
               />
             </a>
           </li>
@@ -331,7 +330,7 @@ const KbSourceList: FC<{ sources: KbSource[] }> = ({ sources }) => {
   );
 };
 
-/** Cautious, muted source list for unverified web results — deliberately not amber. */
+/** Cautious, muted source list for unverified web results. */
 const WebSourceList: FC<{ sources: WebResult[] }> = ({ sources }) => {
   if (sources.length === 0) return null;
 
@@ -476,21 +475,20 @@ export const AnswerSourceFrame: FC<{ children: ReactNode }> = ({ children }) => 
       aria-label="Answer built from live sources"
       className={cn(
         "aui-live-source-frame overflow-hidden rounded-xl border",
-        "border-amber-500/40 bg-amber-50/50",
-        "dark:border-amber-500/25 dark:bg-amber-950/15",
+        "border-border bg-muted/30",
       )}
     >
-      <header className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-amber-500/25 px-3 py-2 dark:border-amber-500/20">
+      <header className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-border px-3 py-2">
         <RadioTowerIcon
           aria-hidden
-          className="size-3.5 shrink-0 text-amber-700 dark:text-amber-500"
+          className="size-3.5 shrink-0 text-muted-foreground"
         />
-        <span className="text-xs font-semibold text-amber-900 dark:text-amber-200">
+        <span className="text-xs font-semibold text-foreground/80">
           Live from {LIVE_SOURCE_LABEL}
         </span>
         {fetchedLabel && (
           <span
-            className="text-xs text-amber-800/70 dark:text-amber-200/60"
+            className="text-xs text-muted-foreground"
             title={fetchedAt ? new Date(fetchedAt).toLocaleString("en-GB") : undefined}
           >
             fetched {fetchedLabel}
@@ -511,8 +509,7 @@ export const AnswerSourceFrame: FC<{ children: ReactNode }> = ({ children }) => 
           <CollapsibleTrigger
             className={cn(
               "flex w-full items-center gap-1.5 border-t px-3 py-2 text-xs font-medium transition-colors",
-              "border-amber-500/25 text-amber-900/80 hover:bg-amber-500/10",
-              "dark:border-amber-500/20 dark:text-amber-200/70",
+              "border-border text-muted-foreground hover:bg-muted",
             )}
           >
             <ChevronDownIcon
