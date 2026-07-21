@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { toast } from "sonner";
 import {
   Dialog,
   DialogContent,
@@ -76,6 +77,7 @@ export function EditScopeDialog({ doc, open, onOpenChange, onSaved }: Props) {
         return;
       }
 
+      toast.success(`Updated scope for "${doc.fileName}".`);
       onSaved();
       onOpenChange(false);
     } catch (e) {

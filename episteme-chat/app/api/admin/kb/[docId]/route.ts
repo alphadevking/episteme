@@ -153,6 +153,31 @@ export async function PATCH(req: Request, { params }: Params) {
   }
 }
 
+/**
+ * Re-ingest streams its progress back as Server-Sent Events (text/event-stream),
+ * terminating with `event: done` on success or `event: error` on failure — it is
+ * NOT a JSON response. Calling res.json() on it throws, which previously made
+ * every re-ingest look like a 503 in the UI and never refresh the table. We
+ * consume the stream to completion instead and collapse it to a single JSON
+ * result the table's fetch() can read.
+ */
+function readSseOutcome(raw: string): { ok: true } | { ok: false; error: string } {
+  for (const block of raw.split("\n\n")) {
+    if (/^event:\s*error/m.test(block)) {
+      const data = block.match(/^data:\s*(.*)$/m)?.[1];
+      let message = "Re-ingestion failed.";
+      if (data) {
+        try { message = (JSON.parse(data) as { error?: string }).error ?? message; } catch { /* keep default */ }
+      }
+      return { ok: false, error: message };
+    }
+  }
+  // Success requires an explicit terminal `done` — a stream that ends without it
+  // (dropped connection, crash) must not be reported as a successful re-ingest.
+  if (/^event:\s*done/m.test(raw)) return { ok: true };
+  return { ok: false, error: "Re-ingestion ended without completing." };
+}
+
 // ── POST /api/admin/kb/:docId/reingest ───────────────────────────────────────
 export async function POST(req: Request, { params }: Params) {
   let requestedInstitutionId: string | null | undefined;
@@ -167,32 +192,43 @@ export async function POST(req: Request, { params }: Params) {
   const { docId } = await params;
 
   try {
-    const res  = await fetch(mastraKbUrl(docId, "/reingest"), {
+    const res = await fetch(mastraKbUrl(docId, "/reingest"), {
       method:  "POST",
       headers: adminHeaders(institutionId),
     });
-    const data = await res.json();
 
-    if (res.ok) {
-      const supabase = await createSupabaseServerClient();
-
-      // Touch last_changed_at — content was re-processed and re-embedded.
-      await supabase
-        .from("kb_document_sources")
-        .update({
-          last_changed_at: new Date().toISOString(),
-          updated_at:      new Date().toISOString(),
-        })
-        .eq("doc_id", docId);
-
-      await supabase.rpc("fn_write_audit_log_for_kb", {
-        p_action:        "kb_document_reingested",
-        p_resource_type: "kb_document",
-        p_new_value:     { doc_id: docId },
-      });
+    // Pre-stream failures (401/404/422) are returned by Mastra as JSON, not SSE.
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: `Re-ingestion failed (${res.status}).` }));
+      return Response.json(data, { status: res.status });
     }
 
-    return Response.json(data, { status: res.status });
+    // Success path streams SSE — consume it fully, then inspect the terminal event.
+    const raw     = await res.text();
+    const outcome = readSseOutcome(raw);
+
+    if (!outcome.ok) {
+      return Response.json({ error: outcome.error }, { status: 500 });
+    }
+
+    const supabase = await createSupabaseServerClient();
+
+    // Touch last_changed_at — content was re-processed and re-embedded.
+    await supabase
+      .from("kb_document_sources")
+      .update({
+        last_changed_at: new Date().toISOString(),
+        updated_at:      new Date().toISOString(),
+      })
+      .eq("doc_id", docId);
+
+    await supabase.rpc("fn_write_audit_log_for_kb", {
+      p_action:        "kb_document_reingested",
+      p_resource_type: "kb_document",
+      p_new_value:     { doc_id: docId },
+    });
+
+    return Response.json({ success: true });
   } catch (err) {
     return Response.json({ error: String(err) }, { status: 503 });
   }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Trash2Icon, RefreshCwIcon, PencilIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -32,24 +33,23 @@ function DocActions({ doc }: { doc: KbDocument }) {
   const [deleting,    setDeleting]    = useState(false);
   const [reingesting, setReingesting] = useState(false);
   const [editing,     setEditing]     = useState(false);
-  const [error,       setError]       = useState<string | null>(null);
 
   const canReingest = !!(doc.markdownContent || doc.plainTextContent);
 
   async function handleDelete() {
     if (!confirm(`Delete "${doc.fileName}"? This removes all vectors from Pinecone and cannot be undone.`)) return;
     setDeleting(true);
-    setError(null);
     try {
       const res = await fetch(`/api/admin/kb/${encodeURIComponent(doc.docId)}`, { method: "DELETE" });
       if (!res.ok) {
-        const d = await res.json() as { error?: string };
-        setError(d.error ?? "Delete failed.");
+        const d = await res.json().catch(() => ({})) as { error?: string };
+        toast.error(d.error ?? "Delete failed.");
       } else {
+        toast.success(`Deleted "${doc.fileName}".`);
         router.refresh();
       }
     } catch (e) {
-      setError(String(e));
+      toast.error(String(e));
     } finally {
       setDeleting(false);
     }
@@ -57,17 +57,17 @@ function DocActions({ doc }: { doc: KbDocument }) {
 
   async function handleReingest() {
     setReingesting(true);
-    setError(null);
     try {
       const res = await fetch(`/api/admin/kb/${encodeURIComponent(doc.docId)}`, { method: "POST" });
       if (!res.ok) {
-        const d = await res.json() as { error?: string };
-        setError(d.error ?? "Re-ingestion failed.");
+        const d = await res.json().catch(() => ({})) as { error?: string };
+        toast.error(d.error ?? "Re-ingestion failed.");
       } else {
+        toast.success(`Re-ingested "${doc.fileName}".`);
         router.refresh();
       }
     } catch (e) {
-      setError(String(e));
+      toast.error(String(e));
     } finally {
       setReingesting(false);
     }
@@ -75,9 +75,6 @@ function DocActions({ doc }: { doc: KbDocument }) {
 
   return (
     <div className="flex items-center justify-end gap-1">
-      {error && (
-        <span className="text-[10px] text-destructive mr-1 max-w-[120px] truncate" title={error}>{error}</span>
-      )}
       <Button
         variant="ghost" size="sm"
         className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"

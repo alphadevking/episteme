@@ -151,8 +151,11 @@ export async function retrieveKnowledge(inputData: {
   allMatches.sort((a, b) => {
     const scoreDiff = b.score - a.score;
     if (Math.abs(scoreDiff) > RELEVANCE_TIE_EPSILON) return scoreDiff;
-    const aTime = new Date(a.metadata['updatedAt'] as string).getTime();
-    const bTime = new Date(b.metadata['updatedAt'] as string).getTime();
+    // Freshness = when we last verified the content (ingestedAt), not the
+    // source's editorial date (updatedAt). Fall back to updatedAt for legacy
+    // vectors ingested before ingestedAt was stamped.
+    const aTime = new Date((a.metadata['ingestedAt'] ?? a.metadata['updatedAt']) as string).getTime();
+    const bTime = new Date((b.metadata['ingestedAt'] ?? b.metadata['updatedAt']) as string).getTime();
     return bTime - aTime;
   });
 
@@ -166,6 +169,11 @@ export async function retrieveKnowledge(inputData: {
     seenParents.add(parentId);
 
     const updatedAt = match.metadata['updatedAt'] as string;
+    // Staleness is measured from last verification (ingestedAt), NOT the source's
+    // editorial date. A 2022 policy re-ingested today is current; only content we
+    // haven't re-verified in freshnessThresholdDays should carry the caveat.
+    // Legacy vectors without ingestedAt fall back to updatedAt.
+    const verifiedAt = (match.metadata['ingestedAt'] ?? updatedAt) as string;
     const rawPage = match.metadata['pageNumber'] as number | undefined;
     const pageNumber = typeof rawPage === 'number' && rawPage >= 0 ? rawPage : null;
 
@@ -174,7 +182,7 @@ export async function retrieveKnowledge(inputData: {
       content:      match.metadata['parentText']  as string,
       source:       match.metadata['source']      as string,
       updatedAt,
-      staleWarning: isDaysOld(updatedAt, RETRIEVAL_CONFIG.freshnessThresholdDays)
+      staleWarning: isDaysOld(verifiedAt, RETRIEVAL_CONFIG.freshnessThresholdDays)
         ? '⚠️ This information may be outdated. Please verify with the relevant office before acting on it.'
         : null,
       pageNumber,

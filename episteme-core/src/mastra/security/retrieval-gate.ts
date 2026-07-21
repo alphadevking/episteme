@@ -22,14 +22,27 @@ export const GLOBAL_INSTITUTION = '__global__';
 
 /**
  * Role → searchable namespaces.
- * The knowledge domains each class of user may search, before the trust ceiling.
+ *
+ * This is NOT a topical-relevance curation — it intersects with TRUST_NAMESPACES
+ * (and, for parents, a further per-family allowlist), which are the gates that
+ * actually carry security weight. Every namespace except 'staff-internal' is
+ * reachable at trust level 1+, i.e. genuinely public institutional content —
+ * restricting it further by role adds no confidentiality, only false negatives.
+ * That's not hypothetical: a 'student' excluded from 'admissions' couldn't
+ * retrieve the transfer/re-admission policy that's squarely relevant to an
+ * enrolled student, and a 'parent' excluded from 'academic-policy' couldn't
+ * reach it even with can_view_academic=true on their student link, because the
+ * allowlist can only narrow what's here — it can never add back what this list
+ * never granted. So: every non-staff role gets every namespace except
+ * 'staff-internal', which stays excluded here as defense-in-depth alongside
+ * the trust ceiling (which already blocks it below trust 4 on its own).
  */
 export const ROLE_NAMESPACES: Record<string, string[]> = {
-  prospective: ['admissions', 'programmes', 'general'],
-  student: ['academic-policy', 'financial-aid', 'programmes', 'general'],
-  parent: ['admissions', 'financial-aid', 'general'],
-  staff: ['admissions', 'academic-policy', 'financial-aid', 'programmes', 'staff-internal', 'general'],
-  hod: ['admissions', 'academic-policy', 'financial-aid', 'programmes', 'staff-internal', 'general'],
+  prospective: ['admissions', 'academic-policy', 'financial-aid', 'programmes', 'general'],
+  student:     ['admissions', 'academic-policy', 'financial-aid', 'programmes', 'general'],
+  parent:      ['admissions', 'academic-policy', 'financial-aid', 'programmes', 'general'],
+  staff:       ['admissions', 'academic-policy', 'financial-aid', 'programmes', 'staff-internal', 'general'],
+  hod:         ['admissions', 'academic-policy', 'financial-aid', 'programmes', 'staff-internal', 'general'],
 };
 
 /**

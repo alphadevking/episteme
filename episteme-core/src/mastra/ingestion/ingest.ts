@@ -152,6 +152,15 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
   // Resolve institution — always a concrete value so filters never silently miss.
   const institutionId = options.institutionId ?? GLOBAL_INSTITUTION;
 
+  // When we last VERIFIED this content into the KB — auto-stamped, never
+  // hand-entered. This is what drives retrieval's staleness signal, deliberately
+  // separate from `updatedAt` (the source's editorial date, which an admin can
+  // set to the document's own publication date). A current policy re-ingested
+  // today is fresh even if the source page is years old; conversely a doc left
+  // un-reingested for a year is the one worth flagging. See the staleWarning
+  // computation in knowledge-retrieval-tool.ts.
+  const ingestedAt = new Date().toISOString();
+
   // 1. Extract full text from input
   let fullText: string;
   let pageOffsetMap: PageOffsetEntry[] = [];
@@ -214,6 +223,9 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
         source,
         roles,
         updatedAt,
+        // Auto-stamped verification time — drives the staleness gate, unlike the
+        // editorial `updatedAt` above. See the const definition for why.
+        ingestedAt,
         // Always present — either a real institution UUID or GLOBAL_INSTITUTION.
         // Retrieval filters with { $in: [userInstitutionId, GLOBAL_INSTITUTION] }
         // so global docs are visible to all tenants without leaking tenant-specific ones.
@@ -257,7 +269,7 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
     vectorsUpserted: records.length,
     parentChunks: parents.length,
     childChunks: allChildren.length,
-    ingestedAt: new Date().toISOString(),
+    ingestedAt,
   };
 }
 

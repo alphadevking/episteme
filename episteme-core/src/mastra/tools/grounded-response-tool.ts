@@ -6,7 +6,7 @@ import {
 } from './knowledge-retrieval-tool';
 import { fetchNewsPosts, buildNewsContext, type NewsResult } from './uniben-news-tool';
 import { searchWeb, buildWebContext } from './web-search-tool';
-import { RETRIEVAL_CONFIG } from '../config';
+import { RETRIEVAL_CONFIG, UNIBEN_NEWS_CONFIG } from '../config';
 import { getSessionContext } from '../server/session-context';
 
 // ── Query rewriting ───────────────────────────────────────────────────────────
@@ -129,14 +129,20 @@ type CascadeHit = { answer: string; tier: 'news' | 'web'; sources: UnifiedSource
 
 /** Tier 2 — live news. Raw query, not the KB-enriched one: news search matches
  *  on article titles/summaries, and the programme/level prefix that helps
- *  embedding retrieval only dilutes a keyword match here. */
+ *  embedding retrieval only dilutes a keyword match here.
+ *
+ *  Relevance-gated (fallbackMinScore): as a fallback ANSWER, an off-topic feed
+ *  must not pose as a result — otherwise a query the news can't answer (JAMB
+ *  cut-off, etc.) returns unrelated posts and the model abstains on data we
+ *  actually hold. A null here lets the cascade fall through to web, or back to
+ *  a relevant-but-stale KB match, instead. */
 async function tryNewsFallback(
   query: string,
   logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
 ): Promise<CascadeHit | null> {
   let newsPosts: NewsResult[] = [];
   try {
-    newsPosts = await fetchNewsPosts(query);
+    newsPosts = await fetchNewsPosts(query, UNIBEN_NEWS_CONFIG.fallbackMinScore);
   } catch (err) {
     logger?.warn('[groundedResponseTool] news fallback failed', { error: (err as Error).message });
   }
@@ -285,48 +291,51 @@ export const groundedResponseTool = createTool({
 
     const enrichedQuery = rewriteQuery(query, { programme, level, department, related_topics });
 
-    // ── Tier 1: knowledge base ──────────────────────────────────────────────
-    // Embedding/Pinecone errors here must not crash the whole call — degrade
-    // to "not found" and let the cascade continue to news/web, same as every
-    // other tier in this function already does on failure.
-    let retrieval: KnowledgeRetrievalResponse = { found: false, results: [], message: 'Retrieval failed.' };
-    try {
-      retrieval = await retrieveKnowledge({
-        query:              enrichedQuery,
-        role:               session.role,
-        programme,
-        level,
-        trustLevel:         session.trustLevel,
-        institutionId:      session.institutionId,
-        namespaceAllowlist: session.namespaceAllowlist,
-      });
-    } catch (err) {
-      logger?.warn('[groundedResponseTool] KB retrieval failed', { error: (err as Error).message });
-    }
-
-    // Enrichment (prepending programme/level/related-topics context) helps
-    // scope-specific queries but can dilute a plain factual one — a static
-    // fact like "WAEC requirements" doesn't need level/programme context, and
-    // adding it anyway shifts the embedding just enough to occasionally miss
-    // a document that clearly answers the bare query. Retry once with the
-    // unenriched query before conceding the KB tier — costs nothing on the
-    // (far more common) success path, since this only runs on a miss.
-    if ((!retrieval.found || retrieval.maxScore < RETRIEVAL_CONFIG.relevanceThreshold) && enrichedQuery !== query) {
+    // programme/level are relevance-disambiguation hints, never a security
+    // boundary (role/trust/institution already cover that, unconditionally, on
+    // every attempt below) — but passed as hard metadata filters, they can
+    // silently exclude a document tagged for a different programme/level than
+    // the caller's own. A postgraduate caller asking about undergraduate
+    // admission criteria — to answer a student, out of curiosity, anything —
+    // shouldn't have that content filtered out just because it doesn't match
+    // their own profile. Same reasoning applies to enrichment prepended onto
+    // the query text: a query about JAMB/UTME (undergraduate-only, per the
+    // source document) embedded with "Postgraduate MSc Computer Science"
+    // prepended gets pulled toward the wrong section of the very document that
+    // answers it — deterministically, since that profile context never changes
+    // for the caller.
+    //
+    // So both attempts go broad-first, narrow-as-fallback:
+    //   1. Literal query, no programme/level filter — matches what any user,
+    //      regardless of their own profile, would find asking this exact
+    //      question within what their role/trust/institution already permit.
+    //   2. Only if that comes up short: the enriched query AND the caller's
+    //      own programme/level as a filter — correct for a genuinely vague,
+    //      self-referential query ("my fees") that needs disambiguating.
+    async function tryKb(q: string, scoped: boolean): Promise<KnowledgeRetrievalResponse> {
       try {
-        const rawRetrieval = await retrieveKnowledge({
-          query:              query,
+        return await retrieveKnowledge({
+          query:              q,
           role:               session.role,
-          programme,
-          level,
+          programme:          scoped ? programme : undefined,
+          level:              scoped ? level      : undefined,
           trustLevel:         session.trustLevel,
           institutionId:      session.institutionId,
           namespaceAllowlist: session.namespaceAllowlist,
         });
-        if (rawRetrieval.found && rawRetrieval.maxScore >= RETRIEVAL_CONFIG.relevanceThreshold) {
-          retrieval = rawRetrieval;
-        }
       } catch (err) {
-        logger?.warn('[groundedResponseTool] KB raw-query retry failed', { error: (err as Error).message });
+        logger?.warn('[groundedResponseTool] KB retrieval failed', { error: (err as Error).message, query: q });
+        return { found: false, results: [], message: 'Retrieval failed.' };
+      }
+    }
+
+    // ── Tier 1: knowledge base — broad literal query first, scoped+enriched fallback ──
+    let retrieval = await tryKb(query, false);
+
+    if (!retrieval.found || retrieval.maxScore < RETRIEVAL_CONFIG.relevanceThreshold) {
+      const scopedRetrieval = await tryKb(enrichedQuery, true);
+      if (scopedRetrieval.found && scopedRetrieval.maxScore >= RETRIEVAL_CONFIG.relevanceThreshold) {
+        retrieval = scopedRetrieval;
       }
     }
 

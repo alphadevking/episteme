@@ -130,4 +130,15 @@ export const WEB_SEARCH_CONFIG = {
 export const UNIBEN_NEWS_CONFIG = {
   maxResults: envInt('UNIBEN_NEWS_MAX_RESULTS', 10),
   timeoutMs:  envInt('UNIBEN_NEWS_TIMEOUT_MS', 8000),
+  /**
+   * Minimum topical-overlap score (0–1) a news post must clear to be used as a
+   * *fallback answer* inside groundedResponseTool's cascade. The explicit
+   * unibenNewsTool ignores this (defaults to 0) — a user asking for "latest
+   * news" wants the feed regardless. But the cascade must not let an off-topic
+   * feed pose as an answer to a specific factual question, so a post needs at
+   * least this fraction of the query's topical tokens (institution name and
+   * function words excluded). 0.34 ≈ "at least a third of the real query words
+   * appear in the post." Raise to cut off-topic news; lower if it over-filters.
+   */
+  fallbackMinScore: envFloat('UNIBEN_NEWS_FALLBACK_MIN_SCORE', 0.34),
 } as const;

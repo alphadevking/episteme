@@ -32,6 +32,58 @@ function isThinContent(text: string): boolean {
     return text.trim().length < MIN_CONTENT_LENGTH;
 }
 
+// Tokens that carry no topical signal for relevance scoring. The institution's
+// own name is in nearly every headline on news.uniben.edu, so counting it as a
+// "match" scores an off-topic post (a VC visit, a soil-science award) as if it
+// answered a query about, say, JAMB cut-off marks. Pure function words do the
+// same by inflating overlap. Excluding both makes the score reflect what the
+// post is actually about — see the relevance floor in fetchNewsPosts.
+const NEWS_STOPWORDS = new Set([
+    'uniben', 'university', 'benin', 'edu', 'www',
+    'for', 'and', 'the', 'into', 'with', 'from', 'are', 'was', 'that', 'this',
+]);
+
+/** Topical tokens of a query — length>2, institution/function words removed. */
+export function tokenizeNewsQuery(query: string): string[] {
+    return query
+        .toLowerCase()
+        .split(/\s+/)
+        .filter((t) => t.length > 2 && !NEWS_STOPWORDS.has(t));
+}
+
+/**
+ * Fraction (0–1) of the query's topical tokens that appear in a post. A query
+ * with no topical tokens ("latest uniben news") scores 1 for every post, so the
+ * feed still returns for broad "what's new" requests.
+ */
+export function scoreNewsItem(item: { title: string; summary: string }, queryTokens: string[]): number {
+    if (queryTokens.length === 0) return 1;
+    const haystack = (item.title + ' ' + item.summary).toLowerCase();
+    const hits = queryTokens.filter((t) => haystack.includes(t));
+    return hits.length / queryTokens.length;
+}
+
+/**
+ * Rank posts by topical overlap, drop those below `minScore`, take the top
+ * `maxResults`. Pure and deterministic — the relevance gate that stops an
+ * off-topic feed from posing as an answer lives here so it can be unit-tested
+ * without the network. See uniben-news-tool.test.ts.
+ */
+export function rankNewsItems<T extends { title: string; summary: string }>(
+    items: T[],
+    query: string,
+    minScore: number,
+    maxResults: number,
+): T[] {
+    const queryTokens = tokenizeNewsQuery(query);
+    return items
+        .map((item) => ({ item, score: scoreNewsItem(item, queryTokens) }))
+        .filter((s) => s.score >= minScore)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, maxResults)
+        .map((s) => s.item);
+}
+
 /**
  * Only http(s) links are emitted to the client, which renders them as hrefs.
  * The feed is trusted-ish, but a `javascript:` URL reaching an <a href> is an
@@ -147,7 +199,16 @@ async function fetchArticleContent(
     }
 }
 
-export async function fetchNewsPosts(query: string): Promise<NewsResult[]> {
+/**
+ * Fetch and rank live posts from news.uniben.edu.
+ *
+ * @param minScore Minimum topical-overlap score (0–1) a post must clear to be
+ *   returned. Defaults to 0 — the explicit unibenNewsTool wants "latest news"
+ *   even on a loose match. The grounded cascade passes a floor so an off-topic
+ *   feed can't masquerade as an answer to a specific factual question (which is
+ *   how a JAMB query once surfaced VC/soil-science posts, then abstained).
+ */
+export async function fetchNewsPosts(query: string, minScore = 0): Promise<NewsResult[]> {
     const { maxResults, timeoutMs } = UNIBEN_NEWS_CONFIG;
 
     // Use the Worker URL and the Secret Key from your env
@@ -178,26 +239,15 @@ export async function fetchNewsPosts(query: string): Promise<NewsResult[]> {
     // to turn that XML into the NewsResult[] array.
     const items = parseRss(xml);
 
-    const queryTokens = query
-        .toLowerCase()
-        .split(/\s+/)
-        .filter((t) => t.length > 2);
+    // Rank by topical overlap and drop anything below the relevance floor.
+    const topItems = rankNewsItems(items, query, minScore, maxResults);
 
-    const topItems = items
-        .map((item) => ({
-            item,
-            score: queryTokens.length === 0 ? 1
-                : (() => {
-                    const haystack = (item.title + ' ' + item.summary).toLowerCase();
-                    const hits = queryTokens.filter((t) => haystack.includes(t));
-                    return hits.length / queryTokens.length;
-                })(),
-        }))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, maxResults);
+    // Nothing cleared the relevance floor — return empty so the caller abstains
+    // or falls through, rather than presenting an off-topic feed as an answer.
+    if (topItems.length === 0) return [];
 
     return Promise.all(
-        topItems.map(async ({ item }) => {
+        topItems.map(async (item) => {
             if (isThinContent(item.summary)) {
                 return {
                     title: item.title,
