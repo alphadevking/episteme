@@ -228,7 +228,7 @@ async function fetchNewsPosts(query: string): Promise<NewsResult[]> {
  * untouched, then becomes a live "</post>" delimiter. Without this, the
  * delimiters below would be trivially escapable by the content they fence.
  */
-function neutralize(text: string): string {
+export function neutralize(text: string): string {
     return text.replace(/[<>]/g, '');
 }
 

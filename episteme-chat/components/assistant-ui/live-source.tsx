@@ -15,6 +15,13 @@
 // real citation, it just isn't the point of the query, so it shouldn't be
 // framed like one.
 //
+// Tier "web" — webSearchTool contributed the answer (only reachable once both
+// groundedResponseTool and unibenNewsTool came up empty). Unlike the "live"
+// news tier, this is NOT first-party Uniben content — it's the public web,
+// domain-scoped but unverified against official records. It gets its own
+// visibly cautious frame, deliberately less trust-signalling than the amber
+// live box, never folded into the plain "kb" list the way a news fallback is.
+//
 // The tier — and the source data itself — is decided by WHICH TOOLS RAN,
 // read from the message's tool-call parts, never from anything the model
 // wrote. That distinction is the whole point: a source that says "tell the
@@ -23,7 +30,7 @@
 // out-of-band from the model — the same rule as session identity.
 
 import { useAuiState, type ToolCallMessagePartComponent } from "@assistant-ui/react";
-import { ChevronDownIcon, ExternalLinkIcon, RadioTowerIcon } from "lucide-react";
+import { ChevronDownIcon, ExternalLinkIcon, RadioTowerIcon, GlobeIcon, TriangleAlertIcon } from "lucide-react";
 import { useEffect, useState, type FC, type ReactNode } from "react";
 import {
   Collapsible,
@@ -62,13 +69,20 @@ type KbSource = { number: number; title: string; url: string; pages: number[] };
 
 type KbToolResult = { sources?: KbSource[] };
 
+/** Mirrors the `results` field of webSearchTool's output schema. */
+type WebResult = { title: string; url: string };
+
+type WebToolResult = { results?: WebResult[] };
+
 type AnswerSourceState =
   | { tier: "live"; posts: LivePost[]; fetchedAt: string | null }
   | { tier: "kb"; sources: KbSource[] }
+  | { tier: "web"; sources: WebResult[] }
   | null;
 
 const NEWS_TOOL = "unibenNewsTool";
 const KB_TOOL = "groundedResponseTool";
+const WEB_TOOL = "webSearchTool";
 
 const LIVE_SOURCE_LABEL = "news.uniben.edu";
 
@@ -141,53 +155,71 @@ function useMinuteTicker(active: boolean): number {
 
 /**
  * Reads which source-bearing tools ran in this message and resolves them to a
- * single tier + source list. The model cannot forge this by writing text,
- * which is why provenance keys off tool-call parts instead of prose.
- *
- * - groundedResponseTool returned sources → tier "kb", regardless of whether
- *   unibenNewsTool also ran (it wouldn't have contributed sources unless the
- *   KB truly had none, in which case this branch isn't reached).
- * - unibenNewsTool returned posts and groundedResponseTool did NOT run →
- *   tier "live": a direct news/events query.
- * - unibenNewsTool returned posts and groundedResponseTool DID run (with no
- *   sources, i.e. confidence=low) → tier "kb": a fallback fetch, presented
- *   like any other cited answer rather than flagged as live.
- * - neither produced anything → null, no frame.
+ * single tier + source list. The model cannot forge WHICH sources these are by
+ * writing text — that part is always read from tool-call parts. But a tool
+ * clearing its own relevance gate doesn't mean the model actually used what it
+ * got back: groundedResponseTool can return confidence=high with sources that
+ * are merely the "best available" match, and the model (correctly, per its
+ * own instructions) writes an uncited abstention instead of forcing a citation
+ * onto an off-topic chunk. Showing a source list under an answer that cites
+ * nothing is worse than showing none, so every tier below also requires at
+ * least one literal `[N](cite:N)` marker somewhere in the answer text — not
+ * which N, just that a citation was made at all.
  */
+const CITE_MARKER = /\]\(cite:\d+\)/;
+
+function hasCitationMarker(parts: readonly { type: string }[]): boolean {
+  const text = parts
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join("");
+  return CITE_MARKER.test(text);
+}
+
 function useAnswerSources(): AnswerSourceState {
   const serialized = useAuiState((s) => {
     const parts = s.message?.content ?? [];
+    const cited = hasCitationMarker(parts);
 
     const kbCalls = parts.filter((p) => p.type === "tool-call" && p.toolName === KB_TOOL);
     const kbSources = kbCalls.flatMap(
       (p) => (p as { result?: KbToolResult }).result?.sources ?? [],
     );
-    if (kbSources.length > 0) {
+    if (kbSources.length > 0 && cited) {
       return JSON.stringify({ tier: "kb", sources: kbSources });
     }
 
     const newsCalls = parts.filter((p) => p.type === "tool-call" && p.toolName === NEWS_TOOL);
-    if (newsCalls.length === 0) return null;
-
     const newsResults = newsCalls.map((p) => (p as { result?: NewsToolResult }).result);
     const posts = newsResults.flatMap((r) => r?.posts ?? []);
-    if (posts.length === 0) return null;
 
-    if (kbCalls.length > 0) {
-      // Fallback path: the KB ran and came up empty, news filled the gap.
-      return JSON.stringify({
-        tier: "kb",
-        sources: posts.map((p, i) => ({ number: i + 1, title: p.title, url: p.url, pages: [] })),
-      });
+    if (posts.length > 0 && cited) {
+      if (kbCalls.length > 0) {
+        // Fallback path: the KB ran and came up empty, news filled the gap.
+        return JSON.stringify({
+          tier: "kb",
+          sources: posts.map((p, i) => ({ number: i + 1, title: p.title, url: p.url, pages: [] })),
+        });
+      }
+
+      const fetchedAt = newsResults
+        .map((r) => r?.fetchedAt)
+        .filter((t): t is string => typeof t === "string")
+        .sort()
+        .at(-1) ?? null;
+
+      return JSON.stringify({ tier: "live", posts, fetchedAt });
     }
 
-    const fetchedAt = newsResults
-      .map((r) => r?.fetchedAt)
-      .filter((t): t is string => typeof t === "string")
-      .sort()
-      .at(-1) ?? null;
+    const webCalls = parts.filter((p) => p.type === "tool-call" && p.toolName === WEB_TOOL);
+    const webResults = webCalls.flatMap(
+      (p) => (p as { result?: WebToolResult }).result?.results ?? [],
+    );
+    if (webResults.length > 0 && cited) {
+      return JSON.stringify({ tier: "web", sources: webResults });
+    }
 
-    return JSON.stringify({ tier: "live", posts, fetchedAt });
+    return null;
   });
 
   if (serialized === null) return null;
@@ -199,11 +231,12 @@ function useAnswerSources(): AnswerSourceState {
 }
 
 // ── Inline tool parts — deliberately render nothing ───────────────────────
-// Registered for unibenNewsTool so the generic "Used tool" fallback doesn't
-// appear. The frame below renders the source list in the right position.
+// Registered for unibenNewsTool and webSearchTool so the generic "Used tool"
+// fallback doesn't appear. The frame below renders the source list in the
+// right position instead.
 
-export const LiveNewsSource: ToolCallMessagePartComponent = () => null;
-LiveNewsSource.displayName = "LiveNewsSource";
+export const SilentToolCall: ToolCallMessagePartComponent = () => null;
+SilentToolCall.displayName = "SilentToolCall";
 
 // ── Source lists ──────────────────────────────────────────────────────────
 
@@ -298,6 +331,40 @@ const KbSourceList: FC<{ sources: KbSource[] }> = ({ sources }) => {
   );
 };
 
+/** Cautious, muted source list for unverified web results — deliberately not amber. */
+const WebSourceList: FC<{ sources: WebResult[] }> = ({ sources }) => {
+  if (sources.length === 0) return null;
+
+  return (
+    <ol className="aui-web-source-list m-0 flex list-none flex-col gap-0.5 p-0">
+      {sources.map((source, i) => (
+        <li key={source.url}>
+          <a
+            href={source.url}
+            target="_blank"
+            rel="noopener noreferrer nofollow"
+            className={cn(
+              "group flex items-start gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+              "hover:bg-muted",
+            )}
+          >
+            <span className="mt-px w-4 shrink-0 text-xs font-semibold tabular-nums text-muted-foreground">
+              {i + 1}
+            </span>
+            <span className="min-w-0 flex-1 wrap-break-word text-foreground/90 group-hover:text-foreground">
+              {source.title}
+            </span>
+            <ExternalLinkIcon
+              aria-hidden
+              className="mt-0.5 size-3.5 shrink-0 text-muted-foreground group-hover:text-foreground"
+            />
+          </a>
+        </li>
+      ))}
+    </ol>
+  );
+};
+
 // ── Frame (answer-level provenance) ───────────────────────────────────────
 
 /**
@@ -335,6 +402,57 @@ export const AnswerSourceFrame: FC<{ children: ReactNode }> = ({ children }) => 
         <div className="flex flex-col gap-2">{children}</div>
         <KbSourceList sources={state.sources} />
       </CitationProvider>
+    );
+  }
+
+  if (state.tier === "web") {
+    const sources: CitationSource[] = state.sources.map((s, i) => ({
+      number: i + 1,
+      title: s.title,
+      url: s.url,
+      tier: "web",
+    }));
+
+    return (
+      <section
+        aria-label="Answer built from unverified web results"
+        className={cn(
+          "aui-web-source-frame overflow-hidden rounded-xl border",
+          "border-border bg-muted/30",
+        )}
+      >
+        <header className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-border px-3 py-2">
+          <TriangleAlertIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+          <span className="text-xs font-semibold text-foreground/80">
+            Unverified — not an official Uniben source
+          </span>
+        </header>
+
+        <CitationProvider sources={sources}>
+          <div className="flex flex-col gap-2 px-3 py-2.5">{children}</div>
+        </CitationProvider>
+
+        {state.sources.length > 0 && (
+          <Collapsible open={open} onOpenChange={setOpen}>
+            <CollapsibleTrigger
+              className={cn(
+                "flex w-full items-center gap-1.5 border-t border-border px-3 py-2 text-xs font-medium transition-colors",
+                "text-muted-foreground hover:bg-muted",
+              )}
+            >
+              <ChevronDownIcon
+                aria-hidden
+                className={cn("size-3.5 shrink-0 transition-transform", !open && "-rotate-90")}
+              />
+              <GlobeIcon aria-hidden className="size-3.5 shrink-0" />
+              {state.sources.length} {state.sources.length === 1 ? "web result" : "web results"}
+            </CollapsibleTrigger>
+            <CollapsibleContent className="px-3 pb-2.5">
+              <WebSourceList sources={state.sources} />
+            </CollapsibleContent>
+          </Collapsible>
+        )}
+      </section>
     );
   }
 

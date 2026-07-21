@@ -30,9 +30,11 @@ export type CitationSource = {
    * Provenance tier. "live" = fetched live at request time (unibenNewsTool,
    * used as a direct query). "kb" = the curated knowledge base, or a live
    * fetch used only as a fallback when the KB had nothing — both render
-   * identically, without the "live" framing.
+   * identically, without the "live" framing. "web" = webSearchTool, the
+   * public internet — not first-party Uniben content, rendered with a
+   * visibly more cautious style than either of the above.
    */
-  tier: "live" | "kb";
+  tier: "live" | "kb" | "web";
 };
 
 const CitationContext = createContext<Map<number, CitationSource> | null>(null);

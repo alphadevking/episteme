@@ -117,8 +117,15 @@ const CitationBadge: FC<{ n: number; children?: React.ReactNode }> = ({ n, child
             className={cn(
               badgeClass,
               "cursor-pointer no-underline transition-colors",
-              "bg-amber-500/15 text-amber-800 ring-amber-500/30",
-              "hover:bg-amber-500/30 dark:text-amber-300 dark:ring-amber-500/25",
+              source.tier === "web"
+                ? [
+                    "bg-muted text-muted-foreground ring-border",
+                    "hover:bg-muted/70 dark:text-muted-foreground",
+                  ]
+                : [
+                    "bg-amber-500/15 text-amber-800 ring-amber-500/30",
+                    "hover:bg-amber-500/30 dark:text-amber-300 dark:ring-amber-500/25",
+                  ],
             )}
           >
             {children}
@@ -133,6 +140,7 @@ const CitationBadge: FC<{ n: number; children?: React.ReactNode }> = ({ n, child
         <p className="mt-0.5 text-background/70">
           {source.dateLabel ? `${source.dateLabel} · ` : ""}
           {source.tier === "live" ? "Live from " : ""}
+          {source.tier === "web" ? "Unverified web result · " : ""}
           {(() => { try { return new URL(source.url).hostname; } catch { return "source"; } })()}
         </p>
       </TooltipContent>

@@ -9,7 +9,7 @@ import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { Reasoning, ReasoningGroup } from "@/components/assistant-ui/reasoning";
 import { FeedbackButtons } from "@/components/assistant-ui/feedback-buttons";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
-import { LiveNewsSource, AnswerSourceFrame } from "@/components/assistant-ui/live-source";
+import { SilentToolCall, AnswerSourceFrame } from "@/components/assistant-ui/live-source";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -513,20 +513,41 @@ const ClarificationOptions: FC = () => {
   const messageId = useAuiState((s) => s.message.id);
   const role      = useAuiState((s) => s.message.role);
 
-  if (role !== "assistant" || isRunning) return null;
+  if (role !== "assistant") return null;
 
-  // Only render on the last assistant message — options disappear once the user replies.
-  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
-  if (lastAssistant?.id !== messageId) return null;
+  const idx = messages.findIndex((m) => m.id === messageId);
+  if (idx === -1) return null;
+  const thisMessage = messages[idx];
 
-  // Extract plain text from message parts.
-  const text = lastAssistant.content
+  const text = thisMessage.content
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
     .map((p) => p.text)
     .join("");
 
   const options = parseClarificationOptions(text);
   if (options.length < 2) return null;
+
+  // No message after this one → it's still the last message in the thread,
+  // i.e. genuinely unanswered and open. Once anything follows it — whether
+  // the user clicked an option or sent something else entirely — it's
+  // resolved: freeze the block instead of hiding it, so it stays as a visible
+  // record of what was offered either way.
+  const nextMessage = messages[idx + 1];
+  const resolved = nextMessage != null;
+
+  const nextText = nextMessage?.role === "user"
+    ? nextMessage.content
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("")
+    : null;
+  const selectedLabel = nextText != null
+    ? options.find((o) => stripInlineMarkdown(o.full) === nextText)?.label ?? null
+    : null;
+
+  // Still open: only stay interactive once this exact message has finished
+  // streaming (a message mid-generation shouldn't offer clickable options yet).
+  if (!resolved && isRunning) return null;
 
   const handleSelect = (full: string) => {
     runtime.append({
@@ -537,24 +558,37 @@ const ClarificationOptions: FC = () => {
 
   return (
     <div className="mt-3 flex flex-col gap-2">
-      {options.map(({ label, full }) => (
-        <button
-          key={label}
-          type="button"
-          onClick={() => handleSelect(full)}
-          className={cn(
-            "flex items-center gap-2.5 rounded-xl border border-border",
-            "bg-card px-4 py-2.5 text-left text-sm text-foreground",
-            "transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-primary",
-            "fade-in animate-in duration-150",
-          )}
-        >
-          <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[11px] font-bold leading-none text-muted-foreground">
-            {label}
-          </span>
-          <span className="font-medium"><InlineMarkdown text={full} /></span>
-        </button>
-      ))}
+      {options.map(({ label, full }) => {
+        const isSelected = label === selectedLabel;
+        return (
+          <button
+            key={label}
+            type="button"
+            disabled={resolved}
+            onClick={() => !resolved && handleSelect(full)}
+            aria-pressed={isSelected}
+            className={cn(
+              "flex items-center gap-2.5 rounded-xl border px-4 py-2.5 text-left text-sm",
+              "transition-colors fade-in animate-in duration-150",
+              isSelected
+                ? "border-primary bg-primary/10 text-foreground"
+                : resolved
+                ? "cursor-not-allowed border-border/50 bg-card/50 text-muted-foreground/50"
+                : "border-border bg-card text-foreground hover:border-primary/40 hover:bg-primary/5 hover:text-primary",
+            )}
+          >
+            <span
+              className={cn(
+                "flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold leading-none",
+                isSelected ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground",
+              )}
+            >
+              {isSelected ? <CheckIcon className="size-3" /> : label}
+            </span>
+            <span className="font-medium"><InlineMarkdown text={full} /></span>
+          </button>
+        );
+      })}
     </div>
   );
 };
@@ -582,7 +616,8 @@ const AssistantMessage: FC = () => {
                 ReasoningGroup,
                 tools: {
                   by_name: {
-                    unibenNewsTool: LiveNewsSource,
+                    unibenNewsTool: SilentToolCall,
+                    webSearchTool:  SilentToolCall,
                   },
                   Fallback: ToolFallback,
                 },

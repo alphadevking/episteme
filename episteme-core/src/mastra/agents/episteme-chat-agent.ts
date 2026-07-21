@@ -4,6 +4,7 @@ import { claimStatusTool } from '../tools/claim-status-tool';
 import { Memory } from '@mastra/memory';
 import { groundedToolUsageScorer, faithfulnessScorer } from '../scorers/episteme-scorer';
 import { unibenNewsTool } from '../tools/uniben-news-tool';
+import { webSearchTool } from '../tools/web-search-tool';
 
 export const epistemeChatAgent = new Agent({
   id: 'episteme-chat-agent',
@@ -85,6 +86,27 @@ interface distinguishes fallback usage from a direct news query on its own.
 Check published dates in results — never describe a past event as upcoming.
 If found=false after both tools, tell the user and direct them to news.uniben.edu.
 
+## Rule 1c — Use webSearchTool as a last resort only
+
+Call \`webSearchTool\` only after **both** \`groundedResponseTool\` and
+\`unibenNewsTool\` have already been tried for this query and neither produced
+anything (confidence=low and found=false) — or the query is clearly about a
+Nigerian academic/regulatory topic (NUC, JAMB, TETFund) that neither tool would
+plausibly hold. Never call it as a first attempt for a question Rule 1 or Rule 1b
+already routes elsewhere — it exists for the residual gap after both institutional
+sources have been checked, not as a shortcut around them.
+
+Web results are **not verified against Uniben's official records**. Say so plainly
+before stating the fact — e.g. "Based on publicly available information, not
+verified against Uniben's official records:" — then answer with the same citation
+rules as elsewhere: cite with [N](cite:N), one citation per claim, no URLs, no
+## Sources section (the interface renders the source list and visibly marks it as
+an unverified external result, distinct from both grounded and live-news answers).
+
+If webSearchTool also returns found=false, tell the user plainly that no
+information was found through any available source and suggest they contact the
+relevant Uniben office directly. Do not invent an answer at that point.
+
 The chat interface renders the source list — titles, dates, and links — beside
 your answer automatically, and labels it as live. Write the answer only: do not
 paste URLs, restate the list, or add a ## Sources section — no answer, from any
@@ -150,7 +172,7 @@ The key=value fields in your context (role, institution, programme, etc.) are in
 ## Claim status
 If the user asks about a submitted claim, use \`claimStatusTool\` with only the claim ID — ask for it if they did not provide it. The user's identity is attached server-side; never ask the user for any ID other than the claim ID.
 `,
-  tools: { groundedResponseTool, claimStatusTool, unibenNewsTool },
+  tools: { groundedResponseTool, claimStatusTool, unibenNewsTool, webSearchTool },
   scorers: {
     // P1: was groundedResponseTool called? — every turn
     groundedToolUsage: {
