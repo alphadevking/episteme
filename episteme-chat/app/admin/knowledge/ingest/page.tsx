@@ -33,37 +33,8 @@ import {
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { LEVEL_OPTIONS } from "@/lib/constants/academic";
-
-// ── Static options ────────────────────────────────────────────────────────────
-const NAMESPACE_OPTIONS = [
-  { value: "admissions",      label: "Admissions" },
-  { value: "academic-policy", label: "Academic Policy" },
-  { value: "financial-aid",   label: "Financial Aid" },
-  { value: "programmes",      label: "Programmes" },
-  { value: "staff-internal",  label: "Staff Internal" },
-  { value: "general",         label: "General" },
-];
-
-const CATEGORY_OPTIONS = NAMESPACE_OPTIONS;
-
-const CONTENT_TYPE_OPTIONS = [
-  { value: "general",      label: "General" },
-  { value: "policy",       label: "Policy" },
-  { value: "handbook",     label: "Handbook" },
-  { value: "faq",          label: "FAQ" },
-  { value: "announcement", label: "Announcement" },
-  { value: "catalogue",    label: "Catalogue" },
-  { value: "markdown",     label: "Markdown" },
-];
-
-const ROLES       = ["prospective", "student", "parent", "staff", "hod"];
-const ROLE_LABELS: Record<string, string> = {
-  prospective: "Prospective",
-  student:     "Student",
-  parent:      "Parent",
-  staff:       "Staff",
-  hod:         "HOD",
-};
+import { NAMESPACE_OPTIONS, CATEGORY_OPTIONS, CONTENT_TYPE_OPTIONS, ROLES, ROLE_LABELS } from "@/lib/constants/kb";
+import { inputBase, selectBase, LabelledSelect, PillToggleGroup } from "@/components/admin/form-controls";
 
 type InputMode = "file" | "markdown" | "plaintext";
 
@@ -97,13 +68,6 @@ const STEP_DESCRIPTION: Record<PipelineStep, string> = {
 const INITIAL_STATUSES: Record<PipelineStep, StepStatus> =
   Object.fromEntries(PIPELINE_STEPS.map((s) => [s, "pending"])) as Record<PipelineStep, StepStatus>;
 
-// ── Shared field styles ───────────────────────────────────────────────────────
-const inputBase =
-  "w-full h-9 rounded-lg border border-input bg-background px-3 text-sm placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring transition-colors";
-
-const selectBase =
-  "w-full h-9 rounded-lg border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring transition-colors appearance-none cursor-pointer";
-
 // ── Section heading ───────────────────────────────────────────────────────────
 function SectionHeading({ icon: Icon, label }: { icon: React.ElementType; label: string }) {
   return (
@@ -113,31 +77,6 @@ function SectionHeading({ icon: Icon, label }: { icon: React.ElementType; label:
         {label}
       </span>
       <div className="flex-1 h-px bg-border" />
-    </div>
-  );
-}
-
-// ── Labelled select ───────────────────────────────────────────────────────────
-function LabelledSelect({
-  value, onChange, options, placeholder, disabled,
-}: {
-  value: string;
-  onChange: (e: ChangeEvent<HTMLSelectElement>) => void;
-  options: { value: string; label: string }[];
-  placeholder?: string;
-  disabled?: boolean;
-}) {
-  return (
-    <div className="relative">
-      <select value={value} onChange={onChange} className={selectBase} disabled={disabled}>
-        {placeholder && <option value="">{placeholder}</option>}
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>{o.label}</option>
-        ))}
-      </select>
-      <div className="pointer-events-none absolute inset-y-0 right-2.5 flex items-center">
-        <ChevronDownIcon className="size-3.5 text-muted-foreground" />
-      </div>
     </div>
   );
 }
@@ -952,25 +891,7 @@ export default function IngestPage() {
                   <Label className="text-xs font-medium">
                     Level Scope <span className="text-muted-foreground font-normal">(select all that apply — leave blank for all levels)</span>
                   </Label>
-                  <div className="flex flex-wrap gap-2 pt-0.5">
-                    {LEVEL_OPTIONS.map((l) => {
-                      const active = form.levels.includes(l);
-                      return (
-                        <button
-                          key={l}
-                          type="button"
-                          onClick={() => toggleLevel(l)}
-                          className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-                            active
-                              ? "border-primary bg-primary text-primary-foreground"
-                              : "border-border bg-background text-muted-foreground hover:border-foreground/40 hover:text-foreground"
-                          }`}
-                        >
-                          {l}
-                        </button>
-                      );
-                    })}
-                  </div>
+                  <PillToggleGroup options={LEVEL_OPTIONS} selected={form.levels} onToggle={toggleLevel} />
                 </div>
               </div>
 

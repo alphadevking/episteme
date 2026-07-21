@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Trash2Icon, RefreshCwIcon } from "lucide-react";
+import { Trash2Icon, RefreshCwIcon, PencilIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { DataTable } from "@/components/admin/data-table";
+import { EditScopeDialog } from "@/components/admin/edit-scope-dialog";
 import type { KbDocument } from "@/lib/types/kb";
 
 type Props = { documents: KbDocument[] };
@@ -30,6 +31,7 @@ function DocActions({ doc }: { doc: KbDocument }) {
   const router = useRouter();
   const [deleting,    setDeleting]    = useState(false);
   const [reingesting, setReingesting] = useState(false);
+  const [editing,     setEditing]     = useState(false);
   const [error,       setError]       = useState<string | null>(null);
 
   const canReingest = !!(doc.markdownContent || doc.plainTextContent);
@@ -75,6 +77,22 @@ function DocActions({ doc }: { doc: KbDocument }) {
     <div className="flex items-center justify-end gap-1">
       {error && (
         <span className="text-[10px] text-destructive mr-1 max-w-[120px] truncate" title={error}>{error}</span>
+      )}
+      <Button
+        variant="ghost" size="sm"
+        className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+        onClick={() => setEditing(true)}
+        title="Edit scope (roles, levels, programme, category, content type)"
+      >
+        <PencilIcon className="size-3.5" />
+      </Button>
+      {editing && (
+        <EditScopeDialog
+          doc={doc}
+          open={editing}
+          onOpenChange={setEditing}
+          onSaved={() => router.refresh()}
+        />
       )}
       {canReingest && (
         <Button

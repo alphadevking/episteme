@@ -13,7 +13,7 @@
  *   POST   /kb/documents/:docId/freshness      — update freshness timestamp only
  */
 import type { Context } from 'hono';
-import { ingestDocument, deleteDocument, GLOBAL_INSTITUTION, type IngestProgressEvent } from '../ingestion/ingest';
+import { ingestDocument, deleteDocument, patchDocumentMetadata, GLOBAL_INSTITUTION, type IngestProgressEvent, type DocumentScopePatch } from '../ingestion/ingest';
 import {
   saveDocument,
   saveFreshnessResult,
@@ -25,6 +25,12 @@ import {
 import type { ContentType } from '../ingestion/chunker';
 
 declare const process: { env: Record<string, string | undefined> };
+
+const VALID_ROLES         = new Set(['prospective', 'student', 'parent', 'staff', 'hod']);
+const VALID_LEVELS        = new Set(['100L', '200L', '300L', '400L', '500L', '600L', 'MSc', 'PhD', 'PGD']);
+const VALID_NAMESPACES    = new Set(['admissions', 'academic-policy', 'financial-aid', 'programmes', 'staff-internal', 'general']);
+const VALID_CATEGORIES    = VALID_NAMESPACES;
+const VALID_CONTENT_TYPES = new Set(['general', 'policy', 'handbook', 'faq', 'announcement', 'catalogue', 'markdown']);
 
 function isAuthorized(c: Context): boolean {
   const adminKey = process.env['MASTRA_ADMIN_KEY'];
@@ -65,12 +71,6 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
     updatedAt, contentType, markdownContent, plainTextContent, fileBufferBase64,
     programme, levels,
   } = body;
-
-  const VALID_ROLES      = new Set(['prospective', 'student', 'parent', 'staff', 'hod']);
-  const VALID_LEVELS     = new Set(['100L', '200L', '300L', '400L', '500L', '600L', 'MSc', 'PhD', 'PGD']);
-  const VALID_NAMESPACES = new Set(['admissions', 'academic-policy', 'financial-aid', 'programmes', 'staff-internal', 'general']);
-  const VALID_CATEGORIES = VALID_NAMESPACES;
-  const VALID_CONTENT_TYPES = new Set(['general', 'policy', 'handbook', 'faq', 'announcement', 'catalogue', 'markdown']);
 
   // ── Required field presence ──────────────────────────────────────────────────
   const missing = (
@@ -214,6 +214,79 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
       'Connection':    'keep-alive',
     },
   });
+}
+
+// ── PATCH /kb/documents/:docId/scope ─────────────────────────────────────
+// Edits roles/levels/programme/category/contentType on an already-ingested
+// document without re-extracting, re-chunking, or re-embedding it — a single
+// filter-based Pinecone metadata update, plus a matching SQLite registry sync.
+//
+// Only widens/changes non-empty scopes; cannot clear a scope back to "unscoped"
+// (see the limitation documented on patchDocumentMetadata in ingest.ts). Use
+// reingestDocumentHandler for that.
+export async function patchDocumentScopeHandler(c: Context): Promise<Response> {
+  if (!isAuthorized(c)) return c.json({ error: 'Unauthorized' }, 401);
+
+  const docId = c.req.param('docId');
+  if (!docId) return c.json({ error: 'Missing docId' }, 400);
+
+  const doc = await getDocument(docId);
+  if (!doc) return c.json({ error: 'Document not found' }, 404);
+
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json<Record<string, unknown>>();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const { roles, levels, programme, category, contentType } = body;
+  const patch: DocumentScopePatch = {};
+
+  if (roles !== undefined) {
+    const rolesRaw = Array.isArray(roles) ? roles as string[] : [];
+    if (rolesRaw.length === 0) return c.json({ error: 'roles must be a non-empty array' }, 400);
+    const invalidRoles = rolesRaw.filter((r) => !VALID_ROLES.has(r));
+    if (invalidRoles.length > 0) return c.json({ error: `Invalid roles: ${invalidRoles.join(', ')}` }, 400);
+    patch.roles = rolesRaw;
+  }
+
+  if (levels !== undefined) {
+    const levelsRaw = Array.isArray(levels) ? levels as string[] : [];
+    if (levelsRaw.length === 0) return c.json({ error: 'levels cannot be cleared via patch — use reingest instead' }, 400);
+    const invalidLevels = levelsRaw.filter((l) => !VALID_LEVELS.has(l));
+    if (invalidLevels.length > 0) return c.json({ error: `Invalid levels: ${invalidLevels.join(', ')}` }, 400);
+    patch.levels = levelsRaw;
+  }
+
+  if (programme !== undefined) {
+    const programmeRaw = (programme as string).trim();
+    if (!programmeRaw) return c.json({ error: 'programme cannot be cleared via patch — use reingest instead' }, 400);
+    patch.programme = programmeRaw;
+  }
+
+  if (category !== undefined) {
+    if (!VALID_CATEGORIES.has(category as string)) return c.json({ error: `Invalid category: ${category}` }, 400);
+    patch.category = category as string;
+  }
+
+  if (contentType !== undefined) {
+    if (!VALID_CONTENT_TYPES.has(contentType as string)) return c.json({ error: `Invalid contentType: ${contentType}` }, 400);
+    patch.contentType = contentType as ContentType;
+  }
+
+  if (Object.keys(patch).length === 0) {
+    return c.json({ error: 'No valid fields to patch' }, 400);
+  }
+
+  try {
+    await patchDocumentMetadata(docId, doc.namespace, patch);
+    const updated: KbDocument = { ...doc, ...patch };
+    await saveDocument(updated);
+    return c.json({ success: true, document: updated });
+  } catch (err) {
+    return c.json({ error: String(err) }, 500);
+  }
 }
 
 // ── DELETE /kb/documents/:docId ─────────────────────────────────────────

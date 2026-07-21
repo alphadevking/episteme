@@ -1,5 +1,5 @@
 // app/api/admin/kb/[docId]/route.ts
-// Per-document operations: delete and reingest.
+// Per-document operations: delete, reingest, and scope patch.
 //
 // Same institution resolution model as kb/route.ts:
 //   - Superadmin: may target any active institution; defaults to own if not specified.
@@ -8,6 +8,7 @@
 // kb_document_sources sync:
 //   DELETE → remove row from kb_document_sources.
 //   POST (reingest) → touch last_changed_at in kb_document_sources.
+//   PATCH (scope) → no kb_document_sources fields affected; audit log only.
 
 import { createSupabaseServerClientReadOnly, createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -99,6 +100,50 @@ export async function DELETE(req: Request, { params }: Params) {
         p_action:        "kb_document_deleted",
         p_resource_type: "kb_document",
         p_old_value:     { doc_id: docId },
+      });
+    }
+
+    return Response.json(data, { status: res.status });
+  } catch (err) {
+    return Response.json({ error: String(err) }, { status: 503 });
+  }
+}
+
+// ── PATCH /api/admin/kb/:docId ───────────────────────────────────────────────
+// Body: { roles?, levels?, programme?, category?, contentType?, institutionId? }
+// Edits scope/classification metadata on an already-ingested document without
+// re-running extraction/chunking/embedding. See patchDocumentScopeHandler in
+// episteme-core for field constraints (e.g. levels/programme cannot be cleared
+// to empty via patch — that requires reingest).
+export async function PATCH(req: Request, { params }: Params) {
+  let body: Record<string, unknown>;
+  try {
+    body = await req.json();
+  } catch {
+    return Response.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
+
+  const requestedInstitutionId = body.institutionId as string | null | undefined;
+  const { error, institutionId } = await assertAdmin(requestedInstitutionId);
+  if (error) return error;
+
+  const { docId } = await params;
+  const { roles, levels, programme, category, contentType } = body;
+
+  try {
+    const res  = await fetch(mastraKbUrl(docId, "/scope"), {
+      method:  "PATCH",
+      headers: { "Content-Type": "application/json", ...adminHeaders(institutionId) },
+      body:    JSON.stringify({ roles, levels, programme, category, contentType }),
+    });
+    const data = await res.json();
+
+    if (res.ok) {
+      const supabase = await createSupabaseServerClient();
+      await supabase.rpc("fn_write_audit_log_for_kb", {
+        p_action:        "kb_document_scope_updated",
+        p_resource_type: "kb_document",
+        p_new_value:     { doc_id: docId, roles, levels, programme, category, contentType },
       });
     }
 

@@ -262,6 +262,58 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
 }
 
 /**
+ * Fields that can be patched on an already-ingested document without re-extracting
+ * or re-embedding it. All are pure Pinecone metadata — changing them only affects
+ * how the document is filtered/tagged during retrieval, not its chunked content.
+ *
+ * Deliberately excludes `namespace` (a Pinecone partition, not metadata — moving a
+ * document between namespaces means deleting and re-upserting every vector, not a
+ * patch) and `institutionId` (multi-tenant isolation — changing it is a security-
+ * relevant operation that belongs in the full ingest/reingest path, not a quick edit).
+ */
+export interface DocumentScopePatch {
+  roles?: string[];
+  levels?: string[];
+  programme?: string;
+  category?: string;
+  contentType?: ContentType;
+}
+
+/**
+ * Patch metadata on every existing vector for a docId, in place — no re-extraction,
+ * re-chunking, or re-embedding. Uses Pinecone's filter-based update (matches every
+ * vector with this docId in the namespace) rather than fetch-then-loop-update.
+ *
+ * IMPORTANT LIMITATION: Pinecone's metadata update *merges* the given keys into each
+ * vector's existing metadata — it cannot *remove* a key. That means a document once
+ * scoped to specific `levels`/`programme` can be re-scoped to a different non-empty
+ * set here, but can never be widened back to "all levels" / "all programmes" via
+ * patch (retrieval-gate.ts treats a present-but-empty array as "matches nothing",
+ * not "unscoped" — see buildRetrievalFilter's `$exists: false` branch). Clearing a
+ * scope back to unscoped requires a full re-ingest, which deletes and rebuilds the
+ * vectors from scratch.
+ */
+export async function patchDocumentMetadata(
+  docId: string,
+  namespace: string,
+  patch: DocumentScopePatch,
+): Promise<void> {
+  const metadata: Record<string, unknown> = {};
+  if (patch.roles       !== undefined) metadata.roles       = patch.roles;
+  if (patch.levels      !== undefined) metadata.levels      = patch.levels;
+  if (patch.programme   !== undefined) metadata.programme   = patch.programme;
+  if (patch.category    !== undefined) metadata.category    = patch.category;
+  if (patch.contentType !== undefined) metadata.contentType = patch.contentType;
+
+  if (Object.keys(metadata).length === 0) return;
+
+  const index = pineconeIndex.namespace(namespace);
+  await withRetry(() =>
+    index.update({ filter: { docId: { $eq: docId } }, metadata })
+  );
+}
+
+/**
  * Delete all vectors for a given docId from a namespace.
  * Called automatically before re-ingestion (idempotency).
  * Also called directly by the admin dashboard on document removal.

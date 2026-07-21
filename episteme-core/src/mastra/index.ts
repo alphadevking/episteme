@@ -14,6 +14,7 @@ import { VercelDeployer } from '@mastra/deployer-vercel';
 import {
   listDocumentsHandler,
   ingestDocumentHandler,
+  patchDocumentScopeHandler,
   deleteDocumentHandler,
   reingestDocumentHandler,
   updateFreshnessHandler,
@@ -107,6 +108,7 @@ export const mastra = new Mastra({
       chatRoute({ path: '/chat/:agentId' }),
       { path: '/kb/documents',                     method: 'GET',    handler: listDocumentsHandler },
       { path: '/kb/documents',                     method: 'POST',   handler: ingestDocumentHandler },
+      { path: '/kb/documents/:docId/scope',        method: 'PATCH',  handler: patchDocumentScopeHandler },
       { path: '/kb/documents/:docId',              method: 'DELETE', handler: deleteDocumentHandler },
       { path: '/kb/documents/:docId/reingest',     method: 'POST',   handler: reingestDocumentHandler },
       { path: '/kb/documents/:docId/freshness',    method: 'POST',   handler: updateFreshnessHandler },
