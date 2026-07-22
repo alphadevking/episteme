@@ -154,16 +154,23 @@ type CascadeHit = { answer: string; tier: 'news' | 'web'; sources: UnifiedSource
  *  cut-off, etc.) returns unrelated posts and the model abstains on data we
  *  actually hold. A null here lets the cascade fall through to web, or back to
  *  a relevant-but-stale KB match, instead. */
+type CascadeLogger = {
+  warn: (msg: string, meta?: Record<string, unknown>) => void;
+  info?: (msg: string, meta?: Record<string, unknown>) => void;
+};
+
 async function tryNewsFallback(
   query: string,
-  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
+  logger?: CascadeLogger,
 ): Promise<CascadeHit | null> {
+  const t = Date.now();
   let newsPosts: NewsResult[] = [];
   try {
     newsPosts = await fetchNewsPosts(query, UNIBEN_NEWS_CONFIG.fallbackMinScore);
   } catch (err) {
     logger?.warn('[groundedResponseTool] news fallback failed', { error: (err as Error).message });
   }
+  logger?.info?.('[groundedResponseTool] timing: news fallback', { ms: Date.now() - t, hits: newsPosts.length });
   if (newsPosts.length === 0) return null;
 
   const sources: UnifiedSource[] = newsPosts.map((p, i) => ({
@@ -175,8 +182,9 @@ async function tryNewsFallback(
 /** Tier 3 — web search, last resort. */
 async function tryWebFallback(
   query: string,
-  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
+  logger?: CascadeLogger,
 ): Promise<CascadeHit | null> {
+  const t = Date.now();
   let webFound: { title: string; url: string; content: string; score: number }[] = [];
   try {
     const webResponse = await searchWeb(query);
@@ -184,6 +192,7 @@ async function tryWebFallback(
   } catch (err) {
     logger?.warn('[groundedResponseTool] web fallback failed', { error: (err as Error).message });
   }
+  logger?.info?.('[groundedResponseTool] timing: web fallback', { ms: Date.now() - t, hits: webFound.length });
   if (webFound.length === 0) return null;
 
   const sources: UnifiedSource[] = webFound.map((r, i) => ({
@@ -331,8 +340,9 @@ export const groundedResponseTool = createTool({
     //      own programme/level as a filter — correct for a genuinely vague,
     //      self-referential query ("my fees") that needs disambiguating.
     async function tryKb(q: string, scoped: boolean): Promise<KnowledgeRetrievalResponse> {
+      const t = Date.now();
       try {
-        return await retrieveKnowledge({
+        const res = await retrieveKnowledge({
           query:              q,
           role:               session.role,
           programme:          scoped ? programme : undefined,
@@ -341,8 +351,13 @@ export const groundedResponseTool = createTool({
           institutionId:      session.institutionId,
           namespaceAllowlist: session.namespaceAllowlist,
         });
+        logger?.info('[groundedResponseTool] timing: kb attempt', {
+          scoped, ms: Date.now() - t, found: res.found,
+          maxScore: res.found ? res.maxScore : null,
+        });
+        return res;
       } catch (err) {
-        logger?.warn('[groundedResponseTool] KB retrieval failed', { error: (err as Error).message, query: q });
+        logger?.warn('[groundedResponseTool] KB retrieval failed', { error: (err as Error).message, query: q, ms: Date.now() - t });
         return { found: false, results: [], message: 'Retrieval failed.' };
       }
     }

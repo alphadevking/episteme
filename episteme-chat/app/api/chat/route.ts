@@ -46,19 +46,24 @@ function shouldDropSseLine(line: string): boolean {
   if (!line.startsWith("data:")) return false;
   const payload = line.slice(5).trim();
   if (payload === "[DONE]") return false;
+  // Fail closed: the AI SDK stream protocol only ever carries `[DONE]` or a
+  // JSON OBJECT with a string `type`. Anything else — an object missing type,
+  // a bare string/number/null payload, or unparseable JSON — crashes the
+  // client accumulator with "Unsupported chunk type: undefined", so drop it.
   try {
     const parsed: unknown = JSON.parse(payload);
-    return (
+    return !(
       typeof parsed === "object" &&
       parsed !== null &&
-      (parsed as { type?: unknown }).type === undefined
+      !Array.isArray(parsed) &&
+      typeof (parsed as { type?: unknown }).type === "string"
     );
   } catch {
-    return false;
+    return true;
   }
 }
 
-function sseTypeFilterTransform(): TransformStream<Uint8Array, Uint8Array> {
+function sseTypeFilterTransform(requestStart?: number): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
@@ -71,13 +76,26 @@ function sseTypeFilterTransform(): TransformStream<Uint8Array, Uint8Array> {
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
 
-      const kept = lines.filter((line) => !shouldDropSseLine(line));
+      const kept = lines.filter((line) => {
+        const drop = shouldDropSseLine(line);
+        // Diagnostic: if the browser still reports "Unsupported chunk type"
+        // while nothing is logged here, the bad chunk is NOT coming through
+        // this stream — look client-side instead.
+        if (drop) console.warn("[sse-filter] dropped frame:", line.slice(0, 200));
+        return !drop;
+      });
       if (kept.length > 0) controller.enqueue(encoder.encode(kept.join("\n") + "\n"));
     },
     flush(controller) {
       buffer += decoder.decode();
       if (buffer.length > 0 && !shouldDropSseLine(buffer)) {
         controller.enqueue(encoder.encode(buffer));
+      }
+      // Companion to the ttft log: total time until the upstream stream closed.
+      // total_ms − ttft_ms − tool timings (Mastra terminal) = time spent in
+      // model calls + memory/title-gen — the part a model change would affect.
+      if (requestStart !== undefined) {
+        console.log(JSON.stringify({ event: "stream_complete", total_ms: Date.now() - requestStart }));
       }
     },
   });
@@ -297,7 +315,7 @@ export async function POST(req: Request) {
   // can't reliably intercept it. Drop those frames here, at the one place
   // that already owns this stream, so malformed chunks never reach the
   // client parser at all.
-  const sanitizeTransform = sseTypeFilterTransform();
+  const sanitizeTransform = sseTypeFilterTransform(requestStart);
 
   const instrumentedBody = upstreamResponse.body
     ? upstreamResponse.body.pipeThrough(ttftTransform).pipeThrough(sanitizeTransform)

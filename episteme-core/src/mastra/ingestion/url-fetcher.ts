@@ -49,6 +49,42 @@ export function assertIngestableUrl(rawUrl: string): URL {
 }
 
 /**
+ * Strip page furniture from fetched HTML so navigation, footers, scripts, and
+ * repeated badge links never land in the KB as "content".
+ *
+ * Observed concretely: the principal-staff page ingested with a "Teachers"
+ * category badge between every officer and a stray "About" nav link — noise
+ * that dilutes the name→title pairs the page is actually about (and gives the
+ * model junk to transcribe from).
+ *
+ * Two passes:
+ *   1. Structural: drop script/style/nav/header/footer/aside/form/button/svg/
+ *      iframe elements and comments outright.
+ *   2. Boilerplate anchors: a short, plain-text link label repeated 3+ times on
+ *      one page ("Teachers", "Read more") is a badge/nav pattern, not content —
+ *      drop every occurrence. Unique labels (officer names, real links) survive
+ *      regardless of length.
+ */
+export function cleanPageHtml(html: string): string {
+  let out = html
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<(script|style|noscript|template)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<(nav|header|footer|aside|form|button|svg|iframe)\b[\s\S]*?<\/\1>/gi, ' ');
+
+  const anchorRe = /<a\b[^>]*>([^<]{1,30})<\/a>/gi;
+  const labelCounts = new Map<string, number>();
+  for (const m of out.matchAll(anchorRe)) {
+    const label = m[1].trim();
+    if (label) labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+  }
+  out = out.replace(anchorRe, (full, label: string) =>
+    (labelCounts.get(label.trim()) ?? 0) >= 3 ? ' ' : full,
+  );
+
+  return out;
+}
+
+/**
  * Fetch a uniben.edu page's HTML via the Cloudflare Worker proxy.
  * Throws a clear, user-facing error on any failure (missing config, blocked
  * host, non-200, empty/oversized body) so the ingest SSE stream can surface it.
@@ -72,13 +108,21 @@ export async function fetchUnibenPage(rawUrl: string): Promise<FetchedPage> {
     if (!res.ok) {
       throw new Error(`Proxy could not fetch the page (HTTP ${res.status}). If this is a uniben.edu page the Worker may not allow this host yet.`);
     }
-    const html = await res.text();
-    if (!html || html.trim().length === 0) {
+    const rawHtml = await res.text();
+    if (!rawHtml || rawHtml.trim().length === 0) {
       throw new Error('The page returned no content.');
     }
-    if (html.length > MAX_BYTES) {
+    if (rawHtml.length > MAX_BYTES) {
       throw new Error('The page is too large to ingest.');
     }
+
+    const html = cleanPageHtml(rawHtml);
+    if (html.trim().length === 0) {
+      throw new Error('The page had no content left after removing navigation/boilerplate.');
+    }
+
+    // Hash the CLEANED content: a future freshness check should re-ingest when
+    // the page's substance changes, not when a nav menu or footer script does.
     const contentHash = createHash('sha256').update(html).digest('hex');
     return { html, contentHash, url: target.href };
   } catch (err) {

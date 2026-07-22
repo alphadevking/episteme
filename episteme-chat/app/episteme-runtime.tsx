@@ -81,7 +81,16 @@ export const EpistemeRuntimeProvider: FC<Props> = ({ children }) => {
         event.reason.message.includes("Unsupported chunk type")
       ) {
         event.preventDefault();
-        console.debug("[episteme/stream] Mastra chunk skipped by assistant-ui accumulator:", event.reason.message);
+        // Stack included so the throwing module (accumulator vs history adapter)
+        // is identifiable if we ever chase the root cause. Note: Next dev's
+        // browser-log forwarder prints this rejection to the terminal REGARDLESS
+        // of preventDefault — that terminal line is noise, not a regression.
+        console.debug(
+          "[episteme/stream] chunk skipped by assistant-ui accumulator:",
+          event.reason.message,
+          "\n",
+          event.reason?.stack ?? "(no stack)",
+        );
       }
     };
     window.addEventListener("unhandledrejection", handler);
