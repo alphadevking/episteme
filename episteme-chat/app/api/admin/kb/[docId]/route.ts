@@ -136,13 +136,13 @@ export async function PATCH(req: Request, { params }: Params) {
   if (error) return error;
 
   const { docId } = await params;
-  const { roles, levels, programme, category, contentType } = body;
+  const { roles, levels, programme, category, contentType, updatedAt } = body;
 
   try {
     const res  = await fetch(mastraKbUrl(docId, "/scope"), {
       method:  "PATCH",
       headers: { "Content-Type": "application/json", ...adminHeaders(institutionId) },
-      body:    JSON.stringify({ roles, levels, programme, category, contentType }),
+      body:    JSON.stringify({ roles, levels, programme, category, contentType, updatedAt }),
     });
     const data = await res.json();
 
@@ -151,7 +151,7 @@ export async function PATCH(req: Request, { params }: Params) {
       await supabase.rpc("fn_write_audit_log_for_kb", {
         p_action:        "kb_document_scope_updated",
         p_resource_type: "kb_document",
-        p_new_value:     { doc_id: docId, roles, levels, programme, category, contentType },
+        p_new_value:     { doc_id: docId, roles, levels, programme, category, contentType, updatedAt },
       });
 
       revalidatePath(KB_ADMIN_PATH);

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Trash2Icon, RefreshCwIcon, PencilIcon } from "lucide-react";
+import { Trash2Icon, RefreshCwIcon, PencilIcon, TriangleAlertIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { DataTable } from "@/components/admin/data-table";
 import { EditScopeDialog } from "@/components/admin/edit-scope-dialog";
@@ -26,6 +26,19 @@ function NamespaceBadge({ value }: { value: string }) {
       {value}
     </span>
   );
+}
+
+// Mirrors RETRIEVAL_FRESHNESS_THRESHOLD_DAYS (default 365) in episteme-core: a
+// document whose CONTENT date is older than this is flagged "may be outdated" in
+// retrieval, and the cascade defers to a fresher tier when one can answer.
+const STALE_DAYS = 365;
+
+function fmtDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+function isStale(iso: string): boolean {
+  return (Date.now() - new Date(iso).getTime()) / (1000 * 60 * 60 * 24) > STALE_DAYS;
 }
 
 function DocActions({ doc }: { doc: KbDocument }) {
@@ -183,13 +196,34 @@ export function KbDocumentTable({ documents }: Props) {
           ),
         },
         {
+          key: "updatedAt",
+          label: "Doc date",
+          render: (r) => {
+            const stale = isStale(r.updatedAt);
+            return (
+              <span
+                className={`inline-flex items-center gap-1 text-xs tabular-nums ${stale ? "text-warning" : "text-foreground"}`}
+                title={
+                  stale
+                    ? "Content date is over 12 months old — flagged as possibly outdated in retrieval; the assistant defers to a fresher source when one can answer."
+                    : "The document's own content date — drives the freshness signal."
+                }
+              >
+                {stale && <TriangleAlertIcon className="size-3 shrink-0" aria-hidden />}
+                {fmtDate(r.updatedAt)}
+              </span>
+            );
+          },
+        },
+        {
           key: "ingestedAt",
           label: "Ingested",
           render: (r) => (
-            <span className="text-xs text-muted-foreground tabular-nums">
-              {new Date(r.ingestedAt).toLocaleDateString("en-GB", {
-                day: "2-digit", month: "short", year: "numeric",
-              })}
+            <span
+              className="text-xs text-muted-foreground tabular-nums"
+              title="When this document was last loaded into the knowledge base (audit only — not the freshness signal)."
+            >
+              {fmtDate(r.ingestedAt)}
             </span>
           ),
         },

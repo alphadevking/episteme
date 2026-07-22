@@ -240,7 +240,7 @@ export async function patchDocumentScopeHandler(c: Context): Promise<Response> {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
 
-  const { roles, levels, programme, category, contentType } = body;
+  const { roles, levels, programme, category, contentType, updatedAt } = body;
   const patch: DocumentScopePatch = {};
 
   if (roles !== undefined) {
@@ -273,6 +273,12 @@ export async function patchDocumentScopeHandler(c: Context): Promise<Response> {
   if (contentType !== undefined) {
     if (!VALID_CONTENT_TYPES.has(contentType as string)) return c.json({ error: `Invalid contentType: ${contentType}` }, 400);
     patch.contentType = contentType as ContentType;
+  }
+
+  if (updatedAt !== undefined) {
+    const d = new Date(updatedAt as string);
+    if (isNaN(d.getTime())) return c.json({ error: 'Invalid updatedAt: must be a valid date string' }, 400);
+    patch.updatedAt = d.toISOString();
   }
 
   if (Object.keys(patch).length === 0) {

@@ -883,7 +883,10 @@ export default function IngestPage() {
                     <LabelledSelect value={form.contentType} onChange={field("contentType")} options={CONTENT_TYPE_OPTIONS} />
                   </div>
                   <div className="space-y-1.5">
-                    <Label className="text-xs font-medium">Document Date</Label>
+                    <Label className="text-xs font-medium">
+                      Document Date{" "}
+                      <span className="text-muted-foreground font-normal">(the content&rsquo;s own date — drives the &ldquo;may be outdated&rdquo; signal)</span>
+                    </Label>
                     <Input type="date" value={form.updatedAt} onChange={field("updatedAt")} className={inputBase} />
                   </div>
                 </div>

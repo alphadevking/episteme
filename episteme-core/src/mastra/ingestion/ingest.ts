@@ -152,13 +152,11 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
   // Resolve institution — always a concrete value so filters never silently miss.
   const institutionId = options.institutionId ?? GLOBAL_INSTITUTION;
 
-  // When we last VERIFIED this content into the KB — auto-stamped, never
-  // hand-entered. This is what drives retrieval's staleness signal, deliberately
-  // separate from `updatedAt` (the source's editorial date, which an admin can
-  // set to the document's own publication date). A current policy re-ingested
-  // today is fresh even if the source page is years old; conversely a doc left
-  // un-reingested for a year is the one worth flagging. See the staleWarning
-  // computation in knowledge-retrieval-tool.ts.
+  // Audit timestamp: when this document was loaded into the KB. Auto-stamped.
+  // NOT the freshness signal — staleness is measured from the content's own
+  // date (`updatedAt`, admin-supplied) in knowledge-retrieval-tool.ts, because a
+  // freshly-loaded document can still contain a stale fact (a former VC's name
+  // in a re-uploaded 2022 handbook). Kept in metadata for auditing/debugging.
   const ingestedAt = new Date().toISOString();
 
   // 1. Extract full text from input
@@ -223,8 +221,8 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
         source,
         roles,
         updatedAt,
-        // Auto-stamped verification time — drives the staleness gate, unlike the
-        // editorial `updatedAt` above. See the const definition for why.
+        // Audit-only: when we loaded this doc. Staleness uses `updatedAt`
+        // (content date), NOT this — see the const definition.
         ingestedAt,
         // Always present — either a real institution UUID or GLOBAL_INSTITUTION.
         // Retrieval filters with { $in: [userInstitutionId, GLOBAL_INSTITUTION] }
@@ -289,6 +287,10 @@ export interface DocumentScopePatch {
   programme?: string;
   category?: string;
   contentType?: ContentType;
+  /** ISO content date — the document's own editorial date, which drives the
+   *  freshness/staleness signal in retrieval. Safe to patch (a scalar the merge
+   *  overwrites), so an admin can correct it without re-ingesting. */
+  updatedAt?: string;
 }
 
 /**
@@ -316,6 +318,7 @@ export async function patchDocumentMetadata(
   if (patch.programme   !== undefined) metadata.programme   = patch.programme;
   if (patch.category    !== undefined) metadata.category    = patch.category;
   if (patch.contentType !== undefined) metadata.contentType = patch.contentType;
+  if (patch.updatedAt   !== undefined) metadata.updatedAt   = patch.updatedAt;
 
   if (Object.keys(metadata).length === 0) return;
 

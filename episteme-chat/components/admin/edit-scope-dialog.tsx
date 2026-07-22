@@ -13,7 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
-import { Loader2Icon, TagIcon, ShieldIcon, LayersIcon } from "lucide-react";
+import { Loader2Icon, TagIcon, ShieldIcon, LayersIcon, CalendarIcon } from "lucide-react";
 import { LabelledSelect, PillToggleGroup, inputBase } from "@/components/admin/form-controls";
 import { CATEGORY_OPTIONS, CONTENT_TYPE_OPTIONS, ROLES, ROLE_LABELS } from "@/lib/constants/kb";
 import { LEVEL_OPTIONS } from "@/lib/constants/academic";
@@ -32,6 +32,8 @@ export function EditScopeDialog({ doc, open, onOpenChange, onSaved }: Props) {
   const [programme,   setProgramme]   = useState(doc.programme ?? "");
   const [category,    setCategory]    = useState(doc.category);
   const [contentType, setContentType] = useState(doc.contentType);
+  // Content date drives the freshness signal. <input type="date"> needs YYYY-MM-DD.
+  const [docDate,     setDocDate]     = useState(() => doc.updatedAt.split("T")[0]);
 
   const [saving, setSaving] = useState(false);
   const [error,  setError]  = useState<string | null>(null);
@@ -57,6 +59,11 @@ export function EditScopeDialog({ doc, open, onOpenChange, onSaved }: Props) {
         category,
         contentType,
       };
+      // Content date — only send when it's a valid date and actually changed,
+      // so an untouched field is a no-op.
+      if (docDate && docDate !== doc.updatedAt.split("T")[0]) {
+        body.updatedAt = new Date(docDate).toISOString();
+      }
       // Levels/programme can only be widened or changed here, never cleared to
       // empty (Pinecone metadata patch can't remove a key) — omit when unchanged
       // from an already-unscoped state, so an untouched blank field is a no-op
@@ -109,6 +116,14 @@ export function EditScopeDialog({ doc, open, onOpenChange, onSaved }: Props) {
               <Label className="text-xs font-medium">Content Type</Label>
               <LabelledSelect value={contentType} onChange={(e) => setContentType(e.target.value)} options={CONTENT_TYPE_OPTIONS} />
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs font-medium flex items-center gap-1.5">
+              <CalendarIcon className="size-3 text-muted-foreground" /> Document Date
+              <span className="text-muted-foreground font-normal">(content&rsquo;s own date — drives the &ldquo;may be outdated&rdquo; signal)</span>
+            </Label>
+            <Input type="date" value={docDate} onChange={(e) => setDocDate(e.target.value)} className={inputBase} />
           </div>
 
           <div className="space-y-1.5">

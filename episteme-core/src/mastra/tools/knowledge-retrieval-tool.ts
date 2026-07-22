@@ -151,11 +151,12 @@ export async function retrieveKnowledge(inputData: {
   allMatches.sort((a, b) => {
     const scoreDiff = b.score - a.score;
     if (Math.abs(scoreDiff) > RELEVANCE_TIE_EPSILON) return scoreDiff;
-    // Freshness = when we last verified the content (ingestedAt), not the
-    // source's editorial date (updatedAt). Fall back to updatedAt for legacy
-    // vectors ingested before ingestedAt was stamped.
-    const aTime = new Date((a.metadata['ingestedAt'] ?? a.metadata['updatedAt']) as string).getTime();
-    const bTime = new Date((b.metadata['ingestedAt'] ?? b.metadata['updatedAt']) as string).getTime();
+    // Within a near-equal relevance band, prefer the more recent CONTENT
+    // (updatedAt = the document's own editorial date). Content recency — not
+    // when we happened to load the file — is what makes one of two equally
+    // on-topic chunks the better answer.
+    const aTime = new Date(a.metadata['updatedAt'] as string).getTime();
+    const bTime = new Date(b.metadata['updatedAt'] as string).getTime();
     return bTime - aTime;
   });
 
@@ -169,11 +170,13 @@ export async function retrieveKnowledge(inputData: {
     seenParents.add(parentId);
 
     const updatedAt = match.metadata['updatedAt'] as string;
-    // Staleness is measured from last verification (ingestedAt), NOT the source's
-    // editorial date. A 2022 policy re-ingested today is current; only content we
-    // haven't re-verified in freshnessThresholdDays should carry the caveat.
-    // Legacy vectors without ingestedAt fall back to updatedAt.
-    const verifiedAt = (match.metadata['ingestedAt'] ?? updatedAt) as string;
+    // Staleness is measured from the document's own CONTENT date (updatedAt),
+    // NOT when we loaded it (ingestedAt). A handbook re-ingested today can still
+    // hold a 2022 fact (e.g. a former VC's name) — only the content's own age
+    // reveals it may be outdated. When a match is flagged stale, the grounded
+    // cascade first defers to a fresher tier (news/web) if one can answer, and
+    // only otherwise returns this content WITH the caveat below — so a stale
+    // fact never silently wins over a live one. See grounded-response-tool.ts.
     const rawPage = match.metadata['pageNumber'] as number | undefined;
     const pageNumber = typeof rawPage === 'number' && rawPage >= 0 ? rawPage : null;
 
@@ -182,7 +185,7 @@ export async function retrieveKnowledge(inputData: {
       content:      match.metadata['parentText']  as string,
       source:       match.metadata['source']      as string,
       updatedAt,
-      staleWarning: isDaysOld(verifiedAt, RETRIEVAL_CONFIG.freshnessThresholdDays)
+      staleWarning: isDaysOld(updatedAt, RETRIEVAL_CONFIG.freshnessThresholdDays)
         ? '⚠️ This information may be outdated. Please verify with the relevant office before acting on it.'
         : null,
       pageNumber,
