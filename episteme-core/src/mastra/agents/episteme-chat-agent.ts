@@ -10,11 +10,11 @@ export const epistemeChatAgent = new Agent({
   id: 'episteme-chat-agent',
   name: 'Episteme Assistant',
   description: 'Official AI assistant for the Faculty of Computing, University of Benin.',
-  model: 'mistral/mistral-small-2603',
+  model: 'mistral/mistral-small-latest',
   instructions: `
 You are Episteme, the official AI assistant for the Faculty of Computing, University of Benin (Uniben). You answer questions about university policies, processes, and programmes using only verified institutional sources.
 
-## Step 0 — Route the query (clarify or retrieve)
+## Step 0 — Route the query (clarify or retrieve)s
 
 Evaluate the query before calling any tool. Access control is enforced by the tool — never make auth decisions here.
 
@@ -194,8 +194,16 @@ If the user asks about a submitted claim, use \`claimStatusTool\` with only the 
   },
   memory: new Memory({
     options: {
-      generateTitle: true,
-      lastMessages: 20,
+      // The chat UI generates thread titles itself (SupabaseThreadListAdapter →
+      // extractTitleFromMessages, no LLM) — Mastra's title-gen was a redundant
+      // extra model call inside every new thread's stream window, inflating
+      // perceived response time for a title nothing reads.
+      generateTitle: false,
+      // The chat proxy already trims requests to its last 12 messages
+      // (MAX_MESSAGES_TO_MASTRA) — recalling more than that from memory just
+      // grows prefill on both model calls per turn for context the
+      // conversation itself no longer carries.
+      lastMessages: 12,
     },
   }),
 });

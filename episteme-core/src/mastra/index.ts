@@ -20,6 +20,7 @@ import {
   updateFreshnessHandler,
 } from './server/kb-routes';
 import { chatSecurityMiddleware } from './server/chat-security';
+import { warmupConnections } from './warmup';
 
 // MCP server removed in favor of direct REST API communication
 
@@ -115,3 +116,7 @@ export const mastra = new Mastra({
     ],
   },
 });
+
+// Pay the Mistral-embed/Pinecone connection setup (~4-5s, measured) at boot,
+// not on the first user's query. Non-blocking; failures are logged and ignored.
+warmupConnections();

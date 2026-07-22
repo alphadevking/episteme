@@ -76,14 +76,7 @@ function sseTypeFilterTransform(requestStart?: number): TransformStream<Uint8Arr
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
 
-      const kept = lines.filter((line) => {
-        const drop = shouldDropSseLine(line);
-        // Diagnostic: if the browser still reports "Unsupported chunk type"
-        // while nothing is logged here, the bad chunk is NOT coming through
-        // this stream — look client-side instead.
-        if (drop) console.warn("[sse-filter] dropped frame:", line.slice(0, 200));
-        return !drop;
-      });
+      const kept = lines.filter((line) => !shouldDropSseLine(line));
       if (kept.length > 0) controller.enqueue(encoder.encode(kept.join("\n") + "\n"));
     },
     flush(controller) {
