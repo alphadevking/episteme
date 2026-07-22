@@ -23,6 +23,7 @@ import {
   type KbDocument,
 } from '../ingestion/kb-store';
 import type { ContentType } from '../ingestion/chunker';
+import { fetchUnibenPage } from '../ingestion/url-fetcher';
 
 declare const process: { env: Record<string, string | undefined> };
 
@@ -69,7 +70,7 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
   const {
     docId, fileName, category, namespace, faculty, source, roles,
     updatedAt, contentType, markdownContent, plainTextContent, fileBufferBase64,
-    programme, levels,
+    programme, levels, sourceUrl,
   } = body;
 
   // ── Required field presence ──────────────────────────────────────────────────
@@ -140,9 +141,12 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
     }
   }
 
-  if (!fileBuffer && !markdownContent && !plainTextContent) {
-    return c.json({ error: 'One of fileBufferBase64, markdownContent, or plainTextContent must be provided' }, 400);
+  if (!fileBuffer && !markdownContent && !plainTextContent && !sourceUrl) {
+    return c.json({ error: 'One of fileBufferBase64, markdownContent, plainTextContent, or sourceUrl must be provided' }, 400);
   }
+
+  // Content fetched from a URL (populated inside the stream, before ingestion).
+  let fetchedContentHash: string | undefined;
 
   // All validation passed — stream progress via SSE so the client never times out
   // and can display each pipeline step in real-time.
@@ -161,6 +165,16 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
       emit('progress', { step: 'extracting' });
 
       try {
+        // URL ingestion: fetch the page via the Cloudflare proxy and treat the
+        // HTML exactly like an uploaded .html file. Done inside the stream so a
+        // fetch failure (blocked host, timeout) surfaces as an SSE 'error'.
+        if (sourceUrl && !fileBuffer) {
+          emit('progress', { step: 'fetching' });
+          const page = await fetchUnibenPage(sourceUrl as string);
+          fileBuffer = new TextEncoder().encode(page.html);
+          fetchedContentHash = page.contentHash;
+        }
+
         // Ghost vector fix: cross-namespace cleanup before ingestion.
         const existing = await getDocument(docId as string);
         if (existing && existing.namespace !== namespace) {
@@ -192,9 +206,11 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
           ...audit,
           markdownContent:  (markdownContent  as string | undefined) ?? null,
           plainTextContent: (plainTextContent as string | undefined) ?? null,
-          sourceUrl:     null,
-          contentHash:   null,
-          lastFetchedAt: null,
+          // URL-sourced docs record where they came from + the content hash, so a
+          // future freshness check can re-fetch, compare, and re-ingest on change.
+          sourceUrl:     (sourceUrl as string | undefined) ?? null,
+          contentHash:   fetchedContentHash ?? null,
+          lastFetchedAt: sourceUrl ? new Date().toISOString() : null,
         };
         await saveDocument(record);
 

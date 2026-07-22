@@ -36,7 +36,19 @@ import { LEVEL_OPTIONS } from "@/lib/constants/academic";
 import { NAMESPACE_OPTIONS, CATEGORY_OPTIONS, CONTENT_TYPE_OPTIONS, ROLES, ROLE_LABELS } from "@/lib/constants/kb";
 import { inputBase, selectBase, LabelledSelect, PillToggleGroup } from "@/components/admin/form-controls";
 
-type InputMode = "file" | "markdown" | "plaintext";
+type InputMode = "file" | "markdown" | "plaintext" | "url";
+
+/** Derive a sensible .html filename from a page URL, for the File Name field. */
+function htmlFileNameFromUrl(url: string): string {
+  try {
+    const { hostname, pathname } = new URL(url);
+    const last = pathname.split("/").filter(Boolean).pop();
+    const base = (last && last.replace(/\.(x?html?|aspx?|php)$/i, "")) || hostname.replace(/^www\./, "");
+    return `${base}.html`;
+  } catch {
+    return "";
+  }
+}
 
 // ── Scope types ───────────────────────────────────────────────────────────────
 interface Institution { id: string; name: string; code: string }
@@ -341,14 +353,16 @@ export default function IngestPage() {
   }
 
   // ── Doc ID generation ─────────────────────────────────────────────────────────
-  async function generateDocId(file: File): Promise<string> {
+  // Takes a filename (not a File) so it works for URL ingestion too, which has
+  // no File object — only a derived .html name.
+  async function generateDocId(fileName: string): Promise<string> {
     const instCode = (
       isSuperadmin
         ? institutions.find((i) => i.id === selectedInstitution)?.code
         : adminInstitution?.code
     )?.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
 
-    const fileSlug = file.name
+    const fileSlug = fileName
       .replace(/\.[^.]+$/, "")
       .toLowerCase()
       .replace(/[^a-z0-9-]+/g, "-")
@@ -372,9 +386,30 @@ export default function IngestPage() {
   const acceptFile = useCallback(async (file: File) => {
     setDroppedFile(file);
     setForm((f) => ({ ...f, fileName: f.fileName || file.name }));
-    const docId = await generateDocId(file);
+    const docId = await generateDocId(file.name);
     setForm((f) => ({ ...f, docId: f.docId || docId }));
   }, [adminInstitution, isSuperadmin, institutions, selectedInstitution, supabase]);
+
+  // URL mode has no File — derive the .html name + Doc ID from the URL. Runs on
+  // blur (not every keystroke) so the Doc ID lookup doesn't hit Supabase repeatedly.
+  const acceptUrl = useCallback(async (url: string) => {
+    const fileName = htmlFileNameFromUrl(url);
+    if (!fileName) return;
+    const docId = await generateDocId(fileName);
+    setForm((f) => ({ ...f, fileName: f.fileName || fileName, docId: f.docId || docId }));
+  }, [adminInstitution, isSuperadmin, institutions, selectedInstitution, supabase]);
+
+  // Debounced Doc ID autofill for URL mode — mirrors the instant autofill of file
+  // mode, but keyed on typing so it fills shortly after you pause rather than only
+  // on blur. Skips once a Doc ID exists (which also cancels any pending timer, so
+  // the onBlur path never double-fires the Supabase lookup).
+  useEffect(() => {
+    if (mode !== "url") return;
+    const url = form.source.trim();
+    if (!url || form.docId) return;
+    const t = setTimeout(() => { acceptUrl(url); }, 350);
+    return () => clearTimeout(t);
+  }, [mode, form.source, form.docId, acceptUrl]);
 
   function onDragOver(e: DragEvent) { e.preventDefault(); setDragging(true); }
   function onDragLeave()            { setDragging(false); }
@@ -457,6 +492,13 @@ export default function IngestPage() {
         for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
         body.fileBufferBase64 = btoa(binary);
         if (!body.fileName) body.fileName = file.name;
+      } else if (mode === "url") {
+        const url = form.source.trim();
+        if (!url) { setError("Please enter a page URL."); setSubmitting(false); return; }
+        // The server fetches this via the Uniben proxy and ingests the HTML.
+        // `source` is already the URL; sourceUrl flags it for freshness tracking.
+        body.sourceUrl = url;
+        if (!body.fileName) body.fileName = htmlFileNameFromUrl(url);
       } else if (mode === "markdown") {
         body.markdownContent = form.textContent;
         body.contentType     = "markdown";
@@ -747,9 +789,10 @@ export default function IngestPage() {
                 <SectionHeading icon={UploadCloudIcon} label="Content" />
 
                 {/* Mode tabs */}
-                <div className="grid grid-cols-3 gap-1 rounded-xl border bg-muted/40 p-1">
+                <div className="grid grid-cols-4 gap-1 rounded-xl border bg-muted/40 p-1">
                   {([
                     { id: "file",      icon: UploadCloudIcon, label: "File Upload" },
+                    { id: "url",       icon: LinkIcon,        label: "URL"         },
                     { id: "markdown",  icon: CodeIcon,        label: "Markdown"    },
                     { id: "plaintext", icon: FileTextIcon,    label: "Plain Text"  },
                   ] as { id: InputMode; icon: React.ElementType; label: string }[]).map(({ id, icon: Icon, label }) => (
@@ -818,6 +861,26 @@ export default function IngestPage() {
                         </div>
                       </>
                     )}
+                  </div>
+                ) : mode === "url" ? (
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-medium flex items-center gap-1.5">
+                      <LinkIcon className="size-3 text-muted-foreground" /> Page URL <span className="text-destructive">*</span>
+                    </Label>
+                    <Input
+                      type="url"
+                      value={form.source}
+                      onChange={(e) => {
+                        const url = e.target.value;
+                        setForm((f) => ({ ...f, source: url, fileName: f.fileName || htmlFileNameFromUrl(url) }));
+                      }}
+                      onBlur={() => acceptUrl(form.source)}
+                      placeholder="https://uniben.edu/principal-staff.html"
+                      className={inputBase}
+                    />
+                    <p className="text-[11px] text-muted-foreground leading-snug">
+                      Fetched through the Uniben proxy and ingested like an uploaded HTML page. Only <span className="font-medium">uniben.edu</span> URLs are allowed. The URL is also stored as the source, so it can be re-checked for changes later.
+                    </p>
                   </div>
                 ) : (
                   <div className="space-y-1.5">

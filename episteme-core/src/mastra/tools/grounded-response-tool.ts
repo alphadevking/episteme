@@ -76,10 +76,6 @@ type UnifiedSource = { number: number; title: string; url: string; pages: number
 function buildGroundedContext(
   retrieval: KnowledgeRetrievalResponse & { found: true },
 ): { context: string; sources: UnifiedSource[] } {
-  const staleWarnings = Array.from(
-    new Set(retrieval.results.map((r) => r.staleWarning).filter((w): w is string => Boolean(w)))
-  );
-
   // Deduplicate sources by URL so multiple chunks from the same document share
   // one citation number — but a document can still be cited via chunks from
   // several different pages, so pages accumulate across all of a source's chunks.
@@ -93,19 +89,41 @@ function buildGroundedContext(
     if (r.pageNumber != null) sourceIndex.get(r.source)!.pages.add(r.pageNumber);
   }
 
+  const anyStale = retrieval.results.some((r) => r.staleWarning != null);
+
   const lines: string[] = [
     'VERIFIED SOURCES — synthesize your answer exclusively from these chunks.',
     'Cite each fact inline as [N](cite:N) where N is the source number shown below (e.g. [1](cite:1)).',
     'The reader sees a numbered source list rendered below your answer automatically — do not add a',
     '## Sources section, do not restate the list, and do not paste any URL into your answer.',
+    '',
+    // Conflict rule — without this, two "verified" chunks that disagree on a
+    // time-varying fact (office holders, fees, deadlines) leave the model free
+    // to pick either; it was observed answering with a 2022 handbook's former
+    // VC while a current principal-staff source sat right next to it.
+    'Each source below is labelled with its content date. When sources DISAGREE on a fact',
+    'that changes over time (who holds an office, fees, deadlines, calendars), state ONLY',
+    'the value from the most recently dated source, and cite that source. Never present an',
+    'older source\'s value as current — not even alongside the newer one.',
   ];
 
-  if (staleWarnings.length > 0) lines.push('', ...staleWarnings);
+  if (anyStale) {
+    lines.push(
+      '',
+      'A source marked "may be outdated" may only be used for facts no fresher source covers,',
+      'and the answer must then tell the reader the information may be outdated and should be',
+      'verified with the relevant office.',
+    );
+  }
 
   retrieval.results.forEach((r) => {
     const src = sourceIndex.get(r.source)!;
+    const dated = new Date(r.updatedAt).toLocaleDateString('en-GB', {
+      day: 'numeric', month: 'long', year: 'numeric',
+    });
+    const staleTag = r.staleWarning ? ' — may be outdated' : '';
     lines.push('');
-    lines.push(`[Source ${src.number}] ${r.content}`);
+    lines.push(`[Source ${src.number} — dated ${dated}${staleTag}] ${r.content}`);
   });
 
   const sources: UnifiedSource[] = Array.from(
