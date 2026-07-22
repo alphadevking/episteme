@@ -11,8 +11,14 @@
 //   PATCH (scope) → no kb_document_sources fields affected; audit log only.
 
 import { createSupabaseServerClientReadOnly, createSupabaseServerClient } from "@/lib/supabase/server";
+import { revalidatePath } from "next/cache";
 
 export const maxDuration = 300;
+
+// Route path whose Server Component data must be invalidated after any KB
+// mutation. router.refresh() alone only clears the client cache and can
+// re-produce a stale render; revalidatePath makes invalidation server-authoritative.
+const KB_ADMIN_PATH = "/admin/knowledge";
 
 type Params = { params: Promise<{ docId: string }> };
 
@@ -101,6 +107,8 @@ export async function DELETE(req: Request, { params }: Params) {
         p_resource_type: "kb_document",
         p_old_value:     { doc_id: docId },
       });
+
+      revalidatePath(KB_ADMIN_PATH);
     }
 
     return Response.json(data, { status: res.status });
@@ -145,6 +153,8 @@ export async function PATCH(req: Request, { params }: Params) {
         p_resource_type: "kb_document",
         p_new_value:     { doc_id: docId, roles, levels, programme, category, contentType },
       });
+
+      revalidatePath(KB_ADMIN_PATH);
     }
 
     return Response.json(data, { status: res.status });
@@ -227,6 +237,8 @@ export async function POST(req: Request, { params }: Params) {
       p_resource_type: "kb_document",
       p_new_value:     { doc_id: docId },
     });
+
+    revalidatePath(KB_ADMIN_PATH);
 
     return Response.json({ success: true });
   } catch (err) {

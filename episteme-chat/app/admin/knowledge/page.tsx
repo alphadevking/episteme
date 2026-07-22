@@ -6,6 +6,11 @@ import { DatabaseIcon, LayersIcon, NetworkIcon, UploadCloudIcon } from "lucide-r
 import Link from "next/link";
 import type { KbDocument } from "@/lib/types/kb";
 
+// Always render on request with uncached fetches. The document list must reflect
+// the latest create/edit/delete/reingest immediately; revalidatePath in the KB
+// mutation route handlers relies on this route not being statically cached.
+export const dynamic = "force-dynamic";
+
 async function fetchDocuments(): Promise<KbDocument[]> {
   const base = process.env.MASTRA_BASE_URL ?? "http://localhost:4111";
   const adminKey = process.env.MASTRA_ADMIN_KEY ?? "";

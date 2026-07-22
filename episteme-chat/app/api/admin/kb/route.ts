@@ -17,9 +17,13 @@
 //   Supabase is the source of truth for the admin dashboard; LibSQL is Mastra-internal.
 
 import { createSupabaseServerClientReadOnly, createSupabaseServerClient } from "@/lib/supabase/server";
+import { revalidatePath } from "next/cache";
 
 // Ingestion pipelines can take minutes for large PDFs (Unstructured + embedding + Pinecone upsert).
 export const maxDuration = 300;
+
+// Server-authoritative invalidation of the KB admin list after a successful ingest.
+const KB_ADMIN_PATH = "/admin/knowledge";
 
 function mastraKbUrl(path = ""): string {
   const base = process.env.MASTRA_BASE_URL ?? "http://localhost:4111";
@@ -173,6 +177,10 @@ export async function POST(req: Request) {
                     p_new_value:     { doc_id: docId ?? null, source: source ?? null },
                   }),
                 ]).catch((err) => console.error("[admin/kb] Supabase sync failed:", err));
+
+                // Invalidate the KB admin list so the newly ingested doc shows
+                // without a full page reload.
+                revalidatePath(KB_ADMIN_PATH);
               }
             } catch { /* malformed data — skip */ }
           }
