@@ -11,10 +11,14 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   resolveNamespaces,
+  resolveNamespacesForRoles,
+  resolvePlatformNamespaces,
   buildRetrievalFilter,
   ROLE_NAMESPACES,
   TRUST_NAMESPACES,
   GLOBAL_INSTITUTION,
+  PLATFORM_HELP_NAMESPACE,
+  PLATFORM_ADMIN_NAMESPACE,
 } from './retrieval-gate';
 
 const INSTITUTION_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -155,6 +159,226 @@ describe('resolveNamespaces — allowlist can only narrow', () => {
   });
 });
 
+describe('resolveNamespacesForRoles — single-role equivalence', () => {
+  const ALLOWLISTS = [
+    undefined,
+    ['admissions', 'general'],
+    ['admissions', 'general', 'financial-aid'],
+    ['staff-internal'],
+    [],
+  ];
+
+  test('a one-element role set is byte-identical to the scalar form', () => {
+    // THE regression guard for the multi-role change. Every existing user holds
+    // exactly one role; if this holds, none of them can move.
+    for (const role of [...ALL_ROLES, 'admin', 'unknown', '']) {
+      for (const trustLevel of [...ALL_TRUST, 0, 99, NaN]) {
+        for (const namespaceAllowlist of ALLOWLISTS) {
+          assert.deepEqual(
+            resolveNamespacesForRoles({ roles: [role], trustLevel, namespaceAllowlist }),
+            resolveNamespaces({ role, trustLevel, namespaceAllowlist }),
+            `diverged for role=${role} trust=${trustLevel} allowlist=${JSON.stringify(namespaceAllowlist)}`,
+          );
+        }
+      }
+    }
+  });
+});
+
+describe('resolveNamespacesForRoles — union semantics', () => {
+  test('union never exceeds the trust ceiling, for every role combination', () => {
+    // The security invariant that makes unioning safe: trust is applied per
+    // role, so no combination can reach past it.
+    for (const a of ALL_ROLES) {
+      for (const b of ALL_ROLES) {
+        for (const trustLevel of ALL_TRUST) {
+          const ns = resolveNamespacesForRoles({ roles: [a, b], trustLevel });
+          for (const n of ns) {
+            assert.ok(
+              TRUST_NAMESPACES[trustLevel].includes(n),
+              `[${a},${b}]/${trustLevel}: "${n}" exceeds trust ceiling`,
+            );
+          }
+        }
+      }
+    }
+  });
+
+  test('union contains each role\'s own namespaces — access is never lost', () => {
+    // The live bug this fixes: {student, admin} collapsed to 'staff' and lost
+    // every student-tagged document.
+    for (const a of ALL_ROLES) {
+      for (const b of ALL_ROLES) {
+        const union = resolveNamespacesForRoles({ roles: [a, b], trustLevel: 4 });
+        for (const role of [a, b]) {
+          for (const n of resolveNamespaces({ role, trustLevel: 4 })) {
+            assert.ok(union.includes(n), `[${a},${b}]: union lost "${n}" from ${role}`);
+          }
+        }
+      }
+    }
+  });
+
+  test('adding a role never removes a namespace', () => {
+    for (const a of ALL_ROLES) {
+      const alone = resolveNamespacesForRoles({ roles: [a], trustLevel: 4 });
+      for (const b of ALL_ROLES) {
+        const together = resolveNamespacesForRoles({ roles: [a, b], trustLevel: 4 });
+        for (const n of alone) {
+          assert.ok(together.includes(n), `adding ${b} to ${a} removed "${n}"`);
+        }
+      }
+    }
+  });
+
+  test('staff-internal still requires trust 4 and a staff-family role', () => {
+    for (const a of ALL_ROLES) {
+      for (const b of ALL_ROLES) {
+        for (const trustLevel of ALL_TRUST) {
+          const ns = resolveNamespacesForRoles({ roles: [a, b], trustLevel });
+          if (ns.includes('staff-internal')) {
+            assert.equal(trustLevel, 4, `[${a},${b}] reached staff-internal at trust ${trustLevel}`);
+            assert.ok(
+              [a, b].some((r) => ['staff', 'hod'].includes(r)),
+              `[${a},${b}] reached staff-internal with no staff-family role`,
+            );
+          }
+        }
+      }
+    }
+  });
+
+  test('an empty or all-unknown role set is the public tier', () => {
+    const publicTier = resolveNamespaces({ role: 'prospective', trustLevel: 4 });
+    assert.deepEqual(resolveNamespacesForRoles({ roles: [], trustLevel: 4 }), publicTier);
+    assert.deepEqual(
+      resolveNamespacesForRoles({ roles: ['root', 'admin'], trustLevel: 4 }),
+      publicTier,
+    );
+  });
+
+  test('the result never contains duplicates', () => {
+    for (const trustLevel of ALL_TRUST) {
+      const ns = resolveNamespacesForRoles({ roles: [...ALL_ROLES, ...ALL_ROLES], trustLevel });
+      assert.equal(new Set(ns).size, ns.length, `duplicates: ${ns.join(',')}`);
+    }
+  });
+});
+
+describe('resolveNamespacesForRoles — parent allowlist scoping', () => {
+  test('a pure parent is still narrowed by the allowlist', () => {
+    const ns = resolveNamespacesForRoles({
+      roles: ['parent'],
+      trustLevel: 4,
+      namespaceAllowlist: ['admissions', 'general'],
+    });
+    assert.deepEqual(ns, ['admissions', 'general']);
+  });
+
+  test("a parent who is also a student keeps their OWN student access", () => {
+    // The edge case naive unioning gets wrong: the link allowlist limits what a
+    // parent may see about their CHILD, and must not clip the same person's
+    // access to their own records.
+    const ns = resolveNamespacesForRoles({
+      roles: ['parent', 'student'],
+      trustLevel: 3,
+      namespaceAllowlist: ['admissions', 'general'],
+    });
+    assert.ok(ns.includes('academic-policy'), 'lost own student academic access');
+    assert.ok(ns.includes('financial-aid'), 'lost own student fee access');
+  });
+
+  test('the allowlist still cannot grant what the gate denies', () => {
+    const ns = resolveNamespacesForRoles({
+      roles: ['parent', 'student'],
+      trustLevel: 3,
+      namespaceAllowlist: ['staff-internal'],
+    });
+    assert.ok(!ns.includes('staff-internal'));
+  });
+
+  test('with no parent role, an allowlist narrows the whole union (fails closed)', () => {
+    const ns = resolveNamespacesForRoles({
+      roles: ['staff'],
+      trustLevel: 4,
+      namespaceAllowlist: ['general'],
+    });
+    assert.deepEqual(ns, ['general']);
+  });
+});
+
+describe('resolvePlatformNamespaces', () => {
+  test('platform-help is available at every trust level, including public', () => {
+    for (const trustLevel of ALL_TRUST) {
+      assert.ok(
+        resolvePlatformNamespaces({ trustLevel }).includes(PLATFORM_HELP_NAMESPACE),
+        `platform-help missing at trust ${trustLevel}`,
+      );
+    }
+  });
+
+  test('platform-admin requires BOTH the platform-admin bit and trust 4', () => {
+    for (const trustLevel of ALL_TRUST) {
+      for (const isPlatformAdmin of [true, false]) {
+        const ns = resolvePlatformNamespaces({ trustLevel, isPlatformAdmin });
+        if (ns.includes(PLATFORM_ADMIN_NAMESPACE)) {
+          assert.equal(trustLevel, 4);
+          assert.equal(isPlatformAdmin, true);
+        }
+      }
+    }
+  });
+
+  test('the bit alone is not enough, and trust 4 alone is not enough', () => {
+    assert.ok(!resolvePlatformNamespaces({ trustLevel: 3, isPlatformAdmin: true })
+      .includes(PLATFORM_ADMIN_NAMESPACE));
+    assert.ok(!resolvePlatformNamespaces({ trustLevel: 4, isPlatformAdmin: false })
+      .includes(PLATFORM_ADMIN_NAMESPACE));
+    assert.ok(resolvePlatformNamespaces({ trustLevel: 4, isPlatformAdmin: true })
+      .includes(PLATFORM_ADMIN_NAMESPACE));
+  });
+
+  test('defaults deny the admin namespace', () => {
+    assert.deepEqual(resolvePlatformNamespaces({}), [PLATFORM_HELP_NAMESPACE]);
+  });
+});
+
+describe('the two gates stay independent', () => {
+  test('platform namespaces are never returned by the institutional gate', () => {
+    // They are not Pinecone partitions — the platform tier reads Markdown from
+    // disk. Leaking one into this list would query a permanently empty
+    // partition on every request.
+    for (const role of [...ALL_ROLES, 'admin', 'unknown']) {
+      for (const trustLevel of ALL_TRUST) {
+        const ns = resolveNamespacesForRoles({ roles: [role], trustLevel });
+        assert.ok(!ns.includes(PLATFORM_HELP_NAMESPACE), `${role}/${trustLevel} leaked platform-help`);
+        assert.ok(!ns.includes(PLATFORM_ADMIN_NAMESPACE), `${role}/${trustLevel} leaked platform-admin`);
+      }
+    }
+  });
+
+  test('a parent allowlist cannot strip platform-help', () => {
+    // The reason platform access is resolved on its own axis: a restrictive
+    // parent link must not remove the ability to ask how to use the product.
+    const ns = resolvePlatformNamespaces({ trustLevel: 1 });
+    assert.deepEqual(ns, [PLATFORM_HELP_NAMESPACE]);
+  });
+
+  test('the platform bit never widens institutional access', () => {
+    for (const trustLevel of ALL_TRUST) {
+      for (const role of ALL_ROLES) {
+        // isPlatformAdmin is not even a parameter of the institutional gate —
+        // asserted structurally so a future refactor cannot quietly add it.
+        assert.deepEqual(
+          resolveNamespacesForRoles({ roles: [role], trustLevel }),
+          resolveNamespaces({ role, trustLevel }),
+          `institutional access diverged for ${role}/${trustLevel}`,
+        );
+      }
+    }
+  });
+});
+
 describe('buildRetrievalFilter — tenant isolation', () => {
   const institutionClause = (f: ReturnType<typeof buildRetrievalFilter>) =>
     f.$and.find((c) => 'institutionId' in c) as
@@ -192,6 +416,29 @@ describe('buildRetrievalFilter — tenant isolation', () => {
     const filter = buildRetrievalFilter({ role: 'prospective', institutionId: INSTITUTION_A });
     const roleClause = filter.$and.find((c) => 'roles' in c) as { roles: { $in: string[] } };
     assert.deepEqual(roleClause.roles.$in, ['prospective']);
+  });
+
+  test('a role array matches documents tagged for any of them', () => {
+    const filter = buildRetrievalFilter({ role: ['student', 'staff'] });
+    const roleClause = filter.$and.find((c) => 'roles' in c) as { roles: { $in: string[] } };
+    assert.deepEqual(roleClause.roles.$in, ['student', 'staff']);
+  });
+
+  test('a one-element array is identical to the scalar form', () => {
+    for (const role of ALL_ROLES) {
+      assert.deepEqual(
+        buildRetrievalFilter({ role: [role], institutionId: INSTITUTION_A }),
+        buildRetrievalFilter({ role, institutionId: INSTITUTION_A }),
+        `array form diverged for ${role}`,
+      );
+    }
+  });
+
+  test('a role array does not change the clause count', () => {
+    // Guards against the array form accidentally emitting one clause per role,
+    // which would turn the OR into an AND and match nothing.
+    const filter = buildRetrievalFilter({ role: ['student', 'staff', 'hod'] });
+    assert.equal(filter.$and.length, 2); // roles + institution
   });
 
   test('programme and level clauses appear only when scoped', () => {

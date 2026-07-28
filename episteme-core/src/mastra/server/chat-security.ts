@@ -15,14 +15,16 @@
  * Header contract (all set by episteme-chat/app/api/chat/route.ts):
  *   x-episteme-admin-key            shared secret (MASTRA_ADMIN_KEY)
  *   x-episteme-role                 retrieval role (prospective|student|parent|staff|hod)
+ *   x-episteme-roles                comma-separated full role set (omitted → [role])
  *   x-episteme-trust-level          1–4
  *   x-episteme-institution-id       institution UUID (omitted → global docs only)
  *   x-episteme-user-public-id       users.id UUID (omitted → claim lookups refused)
  *   x-episteme-namespace-allowlist  comma-separated (parents only)
+ *   x-episteme-platform-admin       "true" iff the app role is admin/superadmin
  */
 import type { ContextWithMastra } from '@mastra/core/server';
 import { RequestContext } from '@mastra/core/request-context';
-import { SESSION_KEYS, normalizeSessionRole, clampTrustLevel } from './session-context';
+import { SESSION_KEYS, normalizeSessionRole, normalizeSessionRoles, clampTrustLevel } from './session-context';
 
 declare const process: { env: Record<string, string | undefined> };
 
@@ -46,8 +48,14 @@ export const chatSecurityMiddleware = {
       else rc.set(key, value);
     };
 
-    rc.set(SESSION_KEYS.role,       normalizeSessionRole(c.req.header('x-episteme-role')));
+    const role = normalizeSessionRole(c.req.header('x-episteme-role'));
+    rc.set(SESSION_KEYS.role,       role);
+    // Absent x-episteme-roles → [role], i.e. exactly the previous behaviour.
+    // This is what lets core and chat deploy independently, in either order.
+    rc.set(SESSION_KEYS.roles,      normalizeSessionRoles(c.req.header('x-episteme-roles'), role));
     rc.set(SESSION_KEYS.trustLevel, clampTrustLevel(c.req.header('x-episteme-trust-level')));
+    // Strict equality — a missing or any-other-value header is false.
+    rc.set(SESSION_KEYS.isPlatformAdmin, c.req.header('x-episteme-platform-admin') === 'true');
     setOrClear(SESSION_KEYS.institutionId, c.req.header('x-episteme-institution-id') || undefined);
     setOrClear(SESSION_KEYS.userPublicId,  c.req.header('x-episteme-user-public-id') || undefined);
 

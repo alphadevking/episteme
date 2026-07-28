@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { embedTexts, buildSparseVector } from '../ingestion/embedder';
 import { RETRIEVAL_CONFIG } from '../config';
-import { resolveNamespaces, buildRetrievalFilter } from '../security/retrieval-gate';
+import { resolveNamespacesForRoles, buildRetrievalFilter } from '../security/retrieval-gate';
 import { getSessionContext } from '../server/session-context';
 
 declare const process: { env: Record<string, string | undefined> };
@@ -70,7 +70,14 @@ const pineconeIndex = pinecone.index({ name: getEnv('PINECONE_INDEX') });
 
 export async function retrieveKnowledge(inputData: {
   query: string;
+  /** Single role — kept for existing callers. Ignored when `roles` is given. */
   role: z.infer<typeof UserRole>;
+  /**
+   * The caller's full verified role set. Access is the UNION across these, not
+   * the single highest-priority one: a user who is both an admin and a student
+   * must still retrieve student-tagged documents. Omitted → `[role]`.
+   */
+  roles?: z.infer<typeof UserRole>[];
   /** Optional programme scope — narrows results to programme-specific + general docs */
   programme?: string;
   /** Optional level scope e.g. "300L", "MSc" — narrows to level-specific + unscoped docs */
@@ -95,17 +102,26 @@ export async function retrieveKnowledge(inputData: {
    */
   namespaceAllowlist?: string[];
 }): Promise<KnowledgeRetrievalResponse> {
-  const { query, role, programme, level, trustLevel = 1, institutionId, namespaceAllowlist } = inputData;
+  const {
+    query, role, roles, programme, level,
+    trustLevel = 1, institutionId, namespaceAllowlist,
+  } = inputData;
 
-  // Both gates live in security/retrieval-gate.ts — pure and unit-tested there.
-  const namespaces = resolveNamespaces({ role, trustLevel, namespaceAllowlist });
+  // A single role is just a one-element set — identical behaviour to before.
+  const roleList = roles && roles.length > 0 ? roles : [role];
+
+  // Institutional namespaces only. Platform documentation is not in Pinecone —
+  // it is served from disk by tools/platform-docs-tier.ts.
+  const namespaces = resolveNamespacesForRoles({
+    roles: roleList, trustLevel, namespaceAllowlist,
+  });
 
   const [denseVector] = await embedTexts([query]);
   const sparseVector  = buildSparseVector(query);
   const { weightedDense, weightedSparse } = weightVectors(denseVector, sparseVector, RETRIEVAL_CONFIG.alpha);
 
   // Role scoping + multi-tenant isolation. Institution A never sees B's vectors.
-  const pineconeFilter = buildRetrievalFilter({ role, programme, level, institutionId });
+  const pineconeFilter = buildRetrievalFilter({ role: roleList, programme, level, institutionId });
 
   const allMatches: Array<{ score: number; metadata: Record<string, unknown> }> = [];
 
@@ -230,6 +246,7 @@ export const knowledgeRetrievalTool = createTool({
     return await retrieveKnowledge({
       query,
       role:               session.role,
+      roles:              session.roles,
       programme,
       level,
       trustLevel:         session.trustLevel,

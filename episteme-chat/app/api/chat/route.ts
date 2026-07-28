@@ -5,7 +5,13 @@ import { createSupabaseServerClientReadOnly } from "@/lib/supabase/server";
 // module. Both are derived from the verified `users` row only — never from the
 // user-writable `user_ai_context` — and forwarded as trusted headers, never via
 // the system prompt, so the model can neither see nor alter them.
-import { RETRIEVAL_ROLE, resolveEffectiveRole, deriveTrustLevel } from "@/lib/session-derivation";
+import {
+  RETRIEVAL_ROLE,
+  resolveEffectiveRole,
+  resolveRetrievalRoles,
+  isPlatformAdmin,
+  deriveTrustLevel,
+} from "@/lib/session-derivation";
 
 export const maxDuration = 30;
 
@@ -124,6 +130,10 @@ export async function POST(req: Request) {
   let institutionId: string | null   = null;
   let userPublicId:  string | null   = null;
   let parentAllowlist: string[] | null = null;
+  // Full verified role set (access is their union) + the platform-operator bit
+  // that RETRIEVAL_ROLE's admin→staff alias would otherwise discard.
+  let retrievalRoles: string[]       = ["prospective"];
+  let platformAdmin                  = false;
 
   try {
     const [profileResult] = await Promise.all([
@@ -142,7 +152,12 @@ export async function POST(req: Request) {
     }
 
     const rawRoles: string[] = (profile?.roles as string[]) ?? [];
-    role = resolveEffectiveRole(profile?.primary_role ?? role, rawRoles);
+    const primaryRole = profile?.primary_role ?? role;
+    role = resolveEffectiveRole(primaryRole, rawRoles);
+    // Access is the union of every verified role; `role` above stays the single
+    // highest-priority one for display and for deriveTrustLevel.
+    retrievalRoles = resolveRetrievalRoles(primaryRole, rawRoles);
+    platformAdmin  = isPlatformAdmin(primaryRole, rawRoles);
     const roles = rawRoles;
     const isParent = role === "parent" || role === "guardian"
       || roles.includes("parent") || roles.includes("guardian");
@@ -231,6 +246,8 @@ export async function POST(req: Request) {
     institutionId   = null;
     userPublicId    = null;
     parentAllowlist = null;
+    retrievalRoles  = ["prospective"];
+    platformAdmin   = false;
     system = `role=${role}`;
   }
 
@@ -252,8 +269,12 @@ export async function POST(req: Request) {
     "Content-Type":            "application/json",
     "x-episteme-admin-key":    adminKey,
     "x-episteme-role":         RETRIEVAL_ROLE[role] ?? "prospective",
+    "x-episteme-roles":        retrievalRoles.join(","),
     "x-episteme-trust-level":  String(trustLevel),
   };
+  // Only ever sent as the literal "true"; core compares strictly, so an absent
+  // header is false rather than falsy-but-present.
+  if (platformAdmin) upstreamHeaders["x-episteme-platform-admin"] = "true";
   if (institutionId)   upstreamHeaders["x-episteme-institution-id"]      = institutionId;
   if (userPublicId)    upstreamHeaders["x-episteme-user-public-id"]      = userPublicId;
   if (parentAllowlist) upstreamHeaders["x-episteme-namespace-allowlist"] = parentAllowlist.join(",");

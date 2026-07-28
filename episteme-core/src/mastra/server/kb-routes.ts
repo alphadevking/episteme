@@ -29,6 +29,10 @@ declare const process: { env: Record<string, string | undefined> };
 
 const VALID_ROLES         = new Set(['prospective', 'student', 'parent', 'staff', 'hod']);
 const VALID_LEVELS        = new Set(['100L', '200L', '300L', '400L', '500L', '600L', 'MSc', 'PhD', 'PGD']);
+// Institutional namespaces — the only ones an institution admin may ingest into
+// via the dashboard. Platform namespaces are deliberately absent: that corpus is
+// Markdown in src/content/platform, read from disk and never stored in Pinecone,
+// so there is nothing here for a tenant to write into even by accident.
 const VALID_NAMESPACES    = new Set(['admissions', 'academic-policy', 'financial-aid', 'programmes', 'staff-internal', 'general']);
 const VALID_CATEGORIES    = VALID_NAMESPACES;
 const VALID_CONTENT_TYPES = new Set(['general', 'policy', 'handbook', 'faq', 'announcement', 'catalogue', 'markdown']);

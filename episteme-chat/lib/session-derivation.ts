@@ -40,6 +40,42 @@ export const RETRIEVAL_ROLE: Record<string, string> = {
 };
 
 /**
+ * App roles that make someone an operator of the PLATFORM, as distinct from a
+ * privileged member of a tenant. Sent as its own header because RETRIEVAL_ROLE
+ * aliases these onto 'staff' — without it, "is this person an Episteme
+ * operator" is erased before retrieval sees the session, and the platform-admin
+ * runbook would have to be granted to every staff member or to nobody.
+ */
+const PLATFORM_ADMIN_ROLES = new Set(['superadmin', 'admin']);
+
+/**
+ * The caller's full retrieval role set — the UNION of every verified app role,
+ * mapped into the retrieval role space and deduped.
+ *
+ * resolveEffectiveRole picks a single winner by priority, which is right for
+ * display and for the trust ceiling but wrong for access: a user with
+ * roles ['student','admin'] resolves to 'admin' → 'staff', and then cannot
+ * retrieve a single student-tagged document. Access is a union, not a ranking.
+ *
+ * Order: the effective (highest-priority) role first, so the emitted header
+ * reads consistently and single-role callers are unchanged.
+ */
+export function resolveRetrievalRoles(primaryRole: string, roles: string[]): string[] {
+  const effective = resolveEffectiveRole(primaryRole, roles);
+  const mapped = [effective, primaryRole, ...roles]
+    .filter(Boolean)
+    .map((r) => RETRIEVAL_ROLE[r])
+    .filter((r): r is string => Boolean(r));
+  const deduped = Array.from(new Set(mapped));
+  return deduped.length > 0 ? deduped : ['prospective'];
+}
+
+/** True when any verified app role makes this user a platform operator. */
+export function isPlatformAdmin(primaryRole: string, roles: string[]): boolean {
+  return [primaryRole, ...roles].filter(Boolean).some((r) => PLATFORM_ADMIN_ROLES.has(r));
+}
+
+/**
  * Roles whose trust ceiling is the verified role itself, not a stored value.
  * These earn full-access (trust 4) purely from being the role — the role now
  * comes from the verified users row, so this cannot be self-granted.

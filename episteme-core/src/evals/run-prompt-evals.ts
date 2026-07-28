@@ -45,7 +45,10 @@ const PASS_THRESHOLD = 0.8;
 function buildRequestContext(c: PromptEvalCase) {
   const rc = new RequestContext();
   rc.set(SESSION_KEYS.role, c.session.role);
+  // Mirrors the middleware's fallback: absent role set → [role].
+  rc.set(SESSION_KEYS.roles, c.session.roles ?? [c.session.role]);
   rc.set(SESSION_KEYS.trustLevel, c.session.trustLevel);
+  rc.set(SESSION_KEYS.isPlatformAdmin, c.session.isPlatformAdmin === true);
   if (c.session.institutionId) rc.set(SESSION_KEYS.institutionId, c.session.institutionId);
   if (c.session.userPublicId)  rc.set(SESSION_KEYS.userPublicId,  c.session.userPublicId);
   if (c.session.namespaceAllowlist) rc.set(SESSION_KEYS.namespaceAllowlist, c.session.namespaceAllowlist);

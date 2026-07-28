@@ -13,10 +13,14 @@ import type { RequestContext } from '@mastra/core/request-context';
 
 export const SESSION_KEYS = {
   role:               'episteme.role',
+  /** Full verified role set. Optional — absent means "just `role`". */
+  roles:              'episteme.roles',
   trustLevel:         'episteme.trustLevel',
   institutionId:      'episteme.institutionId',
   userPublicId:       'episteme.userPublicId',
   namespaceAllowlist: 'episteme.namespaceAllowlist',
+  /** Operator of the platform (app role admin/superadmin), not of the tenant. */
+  isPlatformAdmin:    'episteme.isPlatformAdmin',
 } as const;
 
 /** Retrieval role space — matches ROLE_NAMESPACES in knowledge-retrieval-tool. */
@@ -24,17 +28,54 @@ export const SESSION_ROLES = ['prospective', 'student', 'parent', 'staff', 'hod'
 export type SessionRole = (typeof SESSION_ROLES)[number];
 
 export interface SessionContext {
+  /**
+   * Highest-priority verified role. Retained as the persona/display role and as
+   * the single-role fallback; `roles` is what retrieval actually gates on.
+   */
   role: SessionRole;
+  /**
+   * The caller's full verified role set, deduped, always non-empty. Falls back
+   * to `[role]` when the proxy sends no role set, so an older chat deployment
+   * against a newer core behaves exactly as before.
+   */
+  roles: SessionRole[];
   /** 1–4, hard-clamped. 1 = public-only. */
   trustLevel: number;
   institutionId?: string;
   userPublicId?: string;
   /** Explicit namespace allowlist for parent users (link permissions). */
   namespaceAllowlist?: string[];
+  /**
+   * True when the caller operates the PLATFORM (app role admin/superadmin), as
+   * opposed to holding a privileged role within a tenant. Carried explicitly
+   * because RETRIEVAL_ROLE aliases admin→staff, erasing the distinction before
+   * it reaches retrieval. Gates the platform-admin namespace. Defaults false.
+   */
+  isPlatformAdmin: boolean;
 }
 
 export function normalizeSessionRole(raw: unknown): SessionRole {
   return SESSION_ROLES.includes(raw as SessionRole) ? (raw as SessionRole) : 'prospective';
+}
+
+/**
+ * Normalize a role set. Unknown entries are DROPPED rather than degraded to
+ * 'prospective' — a set is a union, so mapping junk onto a real role would let
+ * a malformed header add access. An empty result falls back to `[fallback]`.
+ */
+export function normalizeSessionRoles(raw: unknown, fallback: SessionRole): SessionRole[] {
+  const list = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'string'
+      ? raw.split(',')
+      : [];
+
+  const valid = list
+    .map((r) => (typeof r === 'string' ? r.trim() : r))
+    .filter((r): r is SessionRole => SESSION_ROLES.includes(r as SessionRole));
+
+  const deduped = Array.from(new Set(valid));
+  return deduped.length > 0 ? deduped : [fallback];
 }
 
 export function clampTrustLevel(raw: unknown): number {
@@ -59,14 +100,24 @@ export function clampTrustLevel(raw: unknown): number {
  * (prospective / trust 1 / no institution), never upward.
  */
 export function getSessionContext(rc: RequestContext | undefined): SessionContext {
-  if (!rc) return { role: 'prospective', trustLevel: 1 };
+  if (!rc) {
+    return { role: 'prospective', roles: ['prospective'], trustLevel: 1, isPlatformAdmin: false };
+  }
 
   const institutionId = rc.get(SESSION_KEYS.institutionId);
   const userPublicId  = rc.get(SESSION_KEYS.userPublicId);
   const allowlist     = rc.get(SESSION_KEYS.namespaceAllowlist);
 
+  const role = normalizeSessionRole(rc.get(SESSION_KEYS.role));
+
   return {
-    role:       normalizeSessionRole(rc.get(SESSION_KEYS.role)),
+    role,
+    roles:      normalizeSessionRoles(rc.get(SESSION_KEYS.roles), role),
+    // Strict boolean: only a real `true` (or the string "true" a header carries)
+    // grants it. Any other value — including a truthy string like "0" — is false.
+    isPlatformAdmin:
+      rc.get(SESSION_KEYS.isPlatformAdmin) === true ||
+      rc.get(SESSION_KEYS.isPlatformAdmin) === 'true',
     trustLevel: clampTrustLevel(rc.get(SESSION_KEYS.trustLevel)),
     institutionId: typeof institutionId === 'string' && institutionId ? institutionId : undefined,
     userPublicId:  typeof userPublicId  === 'string' && userPublicId  ? userPublicId  : undefined,

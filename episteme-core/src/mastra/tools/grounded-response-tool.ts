@@ -8,6 +8,8 @@ import { fetchNewsPosts, buildNewsContext, type NewsResult } from './uniben-news
 import { searchWeb, buildWebContext } from './web-search-tool';
 import { RETRIEVAL_CONFIG, UNIBEN_NEWS_CONFIG } from '../config';
 import { getSessionContext } from '../server/session-context';
+import { searchPlatformDocs } from './platform-docs-tier';
+import { resolvePlatformNamespaces } from '../security/retrieval-gate';
 
 // ── Query rewriting ───────────────────────────────────────────────────────────
 // Prepends available session context to the user's query before embedding.
@@ -197,8 +199,12 @@ async function tryWebFallback(
 export const groundedResponseTool = createTool({
   id: 'groundedResponseTool',
   description:
-    'Retrieves a verified answer for any Uniben question. Internally cascades through three tiers ' +
-    'in order — the institutional knowledge base, then live news as a fallback, then a domain-scoped ' +
+    'Retrieves a verified answer for any Uniben question, and for any question about the Episteme ' +
+    'platform itself — how to use it, and for administrators how to operate it (setting up an ' +
+    'institution, ingesting documents, onboarding users, assigning roles and access levels). ' +
+    'Internally cascades through four tiers ' +
+    'in order — this product\'s own documentation, then the institutional knowledge base, then live ' +
+    'news as a fallback, then a domain-scoped ' +
     'web search as a last resort — stopping at the first tier that produces a genuine result. ' +
     'This is a single call: never call unibenNewsTool or webSearchTool yourself to "fill a gap" after ' +
     'this tool — it already tried them. ' +
@@ -265,7 +271,7 @@ export const groundedResponseTool = createTool({
      * need it: each tier's context text already embeds its own citation and
      * caveat instructions (e.g. buildWebContext's "state this is unverified").
      */
-    tier: z.enum(['kb', 'news', 'web', 'none']),
+    tier: z.enum(['platform', 'kb', 'news', 'web', 'none']),
     /**
      * Structured source list for the client. The chat UI renders its Sources
      * list from THIS — never from the model's markdown — mirroring
@@ -335,6 +341,7 @@ export const groundedResponseTool = createTool({
         return await retrieveKnowledge({
           query:              q,
           role:               session.role,
+          roles:              session.roles,
           programme:          scoped ? programme : undefined,
           level:              scoped ? level      : undefined,
           trustLevel:         session.trustLevel,
@@ -345,6 +352,29 @@ export const groundedResponseTool = createTool({
         logger?.warn('[groundedResponseTool] KB retrieval failed', { error: (err as Error).message, query: q });
         return { found: false, results: [], message: 'Retrieval failed.' };
       }
+    }
+
+    // ── Tier 0: platform documentation ───────────────────────────────────────
+    // Served from Markdown on disk, not Pinecone. Ahead of the KB because the
+    // two corpora answer disjoint questions — a question about Episteme has no
+    // institutional answer — and because its coverage gate is strict enough
+    // that an institutional question will not match it. A miss costs one
+    // in-process scan of a few dozen sections, no network call.
+    const platformHit = await searchPlatformDocs(
+      query,
+      resolvePlatformNamespaces({
+        trustLevel: session.trustLevel,
+        isPlatformAdmin: session.isPlatformAdmin,
+      }),
+      logger,
+    );
+    if (platformHit) {
+      return {
+        answer: platformHit.context,
+        confidence: 'high' as const,
+        tier: 'platform' as const,
+        sources: platformHit.sources,
+      };
     }
 
     // ── Tier 1: knowledge base — broad literal query first, scoped+enriched fallback ──

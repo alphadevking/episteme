@@ -14,6 +14,7 @@ import {
   getSessionContext,
   clampTrustLevel,
   normalizeSessionRole,
+  normalizeSessionRoles,
   SESSION_KEYS,
 } from './session-context';
 
@@ -89,6 +90,50 @@ describe('normalizeSessionRole', () => {
   });
 });
 
+describe('normalizeSessionRoles', () => {
+  test('accepts a comma-separated header, as the proxy sends it', () => {
+    assert.deepEqual(normalizeSessionRoles('student,staff', 'prospective'), ['student', 'staff']);
+    assert.deepEqual(normalizeSessionRoles(' student , staff ', 'prospective'), ['student', 'staff']);
+  });
+
+  test('accepts an array', () => {
+    assert.deepEqual(normalizeSessionRoles(['parent', 'student'], 'prospective'), ['parent', 'student']);
+  });
+
+  test('DROPS unknown entries rather than degrading them', () => {
+    // A set is a union: mapping junk onto 'prospective' would let a malformed
+    // header ADD access. Dropping is the only safe direction.
+    assert.deepEqual(normalizeSessionRoles('student,root,admin', 'prospective'), ['student']);
+    assert.deepEqual(normalizeSessionRoles(['STAFF', 42, null], 'student'), ['student']);
+  });
+
+  test('surrounding whitespace is trimmed, but casing is not normalised', () => {
+    // Trimming is required because the header arrives as "a, b". It cannot
+    // escalate: the trimmed value must still be an exact SESSION_ROLES member.
+    // This is a deliberate asymmetry with the scalar normalizeSessionRole,
+    // which rejects ' staff' outright — it reads a single un-split header.
+    assert.deepEqual(normalizeSessionRoles([' staff'], 'student'), ['staff']);
+    assert.deepEqual(normalizeSessionRoles(['STAFF'], 'student'), ['student']);
+  });
+
+  test('falls back to the scalar role when nothing valid survives', () => {
+    for (const raw of [undefined, null, '', [], 'root,admin', 42, {}]) {
+      assert.deepEqual(normalizeSessionRoles(raw, 'staff'), ['staff'], `${JSON.stringify(raw)}`);
+    }
+  });
+
+  test('deduplicates', () => {
+    assert.deepEqual(normalizeSessionRoles('staff,staff,student', 'prospective'), ['staff', 'student']);
+  });
+
+  test('cannot manufacture a role the scalar gate would reject', () => {
+    for (const raw of ['admin', 'superadmin', 'root,superuser']) {
+      const roles = normalizeSessionRoles(raw, 'prospective');
+      assert.deepEqual(roles, ['prospective'], `"${raw}" produced ${roles.join(',')}`);
+    }
+  });
+});
+
 describe('getSessionContext', () => {
   test('missing context yields the public tier', () => {
     const s = getSessionContext(undefined);
@@ -145,6 +190,47 @@ describe('getSessionContext', () => {
     }));
     assert.equal(s.institutionId, undefined);
     assert.equal(s.userPublicId, undefined);
+  });
+
+  test('roles defaults to [role] when the proxy sends no role set', () => {
+    // Backwards compatibility: an older chat deployment against a newer core
+    // must behave exactly as it did before.
+    const s = getSessionContext(contextWith({ [SESSION_KEYS.role]: 'staff' }));
+    assert.deepEqual(s.roles, ['staff']);
+  });
+
+  test('roles is read when present', () => {
+    const s = getSessionContext(contextWith({
+      [SESSION_KEYS.role]:  'staff',
+      [SESSION_KEYS.roles]: ['student', 'staff'],
+    }));
+    assert.equal(s.role, 'staff');
+    assert.deepEqual(s.roles, ['student', 'staff']);
+  });
+
+  test('isPlatformAdmin defaults to false and needs a strict true', () => {
+    assert.equal(getSessionContext(new RequestContext()).isPlatformAdmin, false);
+    assert.equal(getSessionContext(undefined).isPlatformAdmin, false);
+    for (const raw of ['1', 'yes', 'TRUE', 1, {}, 'false', null]) {
+      const s = getSessionContext(contextWith({ [SESSION_KEYS.isPlatformAdmin]: raw }));
+      assert.equal(s.isPlatformAdmin, false, `${JSON.stringify(raw)} granted platform admin`);
+    }
+    assert.equal(
+      getSessionContext(contextWith({ [SESSION_KEYS.isPlatformAdmin]: true })).isPlatformAdmin,
+      true,
+    );
+    assert.equal(
+      getSessionContext(contextWith({ [SESSION_KEYS.isPlatformAdmin]: 'true' })).isPlatformAdmin,
+      true,
+    );
+  });
+
+  test('a hostile roles header cannot escalate', () => {
+    const s = getSessionContext(contextWith({
+      [SESSION_KEYS.role]:  'student',
+      [SESSION_KEYS.roles]: ['student', 'admin', 'superadmin', 'root'],
+    }));
+    assert.deepEqual(s.roles, ['student']);
   });
 
   test('empty allowlist normalises to undefined', () => {

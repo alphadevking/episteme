@@ -27,9 +27,37 @@ interface TavilyResponse {
 }
 
 /**
+ * Is `url` on one of the allowed domains, or a subdomain of one?
+ *
+ * Suffix match on a dot boundary, so "uniben.edu" admits "www.uniben.edu" and
+ * "news.uniben.edu" but not "evil-uniben.edu" or "uniben.edu.attacker.com".
+ * An unparseable URL is rejected — a result we cannot attribute to a domain is
+ * a result we cannot vouch for.
+ */
+export function isAllowedDomain(url: string, allowedDomains: string[]): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+  } catch {
+    return false;
+  }
+  return allowedDomains.some((domain) => {
+    const d = domain.toLowerCase().replace(/^www\./, '');
+    return hostname === d || hostname.endsWith(`.${d}`);
+  });
+}
+
+/**
  * Tavily-powered web search scoped to Uniben and Nigerian academic authorities.
  * Returns clean, LLM-ready content (not raw HTML) — Tavily extracts and filters for us.
- * Domain scope is tunable via WEB_SEARCH_INCLUDE_DOMAINS env var.
+ *
+ * The domain allowlist is ENFORCED here, not merely requested. `include_domains`
+ * is sent to Tavily, and every returned result is then re-checked against the
+ * same list locally. Asking a third-party API to restrict itself and never
+ * verifying the response is a single point of failure: if the parameter is
+ * dropped, renamed, ignored, or silently disabled by a misconfigured env, the
+ * unrestricted results flow straight through to the user labelled as a Uniben
+ * answer. The local check makes an off-domain result structurally unreachable.
  */
 export async function searchWeb(query: string): Promise<WebSearchResponse> {
   const response = await fetch('https://api.tavily.com/search', {
@@ -39,9 +67,11 @@ export async function searchWeb(query: string): Promise<WebSearchResponse> {
       api_key: getEnv('TAVILY_API_KEY'),
       query,
       search_depth: WEB_SEARCH_CONFIG.searchDepth,
-      include_domains: WEB_SEARCH_CONFIG.includeDomains.length > 0
-        ? WEB_SEARCH_CONFIG.includeDomains
-        : undefined,
+      // Omitted only under the explicit opt-in flag. An empty allowlist can no
+      // longer arise — envAllowlist fails closed to the defaults.
+      include_domains: WEB_SEARCH_CONFIG.allowAnyDomain
+        ? undefined
+        : WEB_SEARCH_CONFIG.includeDomains,
       max_results: WEB_SEARCH_CONFIG.maxResults,
       include_raw_content: false,
       include_answer: false,
@@ -58,8 +88,25 @@ export async function searchWeb(query: string): Promise<WebSearchResponse> {
     return { found: false, results: [], message: 'No web results found for this query.' };
   }
 
+  // Enforce the domain allowlist locally — see the note on searchWeb. Done
+  // BEFORE the score filter: a high-scoring off-domain result is exactly the
+  // case this exists to stop. Tavily's score measures how well a page matches
+  // the query, not whether it has any business answering it, so a vendor blog
+  // about employee onboarding scores highly on a question about onboarding
+  // staff in Episteme. Relevance cannot substitute for provenance.
+  const inScope = WEB_SEARCH_CONFIG.allowAnyDomain
+    ? data.results
+    : data.results.filter((r) => isAllowedDomain(r.url, WEB_SEARCH_CONFIG.includeDomains));
+
+  if (inScope.length < data.results.length) {
+    console.warn(
+      `[webSearch] dropped ${data.results.length - inScope.length} off-domain result(s) ` +
+      `that the provider returned despite include_domains`,
+    );
+  }
+
   // Filter by score threshold and normalise shape
-  const filtered = data.results
+  const filtered = inScope
     .filter((r) => r.score >= WEB_SEARCH_CONFIG.scoreThreshold)
     .map((r) => ({
       title: r.title,
