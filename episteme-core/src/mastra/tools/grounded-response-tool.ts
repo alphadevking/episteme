@@ -10,6 +10,7 @@ import { RETRIEVAL_CONFIG, UNIBEN_NEWS_CONFIG } from '../config';
 import { getSessionContext } from '../server/session-context';
 import { searchPlatformDocs } from './platform-docs-tier';
 import { resolvePlatformNamespaces } from '../security/retrieval-gate';
+import { documentSource, sourceSchema, type Source } from './source';
 
 // ── Query rewriting ───────────────────────────────────────────────────────────
 // Prepends available session context to the user's query before embedding.
@@ -58,11 +59,12 @@ function deriveTitle(source: string): string {
 }
 
 /**
- * Unified source shape across all three tiers this tool can resolve from.
- * `pages` is only ever populated for tier "kb" (paginated documents);
- * `published` is only ever populated for tier "news".
+ * Unified source shape across every tier this tool can resolve from — defined
+ * in ./source.ts so the platform tier and the record tools cannot drift from it.
+ * `pages` is only populated for paginated KB documents, `published` only for
+ * news, and `url` is absent for sources that are not linkable at all.
  */
-type UnifiedSource = { number: number; title: string; url: string; pages: number[]; published?: string };
+type UnifiedSource = Source;
 
 /**
  * Builds the model-facing context and the client-facing source list from the
@@ -130,12 +132,8 @@ function buildGroundedContext(
 
   const sources: UnifiedSource[] = Array.from(
     sourceIndex,
-    ([url, { number, title, pages }]) => ({
-      number,
-      title,
-      url,
-      pages: Array.from(pages).sort((a, b) => a - b),
-    }),
+    ([url, { number, title, pages }]) =>
+      documentSource({ number, title, url, pages: Array.from(pages).sort((a, b) => a - b) }),
   );
 
   return { context: lines.join('\n'), sources };
@@ -168,9 +166,9 @@ async function tryNewsFallback(
   }
   if (newsPosts.length === 0) return null;
 
-  const sources: UnifiedSource[] = newsPosts.map((p, i) => ({
-    number: i + 1, title: p.title, url: p.url, pages: [], published: p.published,
-  }));
+  const sources: UnifiedSource[] = newsPosts.map((p, i) =>
+    documentSource({ number: i + 1, title: p.title, url: p.url, published: p.published }),
+  );
   return { answer: buildNewsContext(newsPosts), tier: 'news', sources };
 }
 
@@ -188,9 +186,9 @@ async function tryWebFallback(
   }
   if (webFound.length === 0) return null;
 
-  const sources: UnifiedSource[] = webFound.map((r, i) => ({
-    number: i + 1, title: r.title, url: r.url, pages: [],
-  }));
+  const sources: UnifiedSource[] = webFound.map((r, i) =>
+    documentSource({ number: i + 1, title: r.title, url: r.url }),
+  );
   return { answer: buildWebContext(webFound), tier: 'web', sources };
 }
 
@@ -278,16 +276,8 @@ export const groundedResponseTool = createTool({
      * unibenNewsTool's `posts` field. Withheld from the model; see
      * `toModelOutput`.
      */
-    sources: z.array(z.object({
-      number: z.number().int(),
-      title:  z.string(),
-      url:    z.string(),
-      /** Page numbers (1-based) this source was cited from, sorted ascending.
-       *  Only ever populated for tier "kb". */
-      pages:  z.array(z.number().int()),
-      /** ISO published date — only ever populated for tier "news". */
-      published: z.string().optional(),
-    })).describe('Source list for client rendering. Empty when confidence=low.'),
+    sources: z.array(sourceSchema)
+      .describe('Source list for client rendering. Empty when confidence=low.'),
   }),
   /**
    * Withhold `sources` and `tier` from the model — see the comment on

@@ -21,6 +21,7 @@ import {
   type PlatformSection,
 } from '../ingestion/platform-docs';
 import { PLATFORM_DOCS_CONFIG } from '../config';
+import { documentSource, type Source } from './source';
 
 const CONTENT_ROOT = join(
   dirname(fileURLToPath(import.meta.url)), '..', '..', 'content', 'platform',
@@ -52,7 +53,7 @@ export function resetPlatformSectionCache(): void {
 export interface PlatformHit {
   /** Model-facing context, in the same VERIFIED SOURCES shape the KB tier uses. */
   context: string;
-  sources: { number: number; title: string; url: string; pages: number[] }[];
+  sources: Source[];
 }
 
 /**
@@ -117,14 +118,11 @@ export async function searchPlatformDocs(
 
   return {
     context: lines.join('\n'),
-    sources: Array.from(sourceIndex.values()).map(({ number, title }) => ({
-      number,
-      title,
-      // Deliberately empty: these documents have no public URL, and the client
-      // renders a non-link source entry for an empty href. Inventing a docs
-      // site link that 404s would be worse than none.
-      url: '',
-      pages: [],
-    })),
+    // No `url`: these ship in the repo and have no public address, so the
+    // client renders them as plain text rather than a dead link. Inventing a
+    // docs-site URL that 404s would be worse than none.
+    sources: Array.from(sourceIndex.values()).map(({ number, title }) =>
+      documentSource({ number, title, label: 'Episteme product documentation' }),
+    ),
   };
 }

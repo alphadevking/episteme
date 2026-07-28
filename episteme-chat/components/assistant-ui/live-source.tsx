@@ -29,7 +29,7 @@
 // out-of-band from the model — the same rule as session identity.
 
 import { useAuiState, type ToolCallMessagePartComponent } from "@assistant-ui/react";
-import { ChevronDownIcon, ExternalLinkIcon, RadioTowerIcon, GlobeIcon, TriangleAlertIcon } from "lucide-react";
+import { ChevronDownIcon, ExternalLinkIcon, RadioTowerIcon, GlobeIcon, TriangleAlertIcon, DatabaseIcon } from "lucide-react";
 import { useEffect, useState, type FC, type ReactNode } from "react";
 import {
   Collapsible,
@@ -39,6 +39,7 @@ import {
 import {
   CitationProvider,
   formatPageLabel,
+  isLinkable,
   withPageAnchor,
   type CitationSource,
 } from "@/components/assistant-ui/citation-context";
@@ -67,17 +68,31 @@ type NewsToolResult = {
 };
 
 /**
- * Mirrors the `sources` field of groundedResponseTool's output schema. `pages`
- * is only ever populated for tier "kb"; `published` only for tier "news".
+ * Mirrors the `sources` field of groundedResponseTool's output schema —
+ * episteme-core/src/mastra/tools/source.ts is the canonical definition.
+ *
+ * `url` is OPTIONAL: platform documentation ships in the repo and database
+ * records are rows, so neither has an address. An absent url means render plain
+ * text — `href=""` navigates to the current page, which looks like a citation
+ * that goes nowhere.
  */
-type KbSource = { number: number; title: string; url: string; pages: number[]; published?: string };
+type KbSource = {
+  number: number;
+  title: string;
+  kind?: "document" | "record";
+  url?: string;
+  pages?: number[];
+  published?: string;
+  asOf?: string;
+  label?: string;
+};
 
 /**
- * groundedResponseTool now cascades through kb → news → web internally and
- * reports which tier actually answered — the client reads this directly
- * instead of cross-referencing which of three separate tools ran.
+ * groundedResponseTool cascades through platform → kb → news → web internally
+ * and reports which tier actually answered — the client reads this directly
+ * instead of cross-referencing which of several separate tools ran.
  */
-type KbToolResult = { tier?: "kb" | "news" | "web" | "none"; sources?: KbSource[] };
+type KbToolResult = { tier?: "platform" | "kb" | "news" | "web" | "none"; sources?: KbSource[] };
 
 /** Mirrors the `results` field of webSearchTool's output schema, plus a
  *  `number` this file attaches for the same reason as LivePost above. */
@@ -210,9 +225,11 @@ function useAnswerSources(): AnswerSourceState {
     if (kbResult) {
       const cited = (kbResult.sources ?? []).filter((s) => citedNumbers.has(s.number));
       if (cited.length > 0) {
-        // "kb" and "news" (used as a fallback) both render as the plain,
-        // unmarked list — a fallback fetch is still a real citation, it just
-        // isn't the point of the query, so it shouldn't be framed like one.
+        // "platform", "kb" and "news" (used as a fallback) all render as the
+        // plain, unmarked list — a fallback fetch is still a real citation, it
+        // just isn't the point of the query, so it shouldn't be framed like
+        // one. Only "web" gets the unverified frame, because only it is not
+        // first-party content.
         return JSON.stringify({ tier: kbResult.tier === "web" ? "web" : "kb", sources: cited });
       }
     }
@@ -314,8 +331,17 @@ const LiveSourceList: FC<{ posts: LivePost[] }> = ({ posts }) => {
   );
 };
 
-/** Plain, unmarked Sources list — used for KB answers and fallback fetches alike.
- *  No header of its own; the collapsible trigger it sits under provides that. */
+/**
+ * Plain, unmarked Sources list — used for KB answers, platform documentation,
+ * records and fallback fetches alike. No header of its own; the collapsible
+ * trigger it sits under provides that.
+ *
+ * Two shapes of row, chosen by whether the source has an address:
+ *   linkable    → anchor, external-link affordance
+ *   non-linkable→ plain text with its provenance label (platform docs, records)
+ * Keyed by `number`, never by url: several non-linkable sources would otherwise
+ * collapse onto the same empty key.
+ */
 const KbSourceList: FC<{ sources: KbSource[] }> = ({ sources }) => {
   if (sources.length === 0) return null;
 
@@ -323,33 +349,64 @@ const KbSourceList: FC<{ sources: KbSource[] }> = ({ sources }) => {
     <ol className="aui-kb-source-list m-0 flex list-none flex-col gap-0.5 p-0">
       {sources.map((source) => {
         const pageLabel = formatPageLabel(source.pages);
-        return (
-          <li key={source.url}>
-            <a
-              href={withPageAnchor(source.url, source.pages)}
-              target="_blank"
-              rel="noopener noreferrer nofollow"
-              className={cn(
-                "group flex items-start gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                "hover:bg-muted",
+        const linkable = isLinkable(source);
+
+        const body = (
+          <>
+            <span className="mt-px w-4 shrink-0 text-xs font-semibold tabular-nums text-muted-foreground">
+              {source.number}
+            </span>
+            <span className="min-w-0 flex-1 wrap-break-word text-foreground/90 group-hover:text-foreground">
+              {source.title}
+              {pageLabel && (
+                <span className="ml-1.5 whitespace-nowrap text-xs text-muted-foreground">
+                  · {pageLabel}
+                </span>
               )}
-            >
-              <span className="mt-px w-4 shrink-0 text-xs font-semibold tabular-nums text-muted-foreground">
-                {source.number}
-              </span>
-              <span className="min-w-0 flex-1 wrap-break-word text-foreground/90 group-hover:text-foreground">
-                {source.title}
-                {pageLabel && (
-                  <span className="ml-1.5 whitespace-nowrap text-xs text-muted-foreground">
-                    · {pageLabel}
-                  </span>
-                )}
-              </span>
+              {!linkable && source.label && (
+                <span className="ml-1.5 whitespace-nowrap text-xs text-muted-foreground">
+                  · {source.label}
+                </span>
+              )}
+              {!linkable && source.asOf && (
+                <span className="ml-1.5 whitespace-nowrap text-xs text-muted-foreground">
+                  · as of {formatDate(source.asOf) ?? "now"}
+                </span>
+              )}
+            </span>
+            {linkable ? (
               <ExternalLinkIcon
                 aria-hidden
                 className="mt-0.5 size-3.5 shrink-0 text-muted-foreground group-hover:text-foreground"
               />
-            </a>
+            ) : (
+              <DatabaseIcon
+                aria-hidden
+                className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
+              />
+            )}
+          </>
+        );
+
+        return (
+          <li key={source.number}>
+            {linkable ? (
+              <a
+                href={withPageAnchor(source.url, source.pages)}
+                target="_blank"
+                rel="noopener noreferrer nofollow"
+                className={cn(
+                  "group flex items-start gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                  "hover:bg-muted",
+                )}
+              >
+                {body}
+              </a>
+            ) : (
+              <div className="group flex items-start gap-2 rounded-md px-2 py-1.5 text-sm">
+                {body}
+              </div>
+            )}
           </li>
         );
       })}
@@ -420,6 +477,8 @@ export const AnswerSourceFrame: FC<{ children: ReactNode }> = ({ children }) => 
       title: s.title,
       url: s.url,
       pages: s.pages,
+      label: s.label,
+      asOf: s.asOf,
       tier: "kb",
     }));
 

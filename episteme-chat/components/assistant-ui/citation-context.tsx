@@ -17,7 +17,12 @@ export type CitationSource = {
   /** 1-based number matching the [N] marker in the prose. */
   number: number;
   title: string;
-  url: string;
+  /**
+   * Absent or empty means NOT LINKABLE — render plain text, never an anchor.
+   * Repo-shipped platform documentation and database records have no address;
+   * `href=""` silently reloads the page, which reads as a broken citation.
+   */
+  url?: string;
   /** Human-readable date, already formatted. */
   dateLabel?: string;
   /**
@@ -35,7 +40,20 @@ export type CitationSource = {
    * visibly more cautious style than either of the above.
    */
   tier: "live" | "kb" | "web";
+  /**
+   * Provenance for a source with no URL, e.g. "Episteme product documentation"
+   * or "Institution academic calendar". Shown in place of the missing link so
+   * the reader can still tell where a claim came from.
+   */
+  label?: string;
+  /** ISO timestamp a record was read. Records have no edition — only an as-of. */
+  asOf?: string;
 };
+
+/** A source is linkable only when it carries a non-empty URL. */
+export function isLinkable(source: { url?: string }): boolean {
+  return typeof source.url === "string" && source.url.trim().length > 0;
+}
 
 const CitationContext = createContext<Map<number, CitationSource> | null>(null);
 
@@ -74,7 +92,8 @@ export function formatPageLabel(pages?: number[]): string | null {
  * PDF URLs; anything else (HTML pages, scraped announcements) ignores the
  * fragment or, worse, could already use it for something else.
  */
-export function withPageAnchor(url: string, pages?: number[]): string {
+export function withPageAnchor(url: string | undefined, pages?: number[]): string {
+  if (!url) return "";
   if (!pages || pages.length === 0) return url;
   const path = url.split(/[?#]/)[0];
   if (!/\.pdf$/i.test(path)) return url;

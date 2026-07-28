@@ -12,7 +12,7 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { formatPageLabel, useCitation, withPageAnchor } from "@/components/assistant-ui/citation-context";
+import { formatPageLabel, isLinkable, useCitation, withPageAnchor } from "@/components/assistant-ui/citation-context";
 import { cn } from "@/lib/utils";
 
 type MarkdownTextProps = {
@@ -105,25 +105,53 @@ const CitationBadge: FC<{ n: number; children?: React.ReactNode }> = ({ n, child
 
   const pageLabel = formatPageLabel(source.pages);
 
+  // Not every source has an address. Platform documentation ships in the repo
+  // and database records are rows — for those, an <a> would resolve to href=""
+  // and silently reload the chat when clicked. That is the same failure the
+  // cite-marker rewrite above exists to prevent, arriving by a different route,
+  // so the badge drops the anchor entirely rather than emitting an empty href.
+  // The tooltip still identifies the source, which is what the badge is for.
+  const linkable = isLinkable(source);
+
+  const badge = (
+    <sup>
+      {linkable ? (
+        <a
+          href={withPageAnchor(source.url, source.pages)}
+          target="_blank"
+          rel="noopener noreferrer nofollow"
+          aria-label={`Source ${n}: ${source.title}${pageLabel ? `, ${pageLabel}` : ""}`}
+          className={cn(
+            badgeClass,
+            "cursor-pointer no-underline transition-colors",
+            "bg-muted text-muted-foreground ring-border hover:bg-muted/70",
+          )}
+        >
+          {children}
+        </a>
+      ) : (
+        <span
+          aria-label={`Source ${n}: ${source.title}${source.label ? `, ${source.label}` : ""}`}
+          className={cn(
+            badgeClass,
+            "cursor-default no-underline",
+            "bg-muted text-muted-foreground ring-border",
+          )}
+        >
+          {children}
+        </span>
+      )}
+    </sup>
+  );
+
+  /** Where the claim came from, for the tooltip's second line. */
+  const provenance = linkable
+    ? (() => { try { return new URL(source.url!).hostname; } catch { return "source"; } })()
+    : source.label ?? "Institution record";
+
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
-        <sup>
-          <a
-            href={withPageAnchor(source.url, source.pages)}
-            target="_blank"
-            rel="noopener noreferrer nofollow"
-            aria-label={`Source ${n}: ${source.title}${pageLabel ? `, ${pageLabel}` : ""}`}
-            className={cn(
-              badgeClass,
-              "cursor-pointer no-underline transition-colors",
-              "bg-muted text-muted-foreground ring-border hover:bg-muted/70",
-            )}
-          >
-            {children}
-          </a>
-        </sup>
-      </TooltipTrigger>
+      <TooltipTrigger asChild>{badge}</TooltipTrigger>
       <TooltipContent side="top" className="max-w-72 px-3 py-2">
         <p className="font-medium leading-snug">
           {source.title}
@@ -133,7 +161,7 @@ const CitationBadge: FC<{ n: number; children?: React.ReactNode }> = ({ n, child
           {source.dateLabel ? `${source.dateLabel} · ` : ""}
           {source.tier === "live" ? "Live from " : ""}
           {source.tier === "web" ? "Unverified web result · " : ""}
-          {(() => { try { return new URL(source.url).hostname; } catch { return "source"; } })()}
+          {provenance}
         </p>
       </TooltipContent>
     </Tooltip>
