@@ -451,6 +451,8 @@ export type Database = {
           institution_id: string
           is_active: boolean
           name: string
+          site_url: string | null
+          unit_type: Database["public"]["Enums"]["academic_unit_type"]
           updated_at: string
         }
         Insert: {
@@ -461,6 +463,8 @@ export type Database = {
           institution_id: string
           is_active?: boolean
           name: string
+          site_url?: string | null
+          unit_type: Database["public"]["Enums"]["academic_unit_type"]
           updated_at?: string
         }
         Update: {
@@ -471,6 +475,8 @@ export type Database = {
           institution_id?: string
           is_active?: boolean
           name?: string
+          site_url?: string | null
+          unit_type?: Database["public"]["Enums"]["academic_unit_type"]
           updated_at?: string
         }
         Relationships: [
@@ -1516,6 +1522,13 @@ export type Database = {
       }
     }
     Enums: {
+      academic_unit_type:
+        | "faculty"
+        | "school"
+        | "college"
+        | "institute"
+        | "centre"
+        | "affiliate"
       account_status:
         | "pending_verification"
         | "active"
@@ -1679,6 +1692,14 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
+      academic_unit_type: [
+        "faculty",
+        "school",
+        "college",
+        "institute",
+        "centre",
+        "affiliate",
+      ],
       account_status: [
         "pending_verification",
         "active",

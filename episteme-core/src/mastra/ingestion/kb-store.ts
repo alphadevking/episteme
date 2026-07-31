@@ -17,7 +17,15 @@ export interface KbDocument {
   faculty: string;
   source: string;
   roles: string[];
-  updatedAt: string;
+  /**
+   * Content date, or null for a genuinely undated source.
+   *
+   * The `updated_at` column is NOT NULL (SQLite cannot drop that without a
+   * table rebuild), so null is stored as the empty string and mapped back in
+   * rowToDocument. The sentinel lives ONLY at this storage boundary — every
+   * other layer sees `string | null`.
+   */
+  updatedAt: string | null;
   /** Resolved institution UUID or GLOBAL_INSTITUTION. Always present. */
   institutionId: string;
   /** Programme scope stored for re-ingest fidelity. Null = institution-wide. */
@@ -131,7 +139,8 @@ export async function saveDocument(doc: KbDocument): Promise<void> {
       doc.faculty,
       doc.source,
       JSON.stringify(doc.roles),
-      doc.updatedAt,
+      // '' is the undated sentinel — see the note on KbDocument.updatedAt.
+      doc.updatedAt ?? '',
       doc.institutionId,
       doc.programme ?? null,
       JSON.stringify(doc.levels ?? []),
@@ -200,7 +209,8 @@ function rowToDocument(row: Record<string, unknown>): KbDocument {
     faculty:           row['faculty'] as string,
     source:            row['source'] as string,
     roles:             JSON.parse(row['roles'] as string) as string[],
-    updatedAt:         row['updated_at'] as string,
+    // '' (and any legacy null) maps back to the undated marker.
+    updatedAt:         (row['updated_at'] as string | null) || null,
     institutionId:     (row['institution_id'] as string | null) ?? GLOBAL_INSTITUTION,
     programme:         (row['programme']       as string | null) ?? null,
     levels:            row['levels'] ? (JSON.parse(row['levels'] as string) as string[]) : [],

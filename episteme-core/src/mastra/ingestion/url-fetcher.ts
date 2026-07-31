@@ -9,8 +9,6 @@
 // mean neither side alone can be turned into one.
 import { createHash } from 'node:crypto';
 
-declare const process: { env: Record<string, string | undefined> };
-
 /** Only these hosts may be ingested by URL. Matches uniben.edu and any subdomain
  *  (www., news., etc.) but NOT look-alikes like evil-uniben.edu or uniben.edu.x. */
 const UNIBEN_HOST = /(^|\.)uniben\.edu$/i;

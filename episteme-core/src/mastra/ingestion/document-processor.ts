@@ -1,7 +1,6 @@
 import { UnstructuredClient } from 'unstructured-client';
 import { Strategy } from 'unstructured-client/sdk/models/shared/partitionparameters';
 
-declare const process: { env: Record<string, string | undefined> };
 
 export interface ProcessedElement {
   text: string;

@@ -12,7 +12,6 @@ import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { getSessionContext } from '../server/session-context';
 
-declare const process: { env: Record<string, string | undefined> };
 
 const ClaimStatusSchema = z.object({
   found:             z.boolean(),

@@ -26,8 +26,6 @@ import type { ContextWithMastra } from '@mastra/core/server';
 import { RequestContext } from '@mastra/core/request-context';
 import { SESSION_KEYS, normalizeSessionRole, normalizeSessionRoles, clampTrustLevel } from './session-context';
 
-declare const process: { env: Record<string, string | undefined> };
-
 type Next = () => Promise<void>;
 
 export const chatSecurityMiddleware = {

@@ -5,7 +5,6 @@
  * Defaults are production-calibrated — override in .env for environment-specific tuning.
  */
 
-declare const process: { env: Record<string, string | undefined> };
 
 function envInt(key: string, defaultVal: number): number {
   const raw = process.env[key];

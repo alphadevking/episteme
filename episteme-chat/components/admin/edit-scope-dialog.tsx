@@ -33,14 +33,21 @@ export function EditScopeDialog({ doc, open, onOpenChange, onSaved }: Props) {
   const [category,    setCategory]    = useState(doc.category);
   const [contentType, setContentType] = useState(doc.contentType);
   // Content date drives the freshness signal. <input type="date"> needs YYYY-MM-DD.
-  const [docDate,     setDocDate]     = useState(() => doc.updatedAt.split("T")[0]);
+  // A document may be genuinely undated, in which case the field starts empty.
+  const originalDate = doc.updatedAt?.split("T")[0] ?? "";
+  const [docDate,     setDocDate]     = useState(originalDate);
 
   const [saving, setSaving] = useState(false);
   const [error,  setError]  = useState<string | null>(null);
 
   const levelsCleared    = doc.levels.length > 0 && levels.length === 0;
   const programmeCleared = !!doc.programme && programme.trim() === "";
-  const canSave = roles.length > 0 && !levelsCleared && !programmeCleared && !saving;
+  // Same Pinecone limitation as levels/programme: a metadata patch merges keys
+  // and cannot remove one, so a dated document cannot be returned to undated
+  // here. Blocked explicitly rather than silently ignored — the admin would
+  // otherwise clear the field, save, and see the old date reappear.
+  const dateCleared      = !!doc.updatedAt && docDate.trim() === "";
+  const canSave = roles.length > 0 && !levelsCleared && !programmeCleared && !dateCleared && !saving;
 
   function toggleRole(role: string) {
     setRoles((r) => (r.includes(role) ? r.filter((x) => x !== role) : [...r, role]));
@@ -60,8 +67,10 @@ export function EditScopeDialog({ doc, open, onOpenChange, onSaved }: Props) {
         contentType,
       };
       // Content date — only send when it's a valid date and actually changed,
-      // so an untouched field is a no-op.
-      if (docDate && docDate !== doc.updatedAt.split("T")[0]) {
+      // so an untouched field is a no-op. Setting a date on a previously
+      // undated document is allowed (undated -> dated); the reverse is blocked
+      // above by dateCleared.
+      if (docDate && docDate !== originalDate) {
         body.updatedAt = new Date(docDate).toISOString();
       }
       // Levels/programme can only be widened or changed here, never cleared to
@@ -124,6 +133,17 @@ export function EditScopeDialog({ doc, open, onOpenChange, onSaved }: Props) {
               <span className="text-muted-foreground font-normal">(content&rsquo;s own date — drives the &ldquo;may be outdated&rdquo; signal)</span>
             </Label>
             <Input type="date" value={docDate} onChange={(e) => setDocDate(e.target.value)} className={inputBase} />
+            {!doc.updatedAt && !docDate && (
+              <p className="text-[11px] text-muted-foreground">
+                This source is undated — its age is unknown, so it carries no &ldquo;may be
+                outdated&rdquo; warning. Set a date only if you know the content&rsquo;s own date.
+              </p>
+            )}
+            {dateCleared && (
+              <p className="text-[11px] text-destructive">
+                Clearing an existing document date isn&rsquo;t supported here — restore a value, or use Re-ingest to make it undated.
+              </p>
+            )}
           </div>
 
           <div className="space-y-1.5">

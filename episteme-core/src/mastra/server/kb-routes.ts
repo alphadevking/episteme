@@ -12,8 +12,24 @@
  *   POST   /kb/documents/:docId/reingest       — re-ingest a text-based document
  *   POST   /kb/documents/:docId/freshness      — update freshness timestamp only
  */
-import type { Context } from 'hono';
-import { ingestDocument, deleteDocument, patchDocumentMetadata, GLOBAL_INSTITUTION, type IngestProgressEvent, type DocumentScopePatch } from '../ingestion/ingest';
+// NOT `import type { Context } from 'hono'`. @mastra/core vendors its own copy
+// of hono's type declarations (dist/_types/hono/), and `apiRoutes[].handler` is
+// typed against *those*. Importing from the real hono package gives a
+// structurally different `HonoRequest`, so every handler fails to assign with a
+// baffling "Type 'HonoRequest' is missing properties from type 'HonoRequest'".
+// ContextWithMastra comes from the same declarations the route table expects —
+// which is why chat-security.ts already uses it.
+import type { ContextWithMastra } from '@mastra/core/server';
+import {
+  ingestDocument,
+  prepareDocument,
+  summarizePrepared,
+  deleteDocument,
+  patchDocumentMetadata,
+  GLOBAL_INSTITUTION,
+  type IngestProgressEvent,
+  type DocumentScopePatch,
+} from '../ingestion/ingest';
 import {
   saveDocument,
   saveFreshnessResult,
@@ -25,7 +41,6 @@ import {
 import type { ContentType } from '../ingestion/chunker';
 import { fetchUnibenPage } from '../ingestion/url-fetcher';
 
-declare const process: { env: Record<string, string | undefined> };
 
 const VALID_ROLES         = new Set(['prospective', 'student', 'parent', 'staff', 'hod']);
 const VALID_LEVELS        = new Set(['100L', '200L', '300L', '400L', '500L', '600L', 'MSc', 'PhD', 'PGD']);
@@ -37,19 +52,62 @@ const VALID_NAMESPACES    = new Set(['admissions', 'academic-policy', 'financial
 const VALID_CATEGORIES    = VALID_NAMESPACES;
 const VALID_CONTENT_TYPES = new Set(['general', 'policy', 'handbook', 'faq', 'announcement', 'catalogue', 'markdown']);
 
-function isAuthorized(c: Context): boolean {
+function isAuthorized(c: ContextWithMastra): boolean {
   const adminKey = process.env['MASTRA_ADMIN_KEY'];
   if (!adminKey) return false;
   return c.req.header('x-episteme-admin-key') === adminKey;
 }
 
 /** Read institution from the request header — passed by episteme-chat after auth. */
-function resolveInstitutionId(c: Context): string | undefined {
+function resolveInstitutionId(c: ContextWithMastra): string | undefined {
   return c.req.header('x-episteme-institution-id') ?? undefined;
 }
 
+// ── POST /kb/fetch ───────────────────────────────────────────────────────
+/**
+ * Fetch a uniben.edu page's cleaned HTML without ingesting it.
+ *
+ * Exists for the records half of the harvest: the extractor runs in
+ * episteme-chat (which owns Supabase) but must not hold the Cloudflare proxy
+ * secret or a second copy of the host allowlist — duplicating a security
+ * boundary is how the two copies drift. Core stays the only holder of both.
+ *
+ * SECURITY: this grants strictly LESS than the route below it. POST
+ * /kb/documents with `sourceUrl` already performs exactly this fetch behind
+ * exactly this admin key; the only difference is that it ingests the result
+ * instead of returning it. Same auth, same allowlist (enforced by
+ * assertIngestableUrl here and again by the Worker), same GET-only read proxy,
+ * same 15s timeout and 5MB cap. No new capability, only a narrower shape of an
+ * existing one.
+ */
+export async function fetchPageHandler(c: ContextWithMastra): Promise<Response> {
+  if (!isAuthorized(c)) return c.json({ error: 'Unauthorized' }, 401);
+
+  let body: { url?: unknown };
+  try {
+    body = await c.req.json<{ url?: unknown }>();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const url = body.url;
+  if (typeof url !== 'string' || !url.trim()) {
+    return c.json({ error: 'Missing required field: url' }, 400);
+  }
+
+  try {
+    // Throws with a user-facing message on a disallowed host or bad scheme.
+    const page = await fetchUnibenPage(url);
+    return c.json({ url: page.url, contentHash: page.contentHash, html: page.html });
+  } catch (err) {
+    // 400 rather than 500: every failure mode here (blocked host, bad URL,
+    // timeout, oversized page, empty body) is about the request, not the server.
+    return c.json({ error: (err as Error).message }, 400);
+  }
+}
+
 // ── GET /kb/documents ────────────────────────────────────────────────────
-export async function listDocumentsHandler(c: Context): Promise<Response> {
+export async function listDocumentsHandler(c: ContextWithMastra): Promise<Response> {
   if (!isAuthorized(c)) return c.json({ error: 'Unauthorized' }, 401);
   try {
     const institutionId = resolveInstitutionId(c);
@@ -61,7 +119,7 @@ export async function listDocumentsHandler(c: Context): Promise<Response> {
 }
 
 // ── POST /kb/documents ───────────────────────────────────────────────────
-export async function ingestDocumentHandler(c: Context): Promise<Response> {
+export async function ingestDocumentHandler(c: ContextWithMastra): Promise<Response> {
   if (!isAuthorized(c)) return c.json({ error: 'Unauthorized' }, 401);
 
   let body: Record<string, unknown>;
@@ -74,8 +132,15 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
   const {
     docId, fileName, category, namespace, faculty, source, roles,
     updatedAt, contentType, markdownContent, plainTextContent, fileBufferBase64,
-    programme, levels, sourceUrl,
+    programme, levels, sourceUrl, dryRun,
   } = body;
+
+  // Preview mode. Runs the REAL pipeline (fetch -> clean -> extract -> chunk)
+  // and stops before anything is written, so what the reviewer sees is what
+  // would land — not the output of a parallel preview path that could drift.
+  // Strict `=== true`: any other value, including a truthy string, is a normal
+  // ingest. A preview must be asked for explicitly, never inferred.
+  const isDryRun = dryRun === true;
 
   // ── Required field presence ──────────────────────────────────────────────────
   const missing = (
@@ -85,11 +150,16 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
       ['category',  category],
       ['namespace', namespace],
       ['source',    source],
-      ['updatedAt', updatedAt],
     ] as [string, unknown][]
   )
     .filter(([, v]) => !v)
     .map(([k]) => k);
+
+  // `updatedAt` is required to be PRESENT but may be explicitly null, meaning
+  // the source carries no date at all. Absent is an error rather than a silent
+  // "undated": an admin who forgets the content date must be told, while the
+  // harvest can declare undated deliberately. Undated must never be a default.
+  if (updatedAt === undefined) missing.push('updatedAt (send null for an undated source)');
 
   // roles must be a non-empty array
   const rolesRaw = Array.isArray(roles) ? roles as string[] : (typeof roles === 'string' ? [roles] : []);
@@ -122,9 +192,15 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
     return c.json({ error: `Invalid levels: ${invalidLevels.join(', ')}` }, 400);
 
   // ── Date validation ──────────────────────────────────────────────────────────
-  const updatedAtDate = new Date(updatedAt as string);
-  if (isNaN(updatedAtDate.getTime()))
-    return c.json({ error: 'Invalid updatedAt: must be a valid date string' }, 400);
+  // null → undated. Anything else must parse; a junk date is rejected rather
+  // than quietly degraded to undated, which would hide a caller's bug.
+  let resolvedUpdatedAt: string | null = null;
+  if (updatedAt !== null) {
+    const updatedAtDate = new Date(updatedAt as string);
+    if (isNaN(updatedAtDate.getTime()))
+      return c.json({ error: 'Invalid updatedAt: must be a valid date string, or null for an undated source' }, 400);
+    resolvedUpdatedAt = updatedAtDate.toISOString();
+  }
 
   // faculty is optional — institution-wide docs have no faculty scope
   const resolvedFaculty = (faculty as string | undefined)?.trim() || 'general';
@@ -179,13 +255,7 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
           fetchedContentHash = page.contentHash;
         }
 
-        // Ghost vector fix: cross-namespace cleanup before ingestion.
-        const existing = await getDocument(docId as string);
-        if (existing && existing.namespace !== namespace) {
-          await deleteDocument(docId as string, existing.namespace);
-        }
-
-        const audit = await ingestDocument({
+        const ingestOptions = {
           docId:       docId as string,
           fileName:    fileName as string,
           category:    category as string,
@@ -193,7 +263,7 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
           faculty:     resolvedFaculty,
           source:      source as string,
           roles:       rolesRaw,
-          updatedAt:   updatedAtDate.toISOString(),
+          updatedAt:   resolvedUpdatedAt,
           institutionId,
           contentType: (contentType as ContentType | undefined) ?? 'general',
           programme:   (programme as string | undefined) || undefined,
@@ -202,7 +272,42 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
           markdownContent:  markdownContent  as string | undefined,
           plainTextContent: plainTextContent as string | undefined,
           onProgress:  (p: IngestProgressEvent) => emit('progress', p),
-        });
+        };
+
+        // ── Dry run ──────────────────────────────────────────────────────────
+        // Only prepareDocument is reachable from here, and it contains no write
+        // of any kind — not the cross-namespace cleanup below, not the Pinecone
+        // upsert, not the registry. The guarantee is structural rather than a
+        // flag checked before each write.
+        if (isDryRun) {
+          const prepared = await prepareDocument(ingestOptions);
+          const existingDoc = await getDocument(docId as string);
+          emit('done', {
+            success: true,
+            dryRun: true,
+            report: {
+              ...summarizePrepared(prepared),
+              /** True when a real ingest would replace an existing document. */
+              replacesExisting: existingDoc !== null,
+              /** Set when this run would also move the doc between namespaces. */
+              movesFromNamespace:
+                existingDoc && existingDoc.namespace !== namespace
+                  ? existingDoc.namespace
+                  : null,
+              sourceUrl: (sourceUrl as string | undefined) ?? null,
+              contentHash: fetchedContentHash ?? null,
+            },
+          });
+          return;
+        }
+
+        // Ghost vector fix: cross-namespace cleanup before ingestion.
+        const existing = await getDocument(docId as string);
+        if (existing && existing.namespace !== namespace) {
+          await deleteDocument(docId as string, existing.namespace);
+        }
+
+        const audit = await ingestDocument(ingestOptions);
 
         emit('progress', { step: 'saving' });
 
@@ -244,7 +349,7 @@ export async function ingestDocumentHandler(c: Context): Promise<Response> {
 // Only widens/changes non-empty scopes; cannot clear a scope back to "unscoped"
 // (see the limitation documented on patchDocumentMetadata in ingest.ts). Use
 // reingestDocumentHandler for that.
-export async function patchDocumentScopeHandler(c: Context): Promise<Response> {
+export async function patchDocumentScopeHandler(c: ContextWithMastra): Promise<Response> {
   if (!isAuthorized(c)) return c.json({ error: 'Unauthorized' }, 401);
 
   const docId = c.req.param('docId');
@@ -316,7 +421,7 @@ export async function patchDocumentScopeHandler(c: Context): Promise<Response> {
 }
 
 // ── DELETE /kb/documents/:docId ─────────────────────────────────────────
-export async function deleteDocumentHandler(c: Context): Promise<Response> {
+export async function deleteDocumentHandler(c: ContextWithMastra): Promise<Response> {
   if (!isAuthorized(c)) return c.json({ error: 'Unauthorized' }, 401);
 
   const docId = c.req.param('docId');
@@ -350,7 +455,7 @@ export async function deleteDocumentHandler(c: Context): Promise<Response> {
 // When markdownContentOverride is provided (e.g. from the freshness guardian
 // after fetching a URL and detecting a change), it is used instead of the
 // stored markdownContent and the new contentHash is persisted.
-export async function reingestDocumentHandler(c: Context): Promise<Response> {
+export async function reingestDocumentHandler(c: ContextWithMastra): Promise<Response> {
   if (!isAuthorized(c)) return c.json({ error: 'Unauthorized' }, 401);
 
   const docId = c.req.param('docId');
@@ -404,7 +509,17 @@ export async function reingestDocumentHandler(c: Context): Promise<Response> {
           faculty:          doc.faculty,
           source:           doc.source,
           roles:            doc.roles,
-          updatedAt:        nowIso,
+          // PRESERVE the content date. Re-ingesting re-processes a document; it
+          // does not rewrite when that document was authored. Stamping `now`
+          // here reset the staleness clock on every re-ingest, so a 2022
+          // handbook silently lost its "may be outdated" warning and the model
+          // could present a former office-holder as current with no caveat.
+          //
+          // The one case where `now` IS the truth: the freshness guardian
+          // re-fetched a URL and the content hash actually changed, so this
+          // version of the page demonstrably appeared now. That is signalled by
+          // override.contentHash and nothing else.
+          updatedAt:        override.contentHash ? nowIso : doc.updatedAt,
           institutionId:    institutionId === GLOBAL_INSTITUTION ? undefined : institutionId,
           contentType:      doc.contentType as ContentType,
           programme:        doc.programme ?? undefined,
@@ -450,7 +565,7 @@ export async function reingestDocumentHandler(c: Context): Promise<Response> {
 // ── POST /kb/documents/:docId/freshness ──────────────────────────────────
 // Called by the freshness guardian after a no-change check to update
 // last_fetched_at without triggering a full re-ingest.
-export async function updateFreshnessHandler(c: Context): Promise<Response> {
+export async function updateFreshnessHandler(c: ContextWithMastra): Promise<Response> {
   if (!isAuthorized(c)) return c.json({ error: 'Unauthorized' }, 401);
 
   const docId = c.req.param('docId');

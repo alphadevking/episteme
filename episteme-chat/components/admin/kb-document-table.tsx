@@ -33,12 +33,23 @@ function NamespaceBadge({ value }: { value: string }) {
 // retrieval, and the cascade defers to a fresher tier when one can answer.
 const STALE_DAYS = 365;
 
-function fmtDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+// A document may be genuinely UNDATED (a scraped page showing no date anywhere).
+// Both helpers must treat that as "unknown", not as a date:
+//   new Date(null) is the Unix epoch, so the naive versions rendered "01 Jan
+//   1970" and flagged every undated document as stale. Unknown age is not old
+//   age — the same distinction retrieval draws in knowledge-retrieval-tool.ts.
+function fmtDate(iso: string | null): string {
+  if (!iso) return "Undated";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "Undated";
+  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-function isStale(iso: string): boolean {
-  return (Date.now() - new Date(iso).getTime()) / (1000 * 60 * 60 * 24) > STALE_DAYS;
+function isStale(iso: string | null): boolean {
+  if (!iso) return false;
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return false;
+  return (Date.now() - t) / (1000 * 60 * 60 * 24) > STALE_DAYS;
 }
 
 function DocActions({ doc }: { doc: KbDocument }) {

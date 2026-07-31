@@ -6,7 +6,6 @@ import { RETRIEVAL_CONFIG } from '../config';
 import { resolveNamespacesForRoles, buildRetrievalFilter } from '../security/retrieval-gate';
 import { getSessionContext } from '../server/session-context';
 
-declare const process: { env: Record<string, string | undefined> };
 
 function getEnv(key: string): string {
   const val = process.env[key];
@@ -20,7 +19,18 @@ export type KnowledgeRetrievalResult = {
   chunkId: string;
   content: string;   // parent chunk text — full context for LLM
   source: string;
-  updatedAt: string;
+  /**
+   * The document's own content date, or null when the source carries no date
+   * at all (typically a scraped web page). Null is "unknown age", NOT "old" —
+   * see staleWarning.
+   */
+  updatedAt: string | null;
+  /**
+   * Set only when the content date is KNOWN and older than the freshness
+   * threshold. An undated source never carries this warning: asserting that
+   * something "may be outdated" is a claim about its age, and we have none.
+   * The context builder tells the reader it is undated instead.
+   */
   staleWarning: string | null;
   /** Page this chunk was extracted from, when the source document has pages
    *  (PDFs). Ingestion stores -1 for sourceless content (scraped HTML); that
@@ -61,8 +71,23 @@ function weightVectors(
 
 function isDaysOld(isoDate: string, days: number): boolean {
   const then = new Date(isoDate).getTime();
+  if (!Number.isFinite(then)) return false; // unparseable — unknown, not old
   const now = Date.now();
   return (now - then) / (1000 * 60 * 60 * 24) > days;
+}
+
+/**
+ * Sort key for content recency. Undated and unparseable sources sort LAST
+ * among equally-relevant matches: given two chunks that answer the question
+ * equally well, a known date is better evidence than no date.
+ *
+ * Returns -Infinity rather than NaN so the comparator stays a total order —
+ * NaN propagates through `b - a` and makes Array.sort's behaviour undefined.
+ */
+function contentTime(updatedAt: unknown): number {
+  if (typeof updatedAt !== 'string' || !updatedAt) return Number.NEGATIVE_INFINITY;
+  const t = new Date(updatedAt).getTime();
+  return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
 }
 
 const pinecone = new Pinecone({ apiKey: getEnv('PINECONE_API_KEY') });
@@ -170,9 +195,11 @@ export async function retrieveKnowledge(inputData: {
     // Within a near-equal relevance band, prefer the more recent CONTENT
     // (updatedAt = the document's own editorial date). Content recency — not
     // when we happened to load the file — is what makes one of two equally
-    // on-topic chunks the better answer.
-    const aTime = new Date(a.metadata['updatedAt'] as string).getTime();
-    const bTime = new Date(b.metadata['updatedAt'] as string).getTime();
+    // on-topic chunks the better answer. Undated chunks sort last; see
+    // contentTime for why they are not simply NaN.
+    const aTime = contentTime(a.metadata['updatedAt']);
+    const bTime = contentTime(b.metadata['updatedAt']);
+    if (aTime === bTime) return 0;
     return bTime - aTime;
   });
 
@@ -185,7 +212,11 @@ export async function retrieveKnowledge(inputData: {
     if (seenParents.has(parentId)) continue;
     seenParents.add(parentId);
 
-    const updatedAt = match.metadata['updatedAt'] as string;
+    // Absent for a genuinely undated source — ingestion omits the key rather
+    // than writing a placeholder date. See IngestOptions.updatedAt.
+    const rawUpdatedAt = match.metadata['updatedAt'];
+    const updatedAt =
+      typeof rawUpdatedAt === 'string' && rawUpdatedAt ? rawUpdatedAt : null;
     // Staleness is measured from the document's own CONTENT date (updatedAt),
     // NOT when we loaded it (ingestedAt). A handbook re-ingested today can still
     // hold a 2022 fact (e.g. a former VC's name) — only the content's own age
@@ -201,9 +232,13 @@ export async function retrieveKnowledge(inputData: {
       content:      match.metadata['parentText']  as string,
       source:       match.metadata['source']      as string,
       updatedAt,
-      staleWarning: isDaysOld(updatedAt, RETRIEVAL_CONFIG.freshnessThresholdDays)
-        ? '⚠️ This information may be outdated. Please verify with the relevant office before acting on it.'
-        : null,
+      // Only a KNOWN-old date earns the warning. An undated source gets null
+      // here and is surfaced to the reader as undated instead — claiming it
+      // "may be outdated" would assert an age we do not have.
+      staleWarning:
+        updatedAt && isDaysOld(updatedAt, RETRIEVAL_CONFIG.freshnessThresholdDays)
+          ? '⚠️ This information may be outdated. Please verify with the relevant office before acting on it.'
+          : null,
       pageNumber,
     });
   }

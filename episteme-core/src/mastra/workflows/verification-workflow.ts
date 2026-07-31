@@ -370,7 +370,8 @@ const recordOutcomeStep = createStep({
 
 export const verificationWorkflow = createWorkflow({
   id: 'verification-workflow',
-  name: 'Certification Verification Workflow',
+  // No `name` — WorkflowConfig has only `id` and `description`. It was being
+  // silently dropped as an excess property on the object literal.
   description:
     'Human-in-the-loop workflow for certification verification claims. ' +
     'Models the full lifecycle: submission → admin assignment → HOD review → outcome. ' +

@@ -93,7 +93,8 @@ function buildGroundedContext(
     if (r.pageNumber != null) sourceIndex.get(r.source)!.pages.add(r.pageNumber);
   }
 
-  const anyStale = retrieval.results.some((r) => r.staleWarning != null);
+  const anyStale   = retrieval.results.some((r) => r.staleWarning != null);
+  const anyUndated = retrieval.results.some((r) => r.updatedAt == null);
 
   const lines: string[] = [
     'VERIFIED SOURCES — synthesize your answer exclusively from these chunks.',
@@ -105,11 +106,23 @@ function buildGroundedContext(
     // time-varying fact (office holders, fees, deadlines) leave the model free
     // to pick either; it was observed answering with a 2022 handbook's former
     // VC while a current principal-staff source sat right next to it.
-    'Each source below is labelled with its content date. When sources DISAGREE on a fact',
-    'that changes over time (who holds an office, fees, deadlines, calendars), state ONLY',
-    'the value from the most recently dated source, and cite that source. Never present an',
-    'older source\'s value as current — not even alongside the newer one.',
+    'Each source below is labelled with its content date, or as "undated". When sources',
+    'DISAGREE on a fact that changes over time (who holds an office, fees, deadlines,',
+    'calendars), state ONLY the value from the most recently dated source, and cite that',
+    'source. Never present an older source\'s value as current — not even alongside the',
+    'newer one. A DATED source beats an undated one on such a fact, whatever order they',
+    'appear in below.',
   ];
+
+  if (anyUndated) {
+    lines.push(
+      '',
+      'A source marked "undated" carries no publication date — its age is unknown, which is',
+      'not the same as being old. Use it normally, but when it supplies a fact that changes',
+      'over time, tell the reader that source is undated and its currency could not be',
+      'confirmed. Do not describe it as outdated, and do not guess when it was written.',
+    );
+  }
 
   if (anyStale) {
     lines.push(
@@ -122,12 +135,17 @@ function buildGroundedContext(
 
   retrieval.results.forEach((r) => {
     const src = sourceIndex.get(r.source)!;
-    const dated = new Date(r.updatedAt).toLocaleDateString('en-GB', {
-      day: 'numeric', month: 'long', year: 'numeric',
-    });
+    // An undated source is labelled as such rather than given a fabricated or
+    // omitted date: the model needs to know the difference between "published
+    // in 2022" and "we don't know when this was written" to hedge correctly.
+    const dateTag = r.updatedAt
+      ? `dated ${new Date(r.updatedAt).toLocaleDateString('en-GB', {
+          day: 'numeric', month: 'long', year: 'numeric',
+        })}`
+      : 'undated';
     const staleTag = r.staleWarning ? ' — may be outdated' : '';
     lines.push('');
-    lines.push(`[Source ${src.number} — dated ${dated}${staleTag}] ${r.content}`);
+    lines.push(`[Source ${src.number} — ${dateTag}${staleTag}] ${r.content}`);
   });
 
   const sources: UnifiedSource[] = Array.from(

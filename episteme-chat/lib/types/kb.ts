@@ -9,7 +9,9 @@ export type KbDocument = {
   roles: string[];
   programme: string | null;
   levels: string[];
-  updatedAt: string;
+  /** Content date, or null when the source is genuinely undated (mirrors
+   *  KbDocument.updatedAt in episteme-core/src/mastra/ingestion/kb-store.ts). */
+  updatedAt: string | null;
   vectorsUpserted: number;
   parentChunks: number;
   childChunks: number;

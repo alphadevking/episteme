@@ -9,7 +9,6 @@
  */
 import { createClient } from '@libsql/client';
 
-declare const process: { env: Record<string, string | undefined> };
 
 const url       = process.env['LIBSQL_URL']        ?? 'file:./mastra.db';
 const authToken = process.env['LIBSQL_AUTH_TOKEN'];

@@ -11,8 +11,6 @@
 import { Pinecone } from '@pinecone-database/pinecone';
 import { embedTexts } from './ingestion/embedder';
 
-declare const process: { env: Record<string, string | undefined> };
-
 export function warmupConnections(): void {
   setTimeout(async () => {
     const t = Date.now();

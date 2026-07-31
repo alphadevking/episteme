@@ -18,6 +18,7 @@ import {
   deleteDocumentHandler,
   reingestDocumentHandler,
   updateFreshnessHandler,
+  fetchPageHandler,
 } from './server/kb-routes';
 import { chatSecurityMiddleware } from './server/chat-security';
 import { warmupConnections } from './warmup';
@@ -109,6 +110,11 @@ export const mastra = new Mastra({
       chatRoute({ path: '/chat/:agentId' }),
       { path: '/kb/documents',                     method: 'GET',    handler: listDocumentsHandler },
       { path: '/kb/documents',                     method: 'POST',   handler: ingestDocumentHandler },
+      // Fetch-only: proxy + cleanPageHtml, no extraction, no chunking, no write.
+      // Distinct from POST /kb/documents { dryRun: true }, which runs the real
+      // pipeline through chunking. This one costs no Unstructured quota, so it
+      // is the cheap first pass when validating a harvest manifest.
+      { path: '/kb/fetch',                         method: 'POST',   handler: fetchPageHandler },
       { path: '/kb/documents/:docId/scope',        method: 'PATCH',  handler: patchDocumentScopeHandler },
       { path: '/kb/documents/:docId',              method: 'DELETE', handler: deleteDocumentHandler },
       { path: '/kb/documents/:docId/reingest',     method: 'POST',   handler: reingestDocumentHandler },

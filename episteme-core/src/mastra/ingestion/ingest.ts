@@ -1,10 +1,32 @@
-import { Pinecone } from '@pinecone-database/pinecone';
-import { processDocument, processMarkdown, processPlainText, elementsToText, buildPageOffsetMap, type PageOffsetEntry } from './document-processor';
-import { buildHierarchicalChunks, type ParentChunk, type ChildChunk, type ContentType } from './chunker';
+import { Pinecone, type RecordMetadata } from '@pinecone-database/pinecone';
+import { type ParentChunk, type ChildChunk, type ContentType } from './chunker';
 import { embedTexts, buildSparseVector } from './embedder';
 import { INGEST_CONFIG } from '../config';
+// IngestProgressEvent is imported (used in commitDocument's signature below) AND
+// re-exported. A bare re-export does not bring a name into local scope, so the
+// two are not redundant.
+import {
+  prepareDocument,
+  type IngestOptions,
+  type PreparedDocument,
+  type IngestProgressEvent,
+} from './prepare';
 
-declare const process: { env: Record<string, string | undefined> };
+/**
+ * Phase 1 lives in ./prepare — a module that imports neither Pinecone, the
+ * embedder, nor the registry, so it structurally cannot write. Re-exported here
+ * because existing importers (kb-routes, kb-store) expect these names from this
+ * module, and so that `prepare` and `commit` read as one pipeline.
+ */
+export {
+  prepareDocument,
+  summarizePrepared,
+  type IngestOptions,
+  type IngestProgressEvent,
+  type PreparedDocument,
+  type DryRunReport,
+} from './prepare';
+
 
 /**
  * Sentinel value for institution-agnostic (globally shared) documents.
@@ -28,62 +50,6 @@ const pinecone = new Pinecone({ apiKey: getEnv('PINECONE_API_KEY') });
 // Module-level singleton — avoids reconstructing the client on every call
 const pineconeIndex = pinecone.index({ name: getEnv('PINECONE_INDEX') });
 
-/**
- * Progress events emitted during ingestion — forwarded as SSE to the admin dashboard.
- * Each event fires immediately before the corresponding step begins so the UI
- * updates in real-time rather than after the step completes.
- */
-export type IngestProgressEvent =
-  | { step: 'chunking' }
-  | { step: 'embedding'; parents: number; children: number }
-  | { step: 'upserting'; chunks: number };
-
-export interface IngestOptions {
-  /** Raw file bytes — for PDF, DOCX, HTML, scanned images */
-  fileBuffer?: Uint8Array;
-  /** Pre-converted Markdown string */
-  markdownContent?: string;
-  /** Plain text string — for announcements, emails, general info */
-  plainTextContent?: string;
-  /** Optional progress callback — used by the SSE streaming handler */
-  onProgress?: (event: IngestProgressEvent) => void;
-  /** Original file name e.g. "admissions-policy.pdf" */
-  fileName: string;
-  docId: string;
-  /** Domain category: 'admissions' | 'academic-policy' | 'financial-aid' | 'programmes' | 'staff-internal' | 'general' */
-  category: string;
-  /** Pinecone namespace to upsert into */
-  namespace: string;
-  /** Faculty scope: 'computing' | future faculties */
-  faculty: string;
-  /** Source URL or descriptive reference */
-  source: string;
-  /** Roles that may access this document */
-  roles: string[];
-  /** ISO date string of last document update */
-  updatedAt: string;
-  /**
-   * Institution UUID for multi-tenant isolation.
-   * Omit only for truly global documents shared across all institutions —
-   * they will be tagged with GLOBAL_INSTITUTION and visible to every tenant.
-   */
-  institutionId?: string;
-  /**
-   * Optional programme scope e.g. "Computer Science", "Software Engineering".
-   * Leave unset for faculty-wide or general documents — they are returned for all programmes.
-   */
-  programme?: string;
-  /**
-   * Optional academic level scope e.g. ["300L"], ["MSc", "PhD", "PGD"].
-   * A document may belong to several levels (e.g. a shared postgraduate handbook).
-   * Leave unset/empty for documents that apply to all levels — they are returned
-   * regardless of student level.
-   */
-  levels?: string[];
-  /** Drives chunking strategy — defaults to 'general' */
-  contentType?: ContentType;
-}
-
 export interface IngestAuditResult {
   docId: string;
   fileName: string;
@@ -93,7 +59,8 @@ export interface IngestAuditResult {
   faculty: string;
   source: string;
   roles: string[];
-  updatedAt: string;
+  /** Null for a genuinely undated source. See IngestOptions.updatedAt. */
+  updatedAt: string | null;
   /** The resolved institution UUID, or GLOBAL_INSTITUTION for shared docs. */
   institutionId: string;
   programme: string | null;
@@ -130,79 +97,36 @@ async function withRetry<T>(
 }
 
 /**
- * Full ingestion pipeline:
- * input → extract text → hierarchical chunk (MDocument) → embed → sparse → upsert to Pinecone
+ * Phase 2 — embed and write. This is the only phase that mutates anything.
  *
- * Idempotent: deletes existing vectors for the docId before upserting.
- * Retries Pinecone upsert batches on transient failures with exponential backoff.
- * Returns a structured audit result — caller is responsible for persisting it.
- *
- * Supports any document form: PDF, DOCX, Markdown, plain text,
- * announcements, FAQs, course catalogues, handbooks.
+ * Ordering note: the delete of the previous version now happens AFTER embedding
+ * succeeds, not before extraction. Previously it ran before chunking and
+ * embedding, so a zero-chunk result or a transient embedding failure destroyed
+ * the existing vectors with nothing to replace them — a re-ingest during a
+ * provider outage silently emptied a document. The narrowest window we can have
+ * is delete-then-upsert, which is what this does.
  */
-export async function ingestDocument(options: IngestOptions): Promise<IngestAuditResult> {
+export async function commitDocument(
+  prepared: PreparedDocument,
+  onProgress?: (event: IngestProgressEvent) => void,
+): Promise<IngestAuditResult> {
   const {
-    fileBuffer, markdownContent, plainTextContent,
-    fileName, docId, category, namespace,
-    faculty, source, roles, updatedAt, programme, levels,
-    contentType = 'general',
-    onProgress,
-  } = options;
+    docId, fileName, namespace, category, contentType, faculty, source, roles,
+    updatedAt, institutionId, programme, levels, ingestedAt, parents, children,
+  } = prepared;
 
-  // Resolve institution — always a concrete value so filters never silently miss.
-  const institutionId = options.institutionId ?? GLOBAL_INSTITUTION;
-
-  // Audit timestamp: when this document was loaded into the KB. Auto-stamped.
-  // NOT the freshness signal — staleness is measured from the content's own
-  // date (`updatedAt`, admin-supplied) in knowledge-retrieval-tool.ts, because a
-  // freshly-loaded document can still contain a stale fact (a former VC's name
-  // in a re-uploaded 2022 handbook). Kept in metadata for auditing/debugging.
-  const ingestedAt = new Date().toISOString();
-
-  // 1. Extract full text from input
-  let fullText: string;
-  let pageOffsetMap: PageOffsetEntry[] = [];
-
-  if (markdownContent) {
-    fullText = elementsToText(processMarkdown(markdownContent, category));
-  } else if (plainTextContent) {
-    fullText = elementsToText(processPlainText(plainTextContent, category));
-  } else if (fileBuffer) {
-    const elements = await processDocument(fileBuffer, fileName, category);
-    pageOffsetMap = buildPageOffsetMap(elements);
-    fullText = elementsToText(elements);
-  } else {
-    throw new Error('One of fileBuffer, markdownContent, or plainTextContent must be provided');
-  }
-
-  if (!fullText.trim()) {
-    throw new Error(`No content extracted from ${fileName}`);
-  }
-
-  // 2. Idempotency — remove existing vectors for this docId before re-ingesting
-  await deleteDocument(docId, namespace);
-
-  // 3. Build hierarchical parent/child chunks via MDocument
-  onProgress?.({ step: 'chunking' });
-  const parents = await buildHierarchicalChunks(fullText, docId, category, contentType, pageOffsetMap);
-  const allChildren = parents.flatMap((p: ParentChunk) => p.children);
-
-  if (allChildren.length === 0) {
-    throw new Error(`No chunks produced from ${fileName}`);
-  }
-
-  // 4. Embed child chunks (dense vectors via Mastra model router, retries built-in)
-  const texts = allChildren.map((c: ChildChunk) => c.text);
-  onProgress?.({ step: 'embedding', parents: parents.length, children: allChildren.length });
+  // 1. Embed child chunks (dense vectors via Mastra model router, retries built-in)
+  const texts = children.map((c: ChildChunk) => c.text);
+  onProgress?.({ step: 'embedding', parents: parents.length, children: children.length });
   const denseVectors = await embedTexts(texts);
 
-  // 5. Build parent lookup map — O(1)
+  // 2. Parent lookup map — O(1)
   const parentMap = new Map<string, ParentChunk>(
     parents.map((p: ParentChunk) => [p.parentId, p])
   );
 
-  // 6. Build Pinecone records with dense + sparse vectors
-  const records = allChildren.map((child: ChildChunk, i: number) => {
+  // 3. Build Pinecone records with dense + sparse vectors
+  const records = children.map((child: ChildChunk, i: number) => {
     const parent = parentMap.get(child.parentId)!;
     return {
       id: child.chunkId,
@@ -220,7 +144,9 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
         faculty,
         source,
         roles,
-        updatedAt,
+        // Omitted entirely when undated — Pinecone metadata cannot hold null,
+        // and an absent key is exactly how retrieval detects "no content date".
+        ...(updatedAt ? { updatedAt } : {}),
         // Audit-only: when we loaded this doc. Staleness uses `updatedAt`
         // (content date), NOT this — see the const definition.
         ingestedAt,
@@ -239,7 +165,11 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
     };
   });
 
-  // 7. Upsert to Pinecone — all batches in parallel, each with retry
+  // 4. Idempotency — remove the previous version only now that we have vectors
+  //    ready to replace it. See the ordering note above.
+  await deleteDocument(docId, namespace);
+
+  // 5. Upsert to Pinecone — all batches in parallel, each with retry
   onProgress?.({ step: 'upserting', chunks: texts.length });
   const index = pineconeIndex.namespace(namespace);
   const BATCH_SIZE = INGEST_CONFIG.upsertBatchSize;
@@ -262,14 +192,31 @@ export async function ingestDocument(options: IngestOptions): Promise<IngestAudi
     roles,
     updatedAt,
     institutionId,
-    programme: programme ?? null,
-    levels:    levels    ?? [],
+    programme,
+    levels,
     vectorsUpserted: records.length,
     parentChunks: parents.length,
-    childChunks: allChildren.length,
+    childChunks: children.length,
     ingestedAt,
   };
 }
+
+/**
+ * Full ingestion pipeline:
+ * input → extract text → hierarchical chunk (MDocument) → embed → sparse → upsert to Pinecone
+ *
+ * Idempotent: replaces any existing vectors for the docId.
+ * Retries Pinecone upsert batches on transient failures with exponential backoff.
+ * Returns a structured audit result — caller is responsible for persisting it.
+ *
+ * Supports any document form: PDF, DOCX, Markdown, plain text,
+ * announcements, FAQs, course catalogues, handbooks.
+ */
+export async function ingestDocument(options: IngestOptions): Promise<IngestAuditResult> {
+  const prepared = await prepareDocument(options);
+  return commitDocument(prepared, options.onProgress);
+}
+
 
 /**
  * Fields that can be patched on an already-ingested document without re-extracting
@@ -289,7 +236,12 @@ export interface DocumentScopePatch {
   contentType?: ContentType;
   /** ISO content date — the document's own editorial date, which drives the
    *  freshness/staleness signal in retrieval. Safe to patch (a scalar the merge
-   *  overwrites), so an admin can correct it without re-ingesting. */
+   *  overwrites), so an admin can correct it without re-ingesting.
+   *
+   *  NOTE: a document can be patched from undated to dated, but NOT back —
+   *  Pinecone's metadata update merges keys and cannot remove one, the same
+   *  limitation documented on patchDocumentMetadata for levels/programme.
+   *  Returning a document to undated requires a full re-ingest. */
   updatedAt?: string;
 }
 
@@ -312,7 +264,10 @@ export async function patchDocumentMetadata(
   namespace: string,
   patch: DocumentScopePatch,
 ): Promise<void> {
-  const metadata: Record<string, unknown> = {};
+  // Partial<RecordMetadata>, not Record<string, unknown>: Pinecone metadata
+  // values are constrained to string | number | boolean | string[]. Typing this
+  // loosely let a value Pinecone rejects at runtime pass the compiler.
+  const metadata: Partial<RecordMetadata> = {};
   if (patch.roles       !== undefined) metadata.roles       = patch.roles;
   if (patch.levels      !== undefined) metadata.levels      = patch.levels;
   if (patch.programme   !== undefined) metadata.programme   = patch.programme;

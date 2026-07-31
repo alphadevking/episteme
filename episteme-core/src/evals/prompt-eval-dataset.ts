@@ -20,8 +20,6 @@
  */
 import type { SessionRole } from '../mastra/server/session-context';
 
-declare const process: { env: Record<string, string | undefined> };
-
 export interface EvalSession {
   role: SessionRole;
   /** Full verified role set. Omitted → `[role]`, matching the middleware. */

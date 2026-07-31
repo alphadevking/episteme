@@ -2,7 +2,6 @@ import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { UNIBEN_NEWS_CONFIG } from '../config';
 
-declare const process: { env: Record<string, string | undefined> };
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

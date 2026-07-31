@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    // Matches the runtime: Node >= 22.13, ESM ("type": "module").
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ES2022",
+    // Imports here are written without file extensions ('./prepare', not
+    // './prepare.js') because both tsx and the mastra bundler resolve that way.
+    // "bundler" is the only moduleResolution that agrees with them.
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    // Third-party .d.ts only; our own sources are still fully checked.
+    "skipLibCheck": true,
+    // This project is never emitted by tsc — `mastra build` bundles it and
+    // `tsx` runs it. tsc exists here purely as the type checker that neither
+    // of those performs.
+    "noEmit": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", ".mastra", ".vercel"]
+}

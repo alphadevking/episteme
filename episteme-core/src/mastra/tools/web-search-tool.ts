@@ -3,8 +3,6 @@ import { z } from 'zod';
 import { WEB_SEARCH_CONFIG } from '../config';
 import { neutralize } from './uniben-news-tool';
 
-declare const process: { env: Record<string, string | undefined> };
-
 function getEnv(key: string): string {
   const val = process.env[key];
   if (!val) throw new Error(`Missing required environment variable: ${key}`);
