@@ -44,6 +44,29 @@ const ClaimStatusSchema = z.enum([
   'reopened',
 ]);
 
+// ── Human handoff payloads ────────────────────────────────────────────────────
+// The two suspend points are resumed by the admin UI, so these schemas are a
+// trust boundary, not documentation: `resumeSchema` makes Mastra VALIDATE the
+// payload before the step continues. Previously each step cast the resume value
+// with `as`, which asserted the shape without ever checking it — a resume with
+// a missing or misspelled field would have flowed into the workflow output
+// unchecked.
+
+const AdminAssignmentSchema = z.object({
+  hodUserId:    z.string().uuid().describe('HOD the claim was assigned to'),
+  departmentId: z.string().uuid().describe('Department the claim was routed to'),
+  assignedAt:   z.string().datetime(),
+  assignedBy:   z.string().uuid().describe('Admin who performed the assignment'),
+});
+
+const HodDecisionSchema = z.object({
+  decision:        z.enum(['approved', 'rejected']),
+  reviewedBy:      z.string().uuid(),
+  reviewedAt:      z.string().datetime(),
+  reviewNotes:     z.string().optional(),
+  rejectionReason: z.string().optional(),
+});
+
 const ClaimInputSchema = z.object({
   claimId:       z.string().uuid().describe('Unique claim identifier from verification_claims.id'),
   userId:        z.string().uuid().describe('Submitting user public ID'),
@@ -211,6 +234,13 @@ const awaitAdminAssignmentStep = createStep({
     suggestedCategory: z.string(),
     routedAt:          z.string().datetime(),
   }),
+  resumeSchema: AdminAssignmentSchema,
+  suspendSchema: z.object({
+    claimId:     z.string().uuid(),
+    isUrgent:    z.boolean(),
+    waitingFor:  z.literal('admin-assignment'),
+    suspendedAt: z.string().datetime(),
+  }),
   outputSchema: z.object({
     claimId:      z.string().uuid(),
     userId:       z.string().uuid(),
@@ -219,28 +249,30 @@ const awaitAdminAssignmentStep = createStep({
     assignedAt:   z.string().datetime(),
     assignedBy:   z.string().uuid().describe('Admin who performed the assignment'),
   }),
-  execute: async ({ inputData, suspend }) => {
+  // `suspend()` returns a sentinel that ABORTS the step — it does not hand back
+  // the resume payload. That arrives on the next invocation as `resumeData`, so
+  // the step body runs twice: once to suspend, once to continue.
+  execute: async ({ inputData, resumeData, suspend }) => {
     const { claimId, isUrgent } = inputData;
 
-    console.log(JSON.stringify({
-      event:    'claim_awaiting_assignment',
-      claimId,
-      isUrgent,
-    }));
+    // First pass — park the workflow until the admin UI calls
+    // fn_admin_assign_claim and resumes it with the assignment.
+    if (!resumeData) {
+      console.log(JSON.stringify({
+        event:    'claim_awaiting_assignment',
+        claimId,
+        isUrgent,
+      }));
 
-    // Suspend — resume payload comes from the admin UI after fn_admin_assign_claim
-    const resumeData = await suspend({
-      claimId,
-      isUrgent,
-      waitingFor: 'admin-assignment',
-      suspendedAt: new Date().toISOString(),
-    }) as {
-      hodUserId:    string;
-      departmentId: string;
-      assignedAt:   string;
-      assignedBy:   string;
-    };
+      return suspend({
+        claimId,
+        isUrgent,
+        waitingFor:  'admin-assignment',
+        suspendedAt: new Date().toISOString(),
+      });
+    }
 
+    // Second pass — resumeData has been validated against AdminAssignmentSchema.
     console.log(JSON.stringify({
       event:        'claim_assigned',
       claimId,
@@ -276,6 +308,13 @@ const awaitHodDecisionStep = createStep({
     assignedAt:   z.string().datetime(),
     assignedBy:   z.string().uuid(),
   }),
+  resumeSchema: HodDecisionSchema,
+  suspendSchema: z.object({
+    claimId:     z.string().uuid(),
+    hodUserId:   z.string().uuid(),
+    waitingFor:  z.literal('hod-decision'),
+    suspendedAt: z.string().datetime(),
+  }),
   outputSchema: z.object({
     claimId:         z.string().uuid(),
     userId:          z.string().uuid(),
@@ -285,28 +324,26 @@ const awaitHodDecisionStep = createStep({
     reviewNotes:     z.string().optional(),
     rejectionReason: z.string().optional(),
   }),
-  execute: async ({ inputData, suspend }) => {
+  execute: async ({ inputData, resumeData, suspend }) => {
     const { claimId, hodUserId } = inputData;
 
-    console.log(JSON.stringify({
-      event:     'claim_awaiting_hod_decision',
-      claimId,
-      hodUserId,
-    }));
+    // First pass — park until the HOD's review lands via fn_hod_review_claim.
+    if (!resumeData) {
+      console.log(JSON.stringify({
+        event:     'claim_awaiting_hod_decision',
+        claimId,
+        hodUserId,
+      }));
 
-    const resumeData = await suspend({
-      claimId,
-      hodUserId,
-      waitingFor:  'hod-decision',
-      suspendedAt: new Date().toISOString(),
-    }) as {
-      decision:        'approved' | 'rejected';
-      reviewedBy:      string;
-      reviewedAt:      string;
-      reviewNotes?:    string;
-      rejectionReason?: string;
-    };
+      return suspend({
+        claimId,
+        hodUserId,
+        waitingFor:  'hod-decision',
+        suspendedAt: new Date().toISOString(),
+      });
+    }
 
+    // Second pass — resumeData has been validated against HodDecisionSchema.
     console.log(JSON.stringify({
       event:           'claim_decided',
       claimId,
