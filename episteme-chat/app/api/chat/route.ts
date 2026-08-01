@@ -298,9 +298,27 @@ export async function POST(req: Request) {
     const errBody = ct.includes("application/json")
       ? await upstreamResponse.json().catch(() => null)
       : await upstreamResponse.text().catch(() => "");
+
+    // Mirror only what the CLIENT caused (4xx). An upstream fault is a bad
+    // gateway, not a fault of this route — echoing 500 as 500 made an
+    // episteme-core outage read as an episteme-chat bug in the Vercel dashboard
+    // and cost a full diagnostic pass on 2026-08-01.
+    const status = upstreamResponse.status >= 400 && upstreamResponse.status < 500
+      ? upstreamResponse.status
+      : 502;
+
+    console.error(JSON.stringify({
+      event:           "mastra_upstream_error",
+      upstream_status: upstreamResponse.status,
+      // episteme-core stamps 500s with a correlation id — the join key between
+      // this log line and the stack in the core deployment's logs.
+      correlation_id:  (errBody as { correlationId?: string } | null)?.correlationId ?? null,
+      details:         errBody,
+    }));
+
     return Response.json(
       { error: "Mastra backend error", status: upstreamResponse.status, details: errBody },
-      { status: upstreamResponse.status },
+      { status },
     );
   }
 

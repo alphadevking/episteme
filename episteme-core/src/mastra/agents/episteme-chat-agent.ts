@@ -1,7 +1,6 @@
 import { Agent } from '@mastra/core/agent';
 import { groundedResponseTool } from '../tools/grounded-response-tool';
 import { claimStatusTool } from '../tools/claim-status-tool';
-import { Memory } from '@mastra/memory';
 import { groundedToolUsageScorer, faithfulnessScorer } from '../scorers/episteme-scorer';
 import { unibenNewsTool } from '../tools/uniben-news-tool';
 import { webSearchTool } from '../tools/web-search-tool';
@@ -231,18 +230,16 @@ If the user asks about a submitted claim, use \`claimStatusTool\` with only the 
       sampling: { type: 'ratio', rate: 0.5 },
     },
   },
-  memory: new Memory({
-    options: {
-      // The chat UI generates thread titles itself (SupabaseThreadListAdapter →
-      // extractTitleFromMessages, no LLM) — Mastra's title-gen was a redundant
-      // extra model call inside every new thread's stream window, inflating
-      // perceived response time for a title nothing reads.
-      generateTitle: false,
-      // The chat proxy already trims requests to its last 12 messages
-      // (MAX_MESSAGES_TO_MASTRA) — recalling more than that from memory just
-      // grows prefill on both model calls per turn for context the
-      // conversation itself no longer carries.
-      lastMessages: 12,
-    },
-  }),
+  // NO MEMORY — deliberate. See storage-outage.test.ts, which pins this.
+  //
+  // Conversation state is owned by Supabase: the chat proxy replays the last 12
+  // messages on every request (MAX_MESSAGES_TO_MASTRA) and the UI derives thread
+  // titles itself, so `generateTitle` was already off. The proxy never sends a
+  // threadId/resourceId either, so Mastra memory had no thread identity to
+  // recall against — it wrote rows nothing ever read while adding a storage
+  // round-trip to the front of every turn (prepare-memory-step).
+  //
+  // Re-attaching a Memory here means the proxy must also send
+  // `memory: { thread, resource }`, and it re-introduces a storage dependency
+  // ahead of the first token. Do that deliberately or not at all.
 });

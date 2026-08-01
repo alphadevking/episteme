@@ -3,9 +3,12 @@
  * Persists metadata for every ingested document: supports listing, deletion,
  * and re-ingestion of text-based documents from the admin dashboard.
  *
- * Uses the same mastra.db file as Mastra core storage.
+ * Backed by `kbClient` — the DURABLE database (Turso in production), separate
+ * from Mastra's ephemeral runtime store. See db.ts for why the two are split.
+ * Nothing on the chat path reads this registry; an outage here breaks ingestion
+ * and the KB admin UI, not answers.
  */
-import { dbClient } from '../db';
+import { kbClient } from '../db';
 import { GLOBAL_INSTITUTION } from './ingest';
 
 export interface KbDocument {
@@ -49,7 +52,7 @@ export interface KbDocument {
 }
 
 export async function ensureKbTable(): Promise<void> {
-  await dbClient.execute(`
+  await kbClient.execute(`
     CREATE TABLE IF NOT EXISTS kb_documents (
       doc_id             TEXT PRIMARY KEY,
       file_name          TEXT NOT NULL,
@@ -85,7 +88,7 @@ export async function ensureKbTable(): Promise<void> {
   ];
   for (const col of newColumns) {
     try {
-      await dbClient.execute(`ALTER TABLE kb_documents ADD COLUMN ${col}`);
+      await kbClient.execute(`ALTER TABLE kb_documents ADD COLUMN ${col}`);
     } catch {
       // Column already exists — safe to ignore
     }
@@ -99,7 +102,7 @@ export async function saveDocument(doc: KbDocument): Promise<void> {
     ?? (doc.source.startsWith('http://') || doc.source.startsWith('https://')
         ? doc.source
         : null);
-  await dbClient.execute({
+  await kbClient.execute({
     sql: `
       INSERT INTO kb_documents (
         doc_id, file_name, namespace, category, content_type, faculty, source,
@@ -164,7 +167,7 @@ export async function saveFreshnessResult(
   lastFetchedAt: string,
 ): Promise<void> {
   await ensureKbTable();
-  await dbClient.execute({
+  await kbClient.execute({
     sql: `UPDATE kb_documents SET content_hash = ?, last_fetched_at = ? WHERE doc_id = ?`,
     args: [contentHash, lastFetchedAt, docId],
   });
@@ -173,17 +176,17 @@ export async function saveFreshnessResult(
 export async function listDocuments(institutionId?: string): Promise<KbDocument[]> {
   await ensureKbTable();
   const result = institutionId
-    ? await dbClient.execute({
+    ? await kbClient.execute({
         sql: `SELECT * FROM kb_documents WHERE institution_id = ? OR institution_id = ? ORDER BY ingested_at DESC`,
         args: [institutionId, GLOBAL_INSTITUTION],
       })
-    : await dbClient.execute('SELECT * FROM kb_documents ORDER BY ingested_at DESC');
+    : await kbClient.execute('SELECT * FROM kb_documents ORDER BY ingested_at DESC');
   return result.rows.map(rowToDocument);
 }
 
 export async function getDocument(docId: string): Promise<KbDocument | null> {
   await ensureKbTable();
-  const result = await dbClient.execute({
+  const result = await kbClient.execute({
     sql: 'SELECT * FROM kb_documents WHERE doc_id = ?',
     args: [docId],
   });
@@ -193,7 +196,7 @@ export async function getDocument(docId: string): Promise<KbDocument | null> {
 
 export async function deleteDocumentRecord(docId: string): Promise<void> {
   await ensureKbTable();
-  await dbClient.execute({
+  await kbClient.execute({
     sql: 'DELETE FROM kb_documents WHERE doc_id = ?',
     args: [docId],
   });

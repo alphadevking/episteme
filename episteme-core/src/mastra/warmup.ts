@@ -10,8 +10,37 @@
 // server startup.
 import { Pinecone } from '@pinecone-database/pinecone';
 import { embedTexts } from './ingestion/embedder';
+import { kbClient } from './db';
+
+/**
+ * Boot probe for the DURABLE KB database.
+ *
+ * Chat no longer depends on this database (see db.ts), which is the point — but
+ * "no longer takes chat down" must not become "fails silently". Ingestion and
+ * the KB admin UI do depend on it, and on 2026-08-01 the first sign that it was
+ * unreachable was a wave of production 500s. This turns that into one loud line
+ * in the boot log.
+ *
+ * Deliberately non-blocking and non-fatal: an unreachable KB database must not
+ * prevent the server from serving chat.
+ */
+function probeKbDatabase(): void {
+  setTimeout(async () => {
+    try {
+      await kbClient.execute('SELECT 1');
+      console.info('[boot] KB database reachable');
+    } catch (err) {
+      console.error(
+        '[boot] KB DATABASE UNREACHABLE — ingestion and the KB admin UI will fail. ' +
+        'Chat is unaffected. Check LIBSQL_URL / LIBSQL_AUTH_TOKEN.',
+        (err as Error).message,
+      );
+    }
+  }, 0);
+}
 
 export function warmupConnections(): void {
+  probeKbDatabase();
   setTimeout(async () => {
     const t = Date.now();
     try {
