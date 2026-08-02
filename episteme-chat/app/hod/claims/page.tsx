@@ -1,7 +1,7 @@
 // app/hod/claims/page.tsx
 // HOD claims queue — scoped to assigned_to = HOD via RLS (hod_select_dept_claims).
 // Supports ?status= and ?urgent= URL filters.
-import { createSupabaseServerClientReadOnly } from "@/lib/supabase/server";
+import { getHodAssertion, getServerSupabase } from "@/lib/supabase/server-auth";
 import { redirect } from "next/navigation";
 import { StatusBadge } from "@/components/admin/status-badge";
 import { FilterBar } from "@/components/admin/filter-bar";
@@ -35,11 +35,11 @@ export default async function HodClaimsPage({ searchParams }: Props) {
   const status = sp.status ?? "";
   const urgent = sp.urgent === "true";
 
-  const supabase = await createSupabaseServerClientReadOnly();
+  const supabase = await getServerSupabase();
 
-  const { data: rows, error } = await supabase.rpc("fn_assert_active_hod");
-  if (error || !rows?.length) redirect("/sign-in");
-  const ctx = rows[0] as { user_id: string; department_id: string };
+  // Same atomic assertion the layout ran; request-cached, so this reuses it.
+  const { row: ctx, error } = await getHodAssertion();
+  if (error || !ctx) redirect("/sign-in");
 
   let query = supabase
     .from("verification_claims")

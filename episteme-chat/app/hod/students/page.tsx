@@ -1,7 +1,7 @@
 // app/hod/students/page.tsx
 // HOD students — verified students linked to the HOD's department via programme.
 // Read-only roster. RLS: staff_select_users_in_institution scopes to institution.
-import { createSupabaseServerClientReadOnly } from "@/lib/supabase/server";
+import { getHodAssertion, getServerSupabase } from "@/lib/supabase/server-auth";
 import { redirect } from "next/navigation";
 import { DataTable } from "@/components/admin/data-table";
 import { StatusBadge } from "@/components/admin/status-badge";
@@ -17,11 +17,11 @@ type StudentRow = {
 };
 
 export default async function HodStudentsPage() {
-  const supabase = await createSupabaseServerClientReadOnly();
+  const supabase = await getServerSupabase();
 
-  const { data: ctxRows, error } = await supabase.rpc("fn_assert_active_hod");
-  if (error || !ctxRows?.length) redirect("/sign-in");
-  const ctx = ctxRows[0] as { department_id: string };
+  // Same atomic assertion the layout ran; request-cached, so this reuses it.
+  const { row: ctx, error } = await getHodAssertion();
+  if (error || !ctx) redirect("/sign-in");
 
   const { data: links } = await supabase
     .from("user_student_links")

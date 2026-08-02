@@ -1,6 +1,6 @@
 // app/hod/page.tsx
 // HOD overview — department stats and open claim counts.
-import { createSupabaseServerClientReadOnly } from "@/lib/supabase/server";
+import { getHodAssertion, getServerSupabase } from "@/lib/supabase/server-auth";
 import { redirect } from "next/navigation";
 import { StatusBadge } from "@/components/admin/status-badge";
 import {
@@ -13,18 +13,11 @@ import {
 import Link from "next/link";
 
 export default async function HodOverviewPage() {
-  const supabase = await createSupabaseServerClientReadOnly();
+  const supabase = await getServerSupabase();
 
-  const { data: rows, error } = await supabase.rpc("fn_assert_active_hod");
-  if (error || !rows?.length) redirect("/sign-in");
-
-  const ctx = rows[0] as {
-    user_id:         string;
-    department_id:   string;
-    department_name: string;
-    faculty_id:      string;
-    institution_id:  string;
-  };
+  // Same atomic assertion the layout ran; request-cached, so this reuses it.
+  const { row: ctx, error } = await getHodAssertion();
+  if (error || !ctx) redirect("/sign-in");
 
   const [
     { data: programs },

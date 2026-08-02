@@ -1,24 +1,18 @@
 // app/claims/layout.tsx
 // Auth guard + minimal shell for the user-facing claims area.
-import { createSupabaseServerClientReadOnly } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { ChevronLeftIcon, FileCheckIcon } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Logo } from "@/components/logo";
+import { getAuthContext } from "@/lib/supabase/server-auth";
 
 export default async function ClaimsLayout({ children }: { children: ReactNode }) {
-  const supabase = await createSupabaseServerClientReadOnly();
+  // Request-cached: the pages below reuse this auth call and profile row.
+  const { user, profile } = await getAuthContext();
 
-  const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/sign-in");
-
-  const { data: profile } = await supabase
-    .from("users")
-    .select("status, institution_id, first_name")
-    .eq("auth_id", user.id)
-    .maybeSingle();
 
   if (!profile || profile.status !== "active" || !profile.institution_id) {
     redirect("/onboarding");

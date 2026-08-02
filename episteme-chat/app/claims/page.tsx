@@ -1,6 +1,6 @@
 // app/claims/page.tsx
 // User's claim history + HOD review inbox (if HOD role).
-import { createSupabaseServerClientReadOnly } from "@/lib/supabase/server";
+import { getAuthContext, getServerSupabase } from "@/lib/supabase/server-auth";
 import { StatusBadge } from "@/components/admin/status-badge";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -24,17 +24,13 @@ type ClaimRow = {
 };
 
 export default async function ClaimsPage() {
-  const supabase = await createSupabaseServerClientReadOnly();
+  // Request-cached — reuses the claims layout's auth call and profile row.
+  const [supabase, { user, profile }] = await Promise.all([
+    getServerSupabase(),
+    getAuthContext(),
+  ]);
 
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
-
-  const { data: profile } = await supabase
-    .from("users")
-    .select("id, roles")
-    .eq("auth_id", user.id)
-    .maybeSingle();
-
+  if (!user)    return null;
   if (!profile) return null;
 
   const isHod = (profile.roles as string[])?.includes("hod");

@@ -1,22 +1,18 @@
 // app/chat/settings/page.tsx
 // Server component — loads data, passes to SettingsShell (client).
-import { createSupabaseServerClientReadOnly } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { SettingsShell } from "@/components/user/settings-shell";
 import type { SettingsInitial } from "@/components/user/settings-form";
+import { getAuthContext, getServerSupabase } from "@/lib/supabase/server-auth";
 
 export default async function SettingsPage() {
-  const supabase = await createSupabaseServerClientReadOnly();
+  // Request-cached — reuses the chat layout's auth call and profile row.
+  const [supabase, { user, profile }] = await Promise.all([
+    getServerSupabase(),
+    getAuthContext(),
+  ]);
 
-  const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/sign-in");
-
-  const { data: profile } = await supabase
-    .from("users")
-    .select("id, first_name, last_name, phone, primary_role, institution_id")
-    .eq("auth_id", user.id)
-    .maybeSingle();
-
   if (!profile) redirect("/onboarding");
 
   const { data: aiCtx } = await supabase

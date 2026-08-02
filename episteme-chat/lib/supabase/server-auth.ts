@@ -41,7 +41,7 @@ export const getAuthUser = cache(async () => {
  * round-trip, not the payload, is the cost.
  */
 const PROFILE_COLUMNS =
-  "id, auth_id, email, display_name, first_name, last_name, avatar_url, primary_role, roles, institution_id, is_superadmin, status" as const;
+  "id, auth_id, email, display_name, first_name, last_name, phone, avatar_url, primary_role, roles, institution_id, is_superadmin, status" as const;
 
 export type ServerProfile = Pick<
   Tables<"users">,
@@ -51,6 +51,7 @@ export type ServerProfile = Pick<
   | "display_name"
   | "first_name"
   | "last_name"
+  | "phone"
   | "avatar_url"
   | "primary_role"
   | "roles"
@@ -78,4 +79,52 @@ export const getUserProfile = cache(async (): Promise<ServerProfile | null> => {
 export const getAuthContext = cache(async () => {
   const [user, profile] = await Promise.all([getAuthUser(), getUserProfile()]);
   return { user, profile };
+});
+
+// ── Privileged-role assertions ──────────────────────────────────────────────
+//
+// `fn_assert_active_admin()` / `fn_assert_active_hod()` are SECURITY DEFINER
+// functions that check role, status and deleted_at ATOMICALLY, in one query.
+// That atomicity is deliberate: the older getUser() + profile SELECT pattern
+// was TOCTOU-vulnerable to a role being revoked between the two reads.
+//
+// Caching here does NOT weaken that. What was happening is that a layout and
+// the page beneath it each ran the *same* atomic assertion against the *same*
+// session inside the *same* request — two executions that cannot legitimately
+// disagree, and whose only "protection" would be catching a revocation in the
+// few milliseconds between them. The atomic check is still the sole authority
+// on access; it now runs once per request instead of twice.
+//
+// What must NOT change: nothing may substitute a cached profile SELECT for
+// these RPCs. `getUserProfile()` is for display data. Authorization comes from
+// here.
+
+/** Atomic admin/superadmin assertion. Deduped per request. Never redirects. */
+export const getAdminAssertion = cache(async () => {
+  const supabase = await getServerSupabase();
+  const { data, error } = await supabase.rpc("fn_assert_active_admin");
+
+  const row = (data?.[0] ?? null) as {
+    user_id:        string;
+    is_superadmin:  boolean;
+    institution_id: string | null;
+  } | null;
+
+  return { row, error };
+});
+
+/** Atomic HOD assertion. Deduped per request. Never redirects. */
+export const getHodAssertion = cache(async () => {
+  const supabase = await getServerSupabase();
+  const { data, error } = await supabase.rpc("fn_assert_active_hod");
+
+  const row = (data?.[0] ?? null) as {
+    user_id:         string;
+    department_id:   string;
+    department_name: string;
+    faculty_id:      string;
+    institution_id:  string;
+  } | null;
+
+  return { row, error };
 });

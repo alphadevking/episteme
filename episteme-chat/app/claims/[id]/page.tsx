@@ -1,7 +1,7 @@
 // app/claims/[id]/page.tsx
 // User claim detail view.
 // Shows claim status, details, and (for HOD reviewers) the review panel.
-import { createSupabaseServerClientReadOnly } from "@/lib/supabase/server";
+import { getAuthContext, getServerSupabase } from "@/lib/supabase/server-auth";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
@@ -21,17 +21,13 @@ const CLAIM_LABELS: Record<string, string> = {
 
 export default async function ClaimDetailPage({ params }: Params) {
   const { id } = await params;
-  const supabase = await createSupabaseServerClientReadOnly();
+  // Request-cached — reuses the claims layout's auth call and profile row.
+  const [supabase, { user, profile }] = await Promise.all([
+    getServerSupabase(),
+    getAuthContext(),
+  ]);
 
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) notFound();
-
-  const { data: profile } = await supabase
-    .from("users")
-    .select("id, roles")
-    .eq("auth_id", user.id)
-    .maybeSingle();
-
+  if (!user)    notFound();
   if (!profile) notFound();
 
   const isHod = (profile.roles as string[])?.includes("hod");

@@ -1,7 +1,7 @@
 // app/hod/claims/[id]/page.tsx
 // HOD claim detail — read claim data + approve/reject via ClaimReviewPanel.
 // RLS (hod_select_dept_claims) ensures HOD can only fetch claims assigned to them.
-import { createSupabaseServerClientReadOnly } from "@/lib/supabase/server";
+import { getHodAssertion, getServerSupabase } from "@/lib/supabase/server-auth";
 import { notFound, redirect } from "next/navigation";
 import { DetailShell } from "@/components/admin/detail-shell";
 import { StatusBadge } from "@/components/admin/status-badge";
@@ -11,11 +11,11 @@ type Params = { params: Promise<{ id: string }> };
 
 export default async function HodClaimDetailPage({ params }: Params) {
   const { id } = await params;
-  const supabase = await createSupabaseServerClientReadOnly();
+  const supabase = await getServerSupabase();
 
-  // Guard — also gives us department context
-  const { data: ctxRows, error: ctxErr } = await supabase.rpc("fn_assert_active_hod");
-  if (ctxErr || !ctxRows?.length) redirect("/sign-in");
+  // Guard — same atomic assertion the layout ran, request-cached.
+  const { row: ctx, error: ctxErr } = await getHodAssertion();
+  if (ctxErr || !ctx) redirect("/sign-in");
 
   const { data: claim } = await supabase
     .from("verification_claims")

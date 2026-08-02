@@ -17,9 +17,15 @@
 // Auth pattern:
 //   1. auth.getUser()           — validates JWT with Supabase Auth server
 //   2. fn_assert_active_admin() — atomic: status, deleted_at, role in one query
+//
+// Both steps are request-cached (see lib/supabase/server-auth.ts), so a page
+// calling this after the layout already guarded costs no extra round-trips.
+// The atomic assertion is still what decides access — caching only stops the
+// same check from executing twice within one request.
 
 import { createSupabaseServerClientReadOnly } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
+import { getAdminAssertion, getAuthUser, getServerSupabase } from "@/lib/supabase/server-auth";
 
 type SupabaseSSRClient = Awaited<ReturnType<typeof createSupabaseServerClientReadOnly>>;
 
@@ -32,25 +38,19 @@ export type AdminAccessResult = {
 export async function requireAdminAccess(
   institutionParam: string | undefined,
 ): Promise<AdminAccessResult> {
-  const supabase = await createSupabaseServerClientReadOnly();
+  const supabase = await getServerSupabase();
 
   // Step 1: validate JWT.
-  const { data: { user: authUser } } = await supabase.auth.getUser();
+  const authUser = await getAuthUser();
   if (!authUser) redirect("/sign-in");
 
   // Step 2: atomic role + status check.
-  const { data: rows, error: rpcError } = await supabase.rpc("fn_assert_active_admin");
+  const { row: profile, error: rpcError } = await getAdminAssertion();
 
-  if (rpcError || !rows || rows.length === 0) {
+  if (rpcError || !profile) {
     const isForbidden = rpcError?.code === "P0002";
     redirect(isForbidden ? "/chat" : "/sign-in");
   }
-
-  const profile = rows[0] as {
-    user_id:        string;
-    is_superadmin:  boolean;
-    institution_id: string | null;
-  };
 
   const isSuperadmin = profile.is_superadmin === true;
 

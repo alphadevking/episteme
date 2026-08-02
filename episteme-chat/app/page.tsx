@@ -2,22 +2,15 @@
 // Full marketing landing page — Tailwind only, no inline styles.
 // Authenticated users see a "Go to Chat" CTA; unauthenticated see sign-up flow.
 
-import { createSupabaseServerClientReadOnly } from "@/lib/supabase/server";
+import { getAuthContext } from "@/lib/supabase/server-auth";
 import Link from "next/link";
 import { Sparkles, MessageSquare } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Logo } from "@/components/logo";
 
 async function resolveAuthCta(): Promise<{ href: string; label: string }> {
-  const supabase = await createSupabaseServerClientReadOnly();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { user, profile } = await getAuthContext();
   if (!user) return { href: "/sign-in", label: "Start for free" };
-
-  const { data: profile } = await supabase
-    .from("users")
-    .select("is_superadmin, roles")
-    .eq("auth_id", user.id)
-    .maybeSingle();
 
   const roles = (profile?.roles as string[]) ?? [];
   // if (profile?.is_superadmin) return { href: "/superadmin", label: "Go to Dashboard" };
