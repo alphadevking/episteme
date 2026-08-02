@@ -126,6 +126,38 @@ describe('ndcgAtK', () => {
   test('no hits → 0', () => {
     assert.equal(ndcgAtK([item('x.pdf')], ['handbook'], 3), 0);
   });
+
+  /**
+   * Regression: a real run scored nDCG 2.131. All three retrieved chunks came
+   * from one document, and each was credited as a separate relevant item while
+   * the ideal was built from the single label. nDCG is a normalised measure —
+   * exceeding 1.0 is definitionally impossible and made the number worthless.
+   */
+  test('several chunks of one document cannot push nDCG above 1.0', () => {
+    const retrieved = [item('admission_policy.html'), item('admission_policy.html'), item('admission_policy.html')];
+    assert.equal(ndcgAtK(retrieved, ['admission_policy'], 3), 1);
+  });
+
+  test('never exceeds 1.0 for any duplication of any label set', () => {
+    const retrieved = [item('a.pdf'), item('a.pdf'), item('b.pdf'), item('b.pdf'), item('a.pdf')];
+    for (const labels of [['a'], ['b'], ['a', 'b']]) {
+      for (const k of [1, 2, 3, 5]) {
+        const value = ndcgAtK(retrieved, labels, k);
+        assert.ok(value <= 1, `nDCG@${k} for [${labels}] was ${value}`);
+      }
+    }
+  });
+
+  /**
+   * The credited document is the best-ranked one, so duplicates must not
+   * displace a second distinct document's contribution.
+   */
+  test('a duplicate does not consume the credit owed to another document', () => {
+    const duplicateFirst = ndcgAtK([item('a.pdf'), item('a.pdf'), item('b.pdf')], ['a', 'b'], 3);
+    const distinctFirst  = ndcgAtK([item('a.pdf'), item('b.pdf')], ['a', 'b'], 3);
+    assert.ok(duplicateFirst < distinctFirst, 'burying the second document should score lower');
+    assert.ok(duplicateFirst > 0);
+  });
 });
 
 describe('scoreCase', () => {

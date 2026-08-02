@@ -202,6 +202,87 @@ export function resolvePlatformNamespaces(input: {
 // would query partitions that will always be empty. The two resolvers stay
 // separate and are consumed by their own tiers.
 
+/**
+ * Audience progression — which roles' documents a role also reads.
+ *
+ * `roles` on a DOCUMENT is an audience tag ("this was written for students"),
+ * not a secrecy label. Treating it as an exact-match requirement created a hole
+ * in the unhelpful direction: admissions documents are tagged
+ * [prospective, student, parent, staff], so a caller holding only `hod`
+ * retrieved NOTHING from them — the most senior role saw less than a
+ * prospective applicant.
+ *
+ * Progression is strictly DOWNWARD: a role reads its own audience plus every
+ * audience below it. Anything published to students is by definition not
+ * confidential from staff.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT TOUCH: confidentiality is enforced by
+ * NAMESPACES and the TRUST CEILING (staff-internal requires trust 4), not by
+ * this tag. Expansion only ever adds LESS privileged audiences, so it cannot
+ * widen access upward — a student can never acquire 'staff' here. The property
+ * test in retrieval-gate.test.ts pins that.
+ */
+export const ROLE_SUBSUMES: Record<string, string[]> = {
+  prospective: [],
+  student:     ['prospective'],
+  parent:      ['prospective'],
+  staff:       ['student', 'parent', 'prospective'],
+  hod:         ['staff', 'student', 'parent', 'prospective'],
+};
+
+/**
+ * Seniority ranking, defined INDEPENDENTLY of ROLE_SUBSUMES.
+ *
+ * grantsSeniorAudience compares against this rather than re-deriving the map it
+ * is meant to check — otherwise the property test would be a restatement of the
+ * implementation and would pass no matter how the map was edited.
+ */
+const ROLE_RANK: Record<string, number> = {
+  prospective: 0,
+  student:     1,
+  parent:      1,
+  staff:       2,
+  hod:         3,
+};
+
+/**
+ * Expand a caller's verified roles to the document audiences they may read.
+ *
+ * Fails closed on unknown roles: an unrecognised role contributes only itself,
+ * never a wider audience. Order is stable (caller's own roles first) and the
+ * result is deduped, so the filter stays readable in logs.
+ */
+export function expandAudienceRoles(roles: string[]): string[] {
+  const expanded: string[] = [];
+  for (const role of roles) {
+    if (!expanded.includes(role)) expanded.push(role);
+    for (const subsumed of ROLE_SUBSUMES[role] ?? []) {
+      if (!expanded.includes(subsumed)) expanded.push(subsumed);
+    }
+  }
+  return expanded;
+}
+
+/**
+ * True when expansion would hand a caller an audience senior to every role they
+ * actually hold. Used by the property test as an independent check on the map
+ * above, so editing ROLE_SUBSUMES carelessly fails loudly.
+ */
+export function grantsSeniorAudience(roles: string[]): boolean {
+  const held = new Set(roles);
+  const maxHeldRank = roles.reduce((max, role) => Math.max(max, ROLE_RANK[role] ?? -1), -1);
+
+  return expandAudienceRoles(roles).some((role) => {
+    // A caller's own role is never a grant, however senior it is.
+    if (held.has(role)) return false;
+    // An unranked role reached by expansion is treated as senior on purpose:
+    // adding a new role to ROLE_SUBSUMES without ranking it here must fail
+    // loudly rather than slip through unchecked.
+    const rank = ROLE_RANK[role] ?? Number.POSITIVE_INFINITY;
+    return rank > maxHeldRank;
+  });
+}
+
 /** Pinecone metadata filter shape. Loose by design — mirrors the query API. */
 export type RetrievalFilter = {
   $and: Array<Record<string, unknown>>;
@@ -227,7 +308,10 @@ export function buildRetrievalFilter(input: {
   institutionId?: string;
 }): RetrievalFilter {
   const { role, programme, level, institutionId } = input;
-  const roleList = Array.isArray(role) ? role : [role];
+  // Audience progression: a role also reads every audience below it, so a HOD
+  // is not locked out of documents tagged for students. Expansion is downward
+  // only — see expandAudienceRoles.
+  const roleList = expandAudienceRoles(Array.isArray(role) ? role : [role]);
 
   const resolvedInstitutionId = institutionId ?? GLOBAL_INSTITUTION;
   const institutionFilter = {

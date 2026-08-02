@@ -135,6 +135,25 @@ export const PLATFORM_CASES: PlatformCase[] = [
 // ── Knowledge base tier — abstention cases are labelled; retrieval cases are not ──
 
 export const KB_CASES: KbCase[] = [
+  /**
+   * Labelled from corpus inspection (`--corpus`, 2026-08-02): the admissions
+   * namespace holds admission_policy.html, which is the document that should
+   * answer an admissions question. Re-confirm with `--label` if the corpus
+   * changes — a label that no longer matches any source scores zero and looks
+   * like a retrieval failure, which the runner calls out explicitly.
+   */
+  {
+    id: 'kb-admission-requirements',
+    query: 'what are the admission requirements',
+    role: 'prospective',
+    trustLevel: 1,
+    expect: 'retrieve',
+    expectedSources: ['admission_policy'],
+    why:
+      'admission_policy.html is the admissions-namespace document in this corpus, ' +
+      'and admissions is readable at trust 1 by prospective students — so this ' +
+      'exercises the ordinary public path end to end.',
+  },
   {
     id: 'kb-abstain-cooking',
     query: 'how do I bake sourdough bread at home',
@@ -191,7 +210,6 @@ export const KB_UNLABELLED: Array<Omit<KbCase, 'expectedSources' | 'why'>> = [
   { id: 'kb-todo-vc',               query: 'who is the current vice chancellor',                           role: 'prospective', trustLevel: 1,                expect: 'retrieve' },
   { id: 'kb-todo-transcript',       query: 'how do I request an official transcript',                      role: 'student',     trustLevel: 2,                expect: 'retrieve' },
   { id: 'kb-todo-cgpa',             query: 'how is CGPA calculated',                                       role: 'student',     trustLevel: 2,                expect: 'retrieve' },
-  { id: 'kb-todo-admission-req',    query: 'what are the admission requirements for computer science',     role: 'prospective', trustLevel: 1,                expect: 'retrieve' },
   { id: 'kb-todo-late-reg',         query: 'what happens if I miss the registration deadline',             role: 'student',     trustLevel: 2,                expect: 'retrieve' },
 ];
 

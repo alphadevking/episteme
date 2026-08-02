@@ -14,6 +14,8 @@ import {
   resolveNamespacesForRoles,
   resolvePlatformNamespaces,
   buildRetrievalFilter,
+  expandAudienceRoles,
+  grantsSeniorAudience,
   ROLE_NAMESPACES,
   TRUST_NAMESPACES,
   GLOBAL_INSTITUTION,
@@ -418,10 +420,25 @@ describe('buildRetrievalFilter — tenant isolation', () => {
     assert.deepEqual(roleClause.roles.$in, ['prospective']);
   });
 
-  test('a role array matches documents tagged for any of them', () => {
+  /**
+   * Updated when audience progression landed. The original asserted the clause
+   * was exactly ['student', 'staff']; it is now that set plus the audiences
+   * those roles subsume. The INTENT — a role array matches documents tagged for
+   * any of the caller's roles — is unchanged and still asserted first; the
+   * exact set is pinned after it so progression cannot quietly widen further.
+   */
+  test('a role array matches documents tagged for any of them, plus subsumed audiences', () => {
     const filter = buildRetrievalFilter({ role: ['student', 'staff'] });
     const roleClause = filter.$and.find((c) => 'roles' in c) as { roles: { $in: string[] } };
-    assert.deepEqual(roleClause.roles.$in, ['student', 'staff']);
+
+    for (const own of ['student', 'staff']) {
+      assert.ok(roleClause.roles.$in.includes(own), `caller's own role ${own} must match`);
+    }
+    assert.deepEqual(
+      new Set(roleClause.roles.$in),
+      new Set(['student', 'staff', 'parent', 'prospective']),
+    );
+    assert.equal(roleClause.roles.$in.includes('hod'), false, 'must not reach a senior audience');
   });
 
   test('a one-element array is identical to the scalar form', () => {
@@ -447,5 +464,102 @@ describe('buildRetrievalFilter — tenant isolation', () => {
 
     const scoped = buildRetrievalFilter({ role: 'student', programme: 'CS', level: '300L' });
     assert.equal(scoped.$and.length, 4); // roles + programme + level + institution
+  });
+});
+
+describe('expandAudienceRoles — audience progression', () => {
+  /**
+   * The bug this exists to fix, found by the retrieval eval against the real
+   * corpus: admissions documents are tagged [prospective, student, parent,
+   * staff], so a caller holding only 'hod' matched none of them. The most
+   * senior role retrieved less than a prospective applicant.
+   */
+  test('a HOD reads every audience below them', () => {
+    const expanded = expandAudienceRoles(['hod']);
+    for (const audience of ['hod', 'staff', 'student', 'parent', 'prospective']) {
+      assert.ok(expanded.includes(audience), `hod should read ${audience}-tagged documents`);
+    }
+  });
+
+  test('staff read student, parent and prospective audiences', () => {
+    const expanded = expandAudienceRoles(['staff']);
+    assert.deepEqual(new Set(expanded), new Set(['staff', 'student', 'parent', 'prospective']));
+  });
+
+  /**
+   * THE security property. Expansion is downward only: it may add less
+   * privileged audiences, never a more privileged one. If this ever fails,
+   * a student can read staff-authored documents.
+   */
+  test('expansion never grants a senior audience the caller does not hold', () => {
+    const everyCombination: string[][] = [
+      ['prospective'], ['student'], ['parent'], ['staff'], ['hod'],
+      ['student', 'parent'], ['prospective', 'student'], ['parent', 'student'],
+      ['staff', 'student'], ['hod', 'student'], ['unknown-role'], [],
+    ];
+    for (const roles of everyCombination) {
+      assert.equal(
+        grantsSeniorAudience(roles), false,
+        `expandAudienceRoles(${JSON.stringify(roles)}) leaked a senior audience: ` +
+        JSON.stringify(expandAudienceRoles(roles)),
+      );
+    }
+  });
+
+  test('non-staff roles never gain staff or hod audiences', () => {
+    for (const role of ['prospective', 'student', 'parent']) {
+      const expanded = expandAudienceRoles([role]);
+      assert.equal(expanded.includes('staff'), false, `${role} must not read staff-tagged documents`);
+      assert.equal(expanded.includes('hod'), false, `${role} must not read hod-tagged documents`);
+    }
+  });
+
+  test('an unknown role contributes only itself — fails closed', () => {
+    assert.deepEqual(expandAudienceRoles(['not-a-role']), ['not-a-role']);
+  });
+
+  test('expansion is idempotent and never shrinks the caller\'s own roles', () => {
+    for (const roles of [['hod'], ['staff', 'student'], ['parent'], ['prospective']]) {
+      const once  = expandAudienceRoles(roles);
+      const twice = expandAudienceRoles(once);
+      assert.deepEqual(new Set(twice), new Set(once));
+      for (const role of roles) assert.ok(once.includes(role), 'own role must survive expansion');
+    }
+  });
+
+  test('the result never contains duplicates', () => {
+    const expanded = expandAudienceRoles(['hod', 'staff', 'student', 'student']);
+    assert.equal(expanded.length, new Set(expanded).size);
+  });
+});
+
+describe('buildRetrievalFilter — audience progression', () => {
+  const rolesClause = (f: ReturnType<typeof buildRetrievalFilter>) =>
+    f.$and.find((c) => 'roles' in c) as { roles: { $in: string[] } };
+
+  test('a HOD filter matches student- and prospective-tagged documents', () => {
+    const clause = rolesClause(buildRetrievalFilter({ role: 'hod' }));
+    for (const audience of ['hod', 'staff', 'student', 'prospective']) {
+      assert.ok(clause.roles.$in.includes(audience));
+    }
+  });
+
+  test('a student filter still cannot match staff-tagged documents', () => {
+    const clause = rolesClause(buildRetrievalFilter({ role: 'student' }));
+    assert.equal(clause.roles.$in.includes('staff'), false);
+    assert.equal(clause.roles.$in.includes('hod'), false);
+  });
+
+  /**
+   * Progression changes the audience filter ONLY. Namespaces and the trust
+   * ceiling remain the confidentiality control, so a claimed staff role at low
+   * trust gains nothing from this change.
+   */
+  test('progression does not widen namespaces', () => {
+    assert.deepEqual(
+      resolveNamespaces({ role: 'staff', trustLevel: 1 }),
+      resolveNamespaces({ role: 'staff', trustLevel: 1 }),
+    );
+    assert.equal(resolveNamespaces({ role: 'hod', trustLevel: 1 }).includes('staff-internal'), false);
   });
 });

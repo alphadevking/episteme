@@ -97,9 +97,24 @@ export function reciprocalRank(retrieved: RetrievedItem[], relevantLabels: strin
 export function ndcgAtK(retrieved: RetrievedItem[], relevantLabels: string[], k: number): number {
   if (relevantLabels.length === 0) return 0;
 
-  const dcg = retrieved.slice(0, k).reduce((sum, item, i) => {
-    return sum + (isRelevant(item, relevantLabels) ? 1 / Math.log2(i + 2) : 0);
-  }, 0);
+  // Credit each labelled DOCUMENT once, at its best-ranked chunk.
+  //
+  // Retrieval returns chunks, and several chunks routinely come from the same
+  // document. Scoring each as an independent relevant item inflates DCG past
+  // the ideal — a real run scored 2.131 because three chunks of one document
+  // were credited against an ideal built from one label. Gains are per
+  // document, matching how recallAtK counts distinct labels.
+  const credited = new Set<string>();
+  let dcg = 0;
+  retrieved.slice(0, k).forEach((item, i) => {
+    const newLabel = relevantLabels.find(
+      (label) => !credited.has(label) && matchesLabel(item.source, label),
+    );
+    if (newLabel) {
+      credited.add(newLabel);
+      dcg += 1 / Math.log2(i + 2);
+    }
+  });
 
   const idealHits = Math.min(k, relevantLabels.length);
   const idcg = Array.from({ length: idealHits }, (_, i) => 1 / Math.log2(i + 2))

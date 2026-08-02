@@ -51,6 +51,33 @@ const MIN_LABELLED_RETRIEVAL  = Number(process.env['EVAL_MIN_LABELLED']    ?? 5)
 const args   = process.argv.slice(2);
 const LABEL  = args.includes('--label');
 const STRICT = args.includes('--strict');
+const CORPUS = args.includes('--corpus');
+
+/**
+ * The tenant whose documents the eval should be able to see.
+ *
+ * Retrieval always filters institutionId to `$in: [caller, GLOBAL]`, so a case
+ * that supplies no institution sees GLOBAL documents only. If the corpus was
+ * ingested under a real institution UUID, every query returns nothing and every
+ * abstention case "passes" without testing anything. Run `--corpus` to discover
+ * which institution ids are actually present.
+ */
+const EVAL_INSTITUTION_ID = process.env['EVAL_INSTITUTION_ID'];
+
+/** Every role, for the maximally-privileged control caller. */
+const ALL_ROLES = ['prospective', 'student', 'parent', 'staff', 'hod'] as const;
+
+/**
+ * Control queries for the corpus probe. Broad, ordinary institutional language:
+ * if a full-privilege caller retrieves nothing for ALL of these, the harness
+ * cannot see the corpus and no abstention result below means anything.
+ */
+const CONTROL_QUERIES = [
+  'admission requirements for undergraduate students',
+  'school fees payment',
+  'course registration',
+  'university information',
+];
 
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
 const bar = (label: string) => `\n${'='.repeat(78)}\n${label}\n${'='.repeat(78)}`;
@@ -145,7 +172,9 @@ async function runKbCases() {
       role: c.role,
       roles: c.roles,
       trustLevel: c.trustLevel,
-      institutionId: c.institutionId,
+      // Falls back to the configured tenant: without it the caller sees only
+      // GLOBAL documents, and a case that retrieves nothing verifies nothing.
+      institutionId: c.institutionId ?? EVAL_INSTITUTION_ID,
       programme: c.programme,
       level: c.level,
     });
@@ -197,6 +226,98 @@ async function runKbCases() {
   return { summary: summarize(retrievalScores, abstentionResults), failures };
 }
 
+// ── Corpus reachability control ──────────────────────────────────────────────
+
+/**
+ * Proves the harness can retrieve ANYTHING before any abstention result is
+ * allowed to count as a pass.
+ *
+ * Without this, an eval that cannot see the corpus reports a perfect abstention
+ * score — the most misleading output it could produce, because "returned
+ * nothing" is both the success signal for abstention and the symptom of a
+ * misconfigured harness. A green tick that cannot fail is worse than a red one.
+ */
+async function probeCorpus(): Promise<{ reachable: boolean; hits: number; sources: string[] }> {
+  const retrieveKnowledge = await loadRetriever();
+  const sources = new Set<string>();
+  let hits = 0;
+
+  for (const query of CONTROL_QUERIES) {
+    const res = await retrieveKnowledge({
+      query,
+      role: 'staff',
+      roles: [...ALL_ROLES],
+      trustLevel: 4,
+      institutionId: EVAL_INSTITUTION_ID,
+    });
+    if (res.found) {
+      hits += res.results.length;
+      for (const r of res.results) sources.add(r.source);
+    }
+  }
+
+  return { reachable: hits > 0, hits, sources: [...sources] };
+}
+
+/**
+ * Read-only inspection of what is actually in the index, so the institution id
+ * and namespaces can be discovered rather than guessed. `--corpus`.
+ */
+async function inspectCorpus() {
+  console.log(bar('CORPUS INSPECTION (read-only)'));
+
+  if (!hasKbCredentials()) {
+    console.log('SKIPPED — KB credentials not set.');
+    return;
+  }
+
+  const { Pinecone } = await import('@pinecone-database/pinecone');
+  const { embedTexts } = await import('../mastra/ingestion/embedder');
+
+  const index = new Pinecone({ apiKey: process.env['PINECONE_API_KEY']! })
+    .index({ name: process.env['PINECONE_INDEX']! });
+
+  const stats = await index.describeIndexStats();
+  console.log(`\nIndex "${process.env['PINECONE_INDEX']}" — ${stats.totalRecordCount ?? 0} vectors\n`);
+
+  const namespaces = Object.entries(stats.namespaces ?? {});
+  if (namespaces.length === 0) {
+    console.log('No namespaces contain vectors — the index is empty.');
+    return;
+  }
+
+  // One embedding, reused across namespaces: this is a sampler, not a search.
+  const [vec] = await embedTexts(['university student information']);
+
+  for (const [ns, nsStats] of namespaces) {
+    const institutions = new Set<string>();
+    const roles = new Set<string>();
+    const sources = new Set<string>();
+
+    // No filter — deliberately bypasses the gate to reveal what EXISTS, which
+    // is the whole point of an inspection. Nothing here asserts access.
+    const res = await index.namespace(ns).query({
+      vector: vec!, topK: 10, includeMetadata: true,
+    });
+    for (const match of res.matches ?? []) {
+      const m = (match.metadata ?? {}) as Record<string, unknown>;
+      if (typeof m['institutionId'] === 'string') institutions.add(m['institutionId']);
+      if (Array.isArray(m['roles'])) for (const r of m['roles'] as string[]) roles.add(r);
+      if (typeof m['source'] === 'string') sources.add(m['source'].slice(0, 60));
+    }
+
+    console.log(`${ns}  (${nsStats.recordCount ?? 0} vectors)`);
+    console.log(`  institutionId: ${institutions.size ? [...institutions].join(', ') : '(none sampled)'}`);
+    console.log(`  roles:         ${roles.size ? [...roles].join(', ') : '(none sampled)'}`);
+    for (const s of [...sources].slice(0, 3)) console.log(`  source:        ${s}`);
+  }
+
+  console.log(
+    '\nIf the institutionId above is NOT "__global__", set it so the eval can see ' +
+    'these documents:\n  EVAL_INSTITUTION_ID=<uuid>',
+  );
+}
+
 // ── Entitlement (access control through the real retrieval path) ─────────────
 
 /**
@@ -215,7 +336,8 @@ async function runEntitlementCases() {
   }
 
   const { Pinecone } = await import('@pinecone-database/pinecone');
-  const { resolveNamespacesForRoles, GLOBAL_INSTITUTION } = await import('../mastra/security/retrieval-gate');
+  const { resolveNamespacesForRoles, expandAudienceRoles, GLOBAL_INSTITUTION } =
+    await import('../mastra/security/retrieval-gate');
   const retrieveKnowledge = await loadRetriever();
 
   const index = new Pinecone({ apiKey: process.env['PINECONE_API_KEY']! })
@@ -237,7 +359,9 @@ async function runEntitlementCases() {
       role: c.roles[0]!,
       roles: c.roles,
       trustLevel: c.trustLevel,
-      institutionId: c.institutionId,
+      // Falls back to the configured tenant: without it the caller sees only
+      // GLOBAL documents, and a case that retrieves nothing verifies nothing.
+      institutionId: c.institutionId ?? EVAL_INSTITUTION_ID,
       namespaceAllowlist: c.namespaceAllowlist,
     });
 
@@ -270,16 +394,30 @@ async function runEntitlementCases() {
         continue;
       }
 
+      // Audience progression means a senior caller legitimately receives
+      // documents tagged for junior audiences, so the readable set is the
+      // expansion — not the caller's literal roles.
+      //
+      // This dimension necessarily mirrors the implementation, which weakens it
+      // as an independent check; expandAudienceRoles is separately guarded by
+      // the rank-based property test in retrieval-gate.test.ts. The namespace
+      // and institution checks below remain fully independent of it, and the
+      // upward direction — a junior caller receiving senior-tagged content —
+      // is still caught here, which is the direction that matters.
+      const readableAudiences = expandAudienceRoles([...c.roles]);
       const chunkRoles = Array.isArray(found['roles']) ? (found['roles'] as string[]) : [];
-      if (chunkRoles.length > 0 && !chunkRoles.some((r) => c.roles.includes(r as never))) {
+      if (chunkRoles.length > 0 && !chunkRoles.some((r) => readableAudiences.includes(r))) {
         violations.push(
           `chunk ${result.chunkId} (${result.source}) is tagged roles=[${chunkRoles.join(', ')}] ` +
-          `but the caller holds [${c.roles.join(', ')}]`,
+          `but the caller may read [${readableAudiences.join(', ')}]`,
         );
       }
 
       const chunkInstitution = found['institutionId'];
-      const permittedInstitutions = [c.institutionId ?? GLOBAL_INSTITUTION, GLOBAL_INSTITUTION];
+      const permittedInstitutions = [
+        c.institutionId ?? EVAL_INSTITUTION_ID ?? GLOBAL_INSTITUTION,
+        GLOBAL_INSTITUTION,
+      ];
       if (typeof chunkInstitution === 'string' && !permittedInstitutions.includes(chunkInstitution)) {
         violations.push(
           `chunk ${result.chunkId} (${result.source}) belongs to institution ` +
@@ -322,7 +460,9 @@ async function runLabelMode() {
       role: c.role,
       roles: c.roles,
       trustLevel: c.trustLevel,
-      institutionId: c.institutionId,
+      // Falls back to the configured tenant: without it the caller sees only
+      // GLOBAL documents, and a case that retrieves nothing verifies nothing.
+      institutionId: c.institutionId ?? EVAL_INSTITUTION_ID,
       programme: c.programme,
       level: c.level,
     });
@@ -384,12 +524,40 @@ function report(
 }
 
 async function main() {
+  if (CORPUS) {
+    await inspectCorpus();
+    return;
+  }
   if (LABEL) {
     await runLabelMode();
     return;
   }
 
-  const platform    = await runPlatformCases();
+  const platform = await runPlatformCases();
+
+  // Reachability first: every KB result below is interpreted in its light.
+  let corpus: { reachable: boolean; hits: number; sources: string[] } | null = null;
+  if (hasKbCredentials()) {
+    console.log(bar('CORPUS REACHABILITY CONTROL'));
+    corpus = await probeCorpus();
+    if (corpus.reachable) {
+      console.log(
+        `PASS  full-privilege control retrieved ${corpus.hits} chunk(s) across ` +
+        `${CONTROL_QUERIES.length} ordinary queries` +
+        (EVAL_INSTITUTION_ID ? `  (institution ${EVAL_INSTITUTION_ID})` : '  (GLOBAL documents only)'),
+      );
+    } else {
+      console.log(
+        'FAIL  a full-privilege caller retrieved NOTHING for any control query.\n' +
+        '      The harness cannot see the corpus, so no abstention result below is meaningful.\n' +
+        (EVAL_INSTITUTION_ID
+          ? `      EVAL_INSTITUTION_ID=${EVAL_INSTITUTION_ID} — is that the right tenant?\n`
+          : '      No EVAL_INSTITUTION_ID set, so only GLOBAL documents are visible.\n') +
+        '      Run with --corpus to see which institutions and namespaces actually hold vectors.',
+      );
+    }
+  }
+
   const kb          = await runKbCases();
   const entitlement = await runEntitlementCases();
 
@@ -397,16 +565,35 @@ async function main() {
   const platformOk = report('Platform documentation tier', platform);
   const kbOk       = report('Knowledge base tier', kb);
 
+  // An abstention score computed against an invisible corpus is not a result.
+  // Say so where the number is printed, not in a footnote further down.
+  if (kb && corpus && !corpus.reachable && kb.summary.abstentionCases > 0) {
+    console.log(
+      '  ⚠ ABSTENTION UNVERIFIED — the control above retrieved nothing, so these\n' +
+      '    cases passed by returning nothing from a corpus the harness cannot see.\n' +
+      '    They do not demonstrate that abstention works.',
+    );
+  }
+
   let entitlementOk = true;
   if (entitlement) {
     console.log('\nEntitlement');
     console.log(`  cases          ${entitlement.casesWithResults}/${entitlement.totalCases} returned results`);
     console.log(`  chunks checked ${entitlement.chunksInspected}`);
     if (entitlement.chunksInspected === 0) {
-      // Every case abstained, so nothing was actually verified. Saying "PASS"
-      // here would be the most dangerous possible output: a security check
-      // reporting green having examined nothing.
+      // Every case returned nothing, so nothing was actually verified. Saying
+      // "PASS" here would be the most dangerous possible output: a security
+      // check reporting green having examined nothing.
       console.log('  INCONCLUSIVE — no chunks were returned, so no entitlement was verified.');
+      console.log(
+        corpus?.reachable
+          ? '    The corpus IS reachable at full privilege, so these restricted callers\n' +
+            '    were legitimately shown nothing. That is consistent with correct gating\n' +
+            '    but does not prove it — widen the queries or add a document these roles\n' +
+            '    can see to get a positive verification.'
+          : '    The corpus is not reachable by the harness at all — fix that first\n' +
+            '    (run with --corpus), then this tier can verify anything.',
+      );
     } else if (entitlement.failures.length === 0) {
       console.log(`  no violations — every returned chunk was within its caller's entitlement`);
     } else {
