@@ -13,7 +13,9 @@
     "format:fix": "biome format --write .",
     "lint:fix": "biome check --write .",
     "test": "tsx --test lib/**/*.test.ts",
-    "harvest": "tsx scripts/harvest.ts"
+    "harvest": "tsx scripts/harvest.ts",
+    "latency:report": "tsx scripts/latency-report.ts",
+    "bench:latency": "tsx scripts/bench-latency.ts"
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.25",

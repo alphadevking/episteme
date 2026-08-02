@@ -10,7 +10,8 @@
     "dev": "mastra dev",
     "build": "mastra build",
     "start": "mastra start",
-    "eval:prompts": "tsx src/evals/run-prompt-evals.ts"
+    "eval:prompts": "tsx src/evals/run-prompt-evals.ts",
+    "eval:retrieval": "tsx src/evals/run-retrieval-evals.ts"
   },
   "keywords": [],
   "author": "Favour Orukpe",

@@ -69,7 +69,7 @@ function shouldDropSseLine(line: string): boolean {
   }
 }
 
-function sseTypeFilterTransform(requestStart?: number): TransformStream<Uint8Array, Uint8Array> {
+function sseTypeFilterTransform(requestStart?: number, reqId?: string): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
@@ -94,7 +94,14 @@ function sseTypeFilterTransform(requestStart?: number): TransformStream<Uint8Arr
       // total_ms − ttft_ms − tool timings (Mastra terminal) = time spent in
       // model calls + memory/title-gen — the part a model change would affect.
       if (requestStart !== undefined) {
-        console.log(JSON.stringify({ event: "stream_complete", total_ms: Date.now() - requestStart }));
+        // req_id joins this line to its ttft line. Without it the two
+        // distributions can be summarized but never correlated, so "which
+        // requests were slow to FIRST token AND slow overall" is unanswerable.
+        console.log(JSON.stringify({
+          event:    "stream_complete",
+          req_id:   reqId,
+          total_ms: Date.now() - requestStart,
+        }));
       }
     },
   });
@@ -280,6 +287,9 @@ export async function POST(req: Request) {
   if (parentAllowlist) upstreamHeaders["x-episteme-namespace-allowlist"] = parentAllowlist.join(",");
 
   const requestStart = Date.now();
+  // Correlates the ttft and stream_complete lines for this request. Consumed by
+  // lib/telemetry/latency.ts; see `pnpm latency:report`.
+  const reqId = crypto.randomUUID();
 
   let upstreamResponse: Response;
   try {
@@ -330,6 +340,7 @@ export async function POST(req: Request) {
         const ttftMs = Date.now() - requestStart;
         console.log(JSON.stringify({
           event:        "ttft",
+          req_id:       reqId,
           ttft_ms:      ttftMs,
           role,
           meets_nfr101: ttftMs < 2000,
@@ -347,7 +358,7 @@ export async function POST(req: Request) {
   // can't reliably intercept it. Drop those frames here, at the one place
   // that already owns this stream, so malformed chunks never reach the
   // client parser at all.
-  const sanitizeTransform = sseTypeFilterTransform(requestStart);
+  const sanitizeTransform = sseTypeFilterTransform(requestStart, reqId);
 
   const instrumentedBody = upstreamResponse.body
     ? upstreamResponse.body.pipeThrough(ttftTransform).pipeThrough(sanitizeTransform)
