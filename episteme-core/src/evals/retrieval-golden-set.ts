@@ -195,6 +195,87 @@ export const KB_UNLABELLED: Array<Omit<KbCase, 'expectedSources' | 'why'>> = [
   { id: 'kb-todo-late-reg',         query: 'what happens if I miss the registration deadline',             role: 'student',     trustLevel: 2,                expect: 'retrieve' },
 ];
 
+// ── Entitlement cases — access control through the real retrieval path ────────
+
+/**
+ * Asserts the security property directly on what retrieval RETURNS, rather than
+ * on the pure gate functions (retrieval-gate.test.ts already covers those) or by
+ * comparing two callers' result sets.
+ *
+ * WHY NOT SET COMPARISON: the obvious check — "a restricted caller's results
+ * must be a subset of a privileged caller's" — is unsound here. The privileged
+ * caller searches MORE namespaces, so RETRIEVAL_MAX_RESULTS truncation can push
+ * a legitimately-shared document out of their top-k while it stays in the
+ * restricted caller's. That reports a leak where none exists, and a security
+ * check that cries wolf gets muted.
+ *
+ * WHAT IS ASSERTED INSTEAD, per returned chunk:
+ *   1. it is findable in a namespace this caller is entitled to search
+ *      (a chunk from a forbidden namespace cannot be fetched from an allowed
+ *      one, so absence is the detection);
+ *   2. its `roles` metadata intersects the caller's verified roles;
+ *   3. its `institutionId` is either the caller's or GLOBAL_INSTITUTION.
+ *
+ * Each is a property of the individual result, so truncation cannot produce a
+ * false alarm, and a violation is unambiguously a leak.
+ *
+ * Queries are deliberately BROAD. A narrow query that retrieves nothing makes
+ * the check pass vacuously; broad ones maximise the number of chunks actually
+ * examined. The runner reports how many chunks it inspected so a vacuous pass
+ * is visible rather than silent.
+ */
+export interface EntitlementCase {
+  id: string;
+  query: string;
+  roles: Role[];
+  trustLevel: number;
+  institutionId?: string;
+  namespaceAllowlist?: string[];
+  why: string;
+}
+
+export const KB_ENTITLEMENT_CASES: EntitlementCase[] = [
+  {
+    id: 'entitlement-prospective-public-tier',
+    query: 'university policy fees registration requirements students',
+    roles: ['prospective'],
+    trustLevel: 1,
+    why:
+      'The least-privileged caller against the broadest possible query. Nothing ' +
+      'returned may come from academic-policy, financial-aid or staff-internal, ' +
+      'which trust 1 forbids outright.',
+  },
+  {
+    id: 'entitlement-student-trust2',
+    query: 'academic policy grading fees payment deadline',
+    roles: ['student'],
+    trustLevel: 2,
+    why:
+      'Trust 2 is the unverified student. academic-policy and financial-aid open ' +
+      'only at trust 3, so a document from either surfacing here is a ceiling breach.',
+  },
+  {
+    id: 'entitlement-staff-claimed-at-low-trust',
+    query: 'internal staff memo policy confidential procedure',
+    roles: ['staff'],
+    trustLevel: 1,
+    why:
+      'A claimed staff role at trust 1 — the exact shape the trust ceiling exists ' +
+      'to defeat. staff-internal must stay unreachable regardless of the role claim.',
+  },
+  {
+    id: 'entitlement-parent-allowlist',
+    query: 'fees payment academic results hostel',
+    roles: ['parent'],
+    trustLevel: 3,
+    namespaceAllowlist: ['admissions', 'general'],
+    why:
+      'A parent whose link grants neither fee nor academic visibility. The ' +
+      'allowlist may only narrow, so financial-aid and academic-policy content ' +
+      'must not appear even though trust 3 would otherwise permit them.',
+  },
+];
+
 /** Cases whose expectations are known and therefore scored. */
 export const LABELLED_KB_CASES = KB_CASES;
 
