@@ -1,5 +1,6 @@
 import { UnstructuredClient } from 'unstructured-client';
 import { Strategy } from 'unstructured-client/sdk/models/shared/partitionparameters';
+import { htmlTableToMarkdown, isTableLine } from './table-markdown';
 
 
 export interface ProcessedElement {
@@ -51,32 +52,90 @@ export async function processDocument(
   }
 
   return elements
-    .map((el: Record<string, any>) => ({
-      text: (el['text'] as string) ?? '',
-      type: (el['type'] as string) ?? 'Unknown',
-      pageNumber: (el['metadata']?.['page_number'] as number | null) ?? null,
-      category,
-    }))
+    .map((el: Record<string, any>) => {
+      const type = (el['type'] as string) ?? 'Unknown';
+      const text = (el['text'] as string) ?? '';
+      return {
+        text: preferTableMarkdown(type, text, el['metadata']?.['text_as_html'] as unknown),
+        type,
+        pageNumber: (el['metadata']?.['page_number'] as number | null) ?? null,
+        category,
+      };
+    })
     .filter((el: ProcessedElement) => el.text.trim().length > 0);
+}
+
+/**
+ * For a Table element, prefer the grid Unstructured already reconstructed.
+ *
+ * `text` on a Table is every cell joined by spaces — complete, but with the
+ * columns dissolved. `metadata.text_as_html` is the same data with its rows
+ * and cells intact, and it arrives in the response we have already paid for.
+ * Reading only `text` threw that away and left retrieval to infer columns by
+ * counting, which stops working the moment a chunk boundary separates a
+ * header from its rows.
+ *
+ * ADDITIVE: any element that is not a Table, or whose HTML is missing or
+ * unparseable, returns exactly the text this function was given. The
+ * conversion can only ever upgrade a Table; it can never empty one.
+ */
+export function preferTableMarkdown(type: string, text: string, html: unknown): string {
+  if (type !== 'Table') return text;
+  if (typeof html !== 'string' || html.trim().length === 0) return text;
+  return htmlTableToMarkdown(html) ?? text;
 }
 
 /**
  * Process Markdown content — no API call needed.
  * Caller passes file content as a string.
+ *
+ * Consecutive pipe-table lines are emitted as ONE Table element rather than
+ * one element per line. Every other line keeps its previous handling.
+ *
+ * Why the grouping matters: elementsToText joins elements with a blank line,
+ * so a per-line table came out as
+ *
+ *     | Item | Fee |
+ *
+ *     | --- | --- |
+ *
+ *     | ICT Levy | 6,000 |
+ *
+ * — a table no longer contiguous, and therefore invisible to the chunker's
+ * table handling, which needs the rows adjacent to keep a header with them.
  */
 export function processMarkdown(content: string, category: string): ProcessedElement[] {
-  return content
+  const lines = content
     .split('\n')
     .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .map((line) => {
-      let type = 'NarrativeText';
-      if (line.startsWith('#'))              type = 'Title';
-      else if (/^[-*]\s/.test(line))         type = 'ListItem';
-      else if (line.startsWith('|'))         type = 'Table';
-      else if (/^\d+\.\s/.test(line))        type = 'ListItem';
-      return { text: line, type, pageNumber: null, category };
-    });
+    .filter((line) => line.length > 0);
+
+  const elements: ProcessedElement[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+
+    if (isTableLine(line)) {
+      const run: string[] = [];
+      while (i < lines.length && isTableLine(lines[i]!)) {
+        run.push(lines[i]!);
+        i++;
+      }
+      i--; // the for-loop's i++ consumes the first non-table line otherwise
+      elements.push({ text: run.join('\n'), type: 'Table', pageNumber: null, category });
+      continue;
+    }
+
+    let type = 'NarrativeText';
+    if (line.startsWith('#'))       type = 'Title';
+    else if (/^[-*]\s/.test(line))  type = 'ListItem';
+    else if (line.startsWith('|'))  type = 'Table';
+    else if (/^\d+\.\s/.test(line)) type = 'ListItem';
+
+    elements.push({ text: line, type, pageNumber: null, category });
+  }
+
+  return elements;
 }
 
 /**

@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import type { PreviewReport } from "@/lib/harvest/plan";
 import { countMatches, segmentByMatches } from "@/lib/harvest/text-search";
+import { splitIntoRuns } from "@/lib/harvest/markdown-table";
 
 type View = "document" | "chunks";
 
@@ -61,6 +62,67 @@ function Highlighted({ text, query }: { text: string; query: string }) {
         ),
       )}
     </>
+  );
+}
+
+/**
+ * Render chunk text, drawing any pipe table as an actual grid.
+ *
+ * Ingestion stores tables as Markdown pipe tables, which is what retrieval and
+ * the model see. Showing them as raw `| a | b |` lines in a proportional font
+ * would leave the reviewer counting pipes to answer the one question a preview
+ * is for — is this value under the right column. A real <table> answers it at
+ * a glance, and the horizontal scroll keeps a wide table from breaking the
+ * page rather than squeezing columns into illegibility.
+ */
+function ChunkBody({ text, query }: { text: string; query: string }) {
+  const runs = splitIntoRuns(text);
+
+  return (
+    <div className="space-y-3">
+      {runs.map((run, i) =>
+        run.kind === "prose" ? (
+          <p
+            // Runs are positional slices of one immutable string; there is no
+            // reorder for a key to survive.
+            // biome-ignore lint/suspicious/noArrayIndexKey: positional by nature
+            key={i}
+            className="text-sm leading-relaxed text-foreground/90 whitespace-pre-wrap break-words"
+          >
+            <Highlighted text={run.text} query={query} />
+          </p>
+        ) : (
+          // biome-ignore lint/suspicious/noArrayIndexKey: positional by nature
+          <div key={i} className="overflow-x-auto rounded-lg border">
+            <table className="w-full border-collapse text-xs">
+              <thead>
+                <tr className="bg-muted/60">
+                  {run.table.header.map((cell, c) => (
+                    // biome-ignore lint/suspicious/noArrayIndexKey: column position IS the identity
+                    <th key={c} className="border-b px-3 py-2 text-left font-semibold whitespace-nowrap">
+                      <Highlighted text={cell} query={query} />
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {run.table.rows.map((row, r) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: row position IS the identity
+                  <tr key={r} className="border-b last:border-b-0 even:bg-muted/20">
+                    {row.map((cell, c) => (
+                      // biome-ignore lint/suspicious/noArrayIndexKey: column position IS the identity
+                      <td key={c} className="px-3 py-1.5 align-top">
+                        <Highlighted text={cell} query={query} />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ),
+      )}
+    </div>
   );
 }
 
@@ -218,9 +280,7 @@ export function PreviewDrawer({
                       <div className="flex-1 h-px bg-border" />
                     </div>
                   )}
-                  <p className="text-sm leading-relaxed text-foreground/90 whitespace-pre-wrap break-words">
-                    <Highlighted text={chunk.text} query={query} />
-                  </p>
+                  <ChunkBody text={chunk.text} query={query} />
                 </div>
               ))}
             </article>
@@ -238,9 +298,9 @@ export function PreviewDrawer({
                       <span className="text-[11px] text-muted-foreground">page {chunk.pageNumber}</span>
                     )}
                   </div>
-                  <p className="px-3 py-2.5 text-xs leading-relaxed text-foreground/85 whitespace-pre-wrap break-words">
-                    <Highlighted text={chunk.text} query={query} />
-                  </p>
+                  <div className="px-3 py-2.5">
+                    <ChunkBody text={chunk.text} query={query} />
+                  </div>
                 </div>
               ))}
             </div>
