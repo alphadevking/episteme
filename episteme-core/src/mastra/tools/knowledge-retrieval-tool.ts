@@ -2,9 +2,10 @@ import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { embedTexts, buildSparseVector } from '../ingestion/embedder';
-import { RETRIEVAL_CONFIG } from '../config';
+import { RETRIEVAL_CONFIG, RERANK_CONFIG } from '../config';
 import { resolveNamespacesForRoles, buildRetrievalFilter } from '../security/retrieval-gate';
 import { getSessionContext } from '../server/session-context';
+import { rerankChunks } from './rerank';
 
 
 function getEnv(key: string): string {
@@ -92,6 +93,60 @@ function contentTime(updatedAt: unknown): number {
 
 const pinecone = new Pinecone({ apiKey: getEnv('PINECONE_API_KEY') });
 const pineconeIndex = pinecone.index({ name: getEnv('PINECONE_INDEX') });
+
+type ScoredMatch = { score: number; metadata: Record<string, unknown> };
+
+/**
+ * Cross-encoder rerank of the retrieved candidates, via Pinecone's hosted
+ * inference. Decision rules live in rerank.ts (pure, unit tested); this only
+ * supplies the provider call and the text field.
+ *
+ * `emptiedByRerank` distinguishes "the judge rejected everything" — a real
+ * abstention signal — from "rerank is off or failed", which must not abstain.
+ */
+async function rerankMatches(
+  query: string,
+  matches: ScoredMatch[],
+): Promise<{ matches: ScoredMatch[]; emptiedByRerank: boolean }> {
+  if (!RERANK_CONFIG.enabled || matches.length === 0) {
+    return { matches, emptiedByRerank: false };
+  }
+
+  const candidates = matches.slice(0, RERANK_CONFIG.topN).map((m) => ({
+    match: m,
+    // The child chunk is what was embedded and is tighter than the parent, so
+    // it is the fairer unit for a relevance judgement.
+    text: String(m.metadata['text'] ?? m.metadata['parentText'] ?? ''),
+  }));
+
+  const outcome = await rerankChunks(query, candidates, {
+    enabled: true,
+    minScore: RERANK_CONFIG.minScore,
+    rerankFn: async (q, documents) => {
+      const response = await pinecone.inference.rerank({
+        model: RERANK_CONFIG.model,
+        query: q,
+        documents,
+        topN: documents.length,
+        returnDocuments: false,
+      });
+      return (response.data ?? []).map((row) => ({
+        index: row.index as number,
+        score: row.score as number,
+      }));
+    },
+  });
+
+  if (outcome.status !== 'reranked') {
+    // Disabled, empty, or failed — keep embedding order, never abstain on it.
+    return { matches, emptiedByRerank: false };
+  }
+
+  return {
+    matches: outcome.results.map((c) => c.match),
+    emptiedByRerank: outcome.results.length === 0,
+  };
+}
 
 export async function retrieveKnowledge(inputData: {
   query: string;
@@ -203,10 +258,26 @@ export async function retrieveKnowledge(inputData: {
     return bTime - aTime;
   });
 
+  // Cross-encoder pass over the top candidates BEFORE parent dedupe and
+  // capping, so the model sees the passages a relevance judge actually chose
+  // rather than the ones a bi-encoder happened to embed closest. Fail-soft:
+  // any rerank problem leaves `allMatches` in embedding order. See rerank.ts.
+  const reranked = await rerankMatches(query, allMatches);
+  if (reranked.emptiedByRerank) {
+    // Every candidate was judged irrelevant — this is abstention, and it is the
+    // case embedding similarity could not detect ("how do I apply to Harvard").
+    return {
+      found: false,
+      results: [],
+      message: 'No specific information was found for that query. Advise the user to contact the relevant office directly.',
+    };
+  }
+  const orderedMatches = reranked.matches;
+
   const seenParents = new Set<string>();
   const retrievalResults: KnowledgeRetrievalResult[] = [];
 
-  for (const match of allMatches) {
+  for (const match of orderedMatches) {
     if (retrievalResults.length >= RETRIEVAL_CONFIG.maxResults) break;
     const parentId = match.metadata['parentId'] as string;
     if (seenParents.has(parentId)) continue;

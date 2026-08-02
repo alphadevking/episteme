@@ -20,10 +20,12 @@
  * on live services, so it must never gate `pnpm test`. The scoring rules that
  * must not drift are pure and unit-tested in retrieval-metrics.test.ts.
  */
-import { RETRIEVAL_CONFIG } from '../mastra/config';
+import { RETRIEVAL_CONFIG, RERANK_CONFIG } from '../mastra/config';
 import { resolvePlatformNamespaces } from '../mastra/security/retrieval-gate';
 import { searchPlatformDocs } from '../mastra/tools/platform-docs-tier';
 import {
+  analyzeSeparation,
+  classifyAtThreshold,
   scoreCase,
   summarize,
   matchesLabel,
@@ -52,6 +54,7 @@ const args   = process.argv.slice(2);
 const LABEL  = args.includes('--label');
 const STRICT = args.includes('--strict');
 const CORPUS = args.includes('--corpus');
+const SCORES = args.includes('--scores');
 
 /**
  * The tenant whose documents the eval should be able to see.
@@ -224,6 +227,271 @@ async function runKbCases() {
   }
 
   return { summary: summarize(retrievalScores, abstentionResults), failures };
+}
+
+// ── Threshold calibration (--scores) ─────────────────────────────────────────
+
+/**
+ * Out-of-domain probes. Deliberately varied — everyday topics, other countries'
+ * institutions, technical questions, and one that names a local place, because
+ * a dense retriever will match "Benin City" against a Uniben corpus on the
+ * location alone. A calibration set of only silly questions would flatter the
+ * system.
+ */
+const OUT_OF_DOMAIN_PROBES = [
+  'how do I bake sourdough bread at home',
+  'what is the capital of France',
+  'write a python function that sorts a list of numbers',
+  'what is the weather forecast for Benin City tomorrow',
+  'who won the champions league final',
+  'how do I change a flat tyre on my car',
+  'what are the symptoms of malaria',
+  'best restaurants near me tonight',
+  'how do I apply to Harvard University',
+  'explain quantum entanglement simply',
+];
+
+/**
+ * Measure the score distributions that a relevance threshold has to separate.
+ *
+ * Every probe runs as the SAME full-privilege caller, so the only variable is
+ * the query — access scoping is measured elsewhere and would otherwise confound
+ * the numbers.
+ *
+ * In-domain probes are the labelled and unlabelled institutional questions.
+ * Their expected DOCUMENT is unknown for most, but that does not matter here:
+ * calibration only needs "should retrieve something" vs "should retrieve
+ * nothing", and that much is known for every query by construction.
+ */
+async function runScoreCalibration() {
+  console.log(bar('SCORE CALIBRATION (read-only)'));
+
+  if (!hasKbCredentials()) {
+    console.log('SKIPPED — KB credentials not set.');
+    return;
+  }
+  if (!EVAL_INSTITUTION_ID) {
+    console.log(
+      'WARNING: EVAL_INSTITUTION_ID is not set, so only GLOBAL documents are visible.\n' +
+      'Scores below will be meaningless if your corpus is institution-scoped. Run --corpus.\n',
+    );
+  }
+
+  const retrieveKnowledge = await loadRetriever();
+
+  const inDomainQueries = [
+    ...KB_CASES.filter((c) => c.expect === 'retrieve').map((c) => c.query),
+    ...KB_UNLABELLED.map((c) => c.query),
+    ...CONTROL_QUERIES,
+  ];
+
+  async function score(query: string): Promise<number> {
+    const res = await retrieveKnowledge({
+      query,
+      role: 'staff',
+      roles: [...ALL_ROLES],
+      trustLevel: 4,
+      institutionId: EVAL_INSTITUTION_ID,
+    });
+    // Nothing retrieved at all → 0. Such a query cannot be rescued by ANY
+    // threshold, and must not be mistaken for "scored low".
+    return res.found ? res.maxScore : 0;
+  }
+
+  const inDomain: Array<{ query: string; score: number }> = [];
+  for (const query of inDomainQueries) inDomain.push({ query, score: await score(query) });
+
+  const outOfDomain: Array<{ query: string; score: number }> = [];
+  for (const query of OUT_OF_DOMAIN_PROBES) outOfDomain.push({ query, score: await score(query) });
+
+  const line = (entry: { query: string; score: number }) =>
+    `  ${entry.score.toFixed(3)}  ${entry.query.slice(0, 62)}`;
+
+  console.log('\nIN-DOMAIN (should retrieve) — sorted ascending, worst first');
+  for (const e of [...inDomain].sort((a, b) => a.score - b.score)) console.log(line(e));
+
+  console.log('\nOUT-OF-DOMAIN (should abstain) — sorted descending, worst first');
+  for (const e of [...outOfDomain].sort((a, b) => b.score - a.score)) console.log(line(e));
+
+  // With reranking on, a 0.000 means "the cross-encoder rejected it", not "it
+  // scored low". Feeding those zeros into a threshold analysis would report a
+  // huge margin and recommend an embedding threshold derived from the rerank
+  // layer's decisions — a number that means nothing. Measure the rerank score
+  // distribution instead, which is the floor that is actually in play.
+  if (RERANK_CONFIG.enabled) {
+    await reportRerankCalibration(inDomain, outOfDomain);
+    return;
+  }
+
+  const analysis = analyzeSeparation(
+    inDomain.map((e) => e.score).filter((s) => s > 0), // a zero is a retrieval miss, not a score
+    outOfDomain.map((e) => e.score),
+  );
+
+  console.log('\n' + '-'.repeat(78));
+  console.log(`Current RETRIEVAL_RELEVANCE_THRESHOLD = ${RETRIEVAL_CONFIG.relevanceThreshold}`);
+  const current = classifyAtThreshold(
+    inDomain.map((e) => e.score).filter((s) => s > 0),
+    outOfDomain.map((e) => e.score),
+    RETRIEVAL_CONFIG.relevanceThreshold,
+  );
+  console.log(
+    `  at the current value: ${current.falseAnswer} out-of-domain queries would be ANSWERED, ` +
+    `${current.falseAbstain} in-domain queries abstained (accuracy ${pct(current.accuracy)})`,
+  );
+
+  console.log(`\nlowest in-domain   ${analysis.inDomainMin.toFixed(3)}`);
+  console.log(`highest out-of-domain ${analysis.outOfDomainMax.toFixed(3)}`);
+  console.log(`margin             ${analysis.margin >= 0 ? '+' : ''}${analysis.margin.toFixed(3)}`);
+
+  if (analysis.cleanlySeparable) {
+    console.log(
+      `\nSEPARABLE. A threshold of ${analysis.bestThreshold.toFixed(3)} classifies every probe ` +
+      'correctly.\nSet RETRIEVAL_RELEVANCE_THRESHOLD to it, then re-run the eval — the ' +
+      'abstention\nand retrieve cases together are what keep it honest.',
+    );
+  } else {
+    console.log(
+      `\nNOT SEPARABLE. Out-of-domain queries score above in-domain ones, so NO single\n` +
+      `threshold classifies everything correctly. The best available is ` +
+      `${analysis.bestThreshold.toFixed(3)}, which still\nanswers ${analysis.falseAnswer} ` +
+      `out-of-domain and abstains on ${analysis.falseAbstain} in-domain ` +
+      `(accuracy ${pct(analysis.accuracy)}).\n\n` +
+      'This is evidence that embedding similarity alone cannot express relevance for\n' +
+      'this corpus. Tuning the number trades one error for the other; the fix is a\n' +
+      'better signal — hybrid retrieval (sparse vectors are already computed at\n' +
+      'ingestion; see RETRIEVAL_CONFIG.alpha) or a reranker over the top-k.',
+    );
+  }
+
+  const misses = inDomain.filter((e) => e.score === 0);
+  if (misses.length > 0) {
+    console.log(`\n${misses.length} in-domain quer(ies) retrieved NOTHING — no threshold can fix these:`);
+    for (const m of misses) console.log(`  - ${m.query}`);
+  }
+}
+
+/**
+ * Measure the RAW cross-encoder scores, so RERANK_MIN_SCORE is chosen from data
+ * rather than from which queries happened to survive the current floor.
+ *
+ * The production path applies the floor and discards what it rejects, so a
+ * query that returns nothing is indistinguishable from one that scored just
+ * below the cutoff. This reruns the same candidates with NO floor and reports
+ * the best score each query achieved, turning "it abstained" into "it scored
+ * 0.28, and your floor is 0.30".
+ *
+ * Retrieval is reproduced directly here (embed → query → rerank) rather than
+ * called through retrieveKnowledge, because that function deliberately does not
+ * expose rerank scores. This is a measurement of the reranker, not a test of
+ * the production path — the eval's abstention cases remain the test.
+ */
+async function reportRerankCalibration(
+  inDomain: Array<{ query: string; score: number }>,
+  outOfDomain: Array<{ query: string; score: number }>,
+) {
+  const { Pinecone } = await import('@pinecone-database/pinecone');
+  const { embedTexts } = await import('../mastra/ingestion/embedder');
+  const { resolveNamespacesForRoles, buildRetrievalFilter } =
+    await import('../mastra/security/retrieval-gate');
+
+  const pc = new Pinecone({ apiKey: process.env['PINECONE_API_KEY']! });
+  const index = pc.index({ name: process.env['PINECONE_INDEX']! });
+  const namespaces = resolveNamespacesForRoles({ roles: [...ALL_ROLES], trustLevel: 4 });
+  const filter = buildRetrievalFilter({ role: [...ALL_ROLES], institutionId: EVAL_INSTITUTION_ID });
+
+  /** Best cross-encoder score for a query, with no floor applied. */
+  async function topRerankScore(query: string): Promise<number> {
+    const [vec] = await embedTexts([query]);
+    const candidates: string[] = [];
+    for (const ns of namespaces) {
+      const res = await index.namespace(ns).query({
+        vector: vec!, topK: RETRIEVAL_CONFIG.topK, includeMetadata: true, filter,
+      });
+      for (const m of res.matches ?? []) {
+        const text = String((m.metadata ?? {})['text'] ?? '');
+        if (text) candidates.push(text);
+      }
+    }
+    if (candidates.length === 0) return 0;
+
+    const documents = candidates.slice(0, RERANK_CONFIG.topN);
+    const response = await pc.inference.rerank({
+      model: RERANK_CONFIG.model,
+      query,
+      documents,
+      topN: documents.length,
+      returnDocuments: false,
+    });
+    const scores = (response.data ?? []).map((r) => Number(r.score ?? 0));
+    return scores.length ? Math.max(...scores) : 0;
+  }
+
+  console.log('\n' + '-'.repeat(78));
+  console.log(`RERANK CALIBRATION — model ${RERANK_CONFIG.model}, current floor ${RERANK_CONFIG.minScore}`);
+  console.log('Raw cross-encoder scores, NO floor applied.\n');
+
+  const inScores: number[] = [];
+  console.log('IN-DOMAIN (should retrieve)');
+  for (const e of inDomain) {
+    const score = await topRerankScore(e.query);
+    inScores.push(score);
+    const verdict = score < RERANK_CONFIG.minScore ? '  ← REJECTED by current floor' : '';
+    console.log(`  ${score.toFixed(4)}  ${e.query.slice(0, 58)}${verdict}`);
+  }
+
+  const outScores: number[] = [];
+  console.log('\nOUT-OF-DOMAIN (should abstain)');
+  for (const e of outOfDomain) {
+    const score = await topRerankScore(e.query);
+    outScores.push(score);
+    const verdict = score >= RERANK_CONFIG.minScore ? '  ← ANSWERED despite current floor' : '';
+    console.log(`  ${score.toFixed(4)}  ${e.query.slice(0, 58)}${verdict}`);
+  }
+
+  const analysis = analyzeSeparation(inScores, outScores);
+  console.log('\n' + '-'.repeat(78));
+  console.log(`lowest in-domain      ${analysis.inDomainMin.toFixed(4)}`);
+  console.log(`highest out-of-domain ${analysis.outOfDomainMax.toFixed(4)}`);
+  console.log(`margin                ${analysis.margin >= 0 ? '+' : ''}${analysis.margin.toFixed(4)}`);
+
+  const current = classifyAtThreshold(inScores, outScores, RERANK_CONFIG.minScore);
+  console.log(
+    `\nat the current floor (${RERANK_CONFIG.minScore}): ` +
+    `${current.falseAnswer} out-of-domain answered, ${current.falseAbstain} in-domain abstained ` +
+    `(accuracy ${pct(current.accuracy)})`,
+  );
+
+  if (analysis.cleanlySeparable) {
+    console.log(
+      `\nSEPARABLE on rerank score. Any floor in (${analysis.outOfDomainMax.toFixed(4)}, ` +
+      `${analysis.inDomainMin.toFixed(4)}] classifies every probe correctly.\n` +
+      `Suggested RERANK_MIN_SCORE=${analysis.bestThreshold.toFixed(4)} — pick nearer the LOW end ` +
+      'of that range\nto leave headroom for genuine queries not in this sample.',
+    );
+  } else {
+    console.log(
+      `\nNOT SEPARABLE on rerank score either. Best floor ${analysis.bestThreshold.toFixed(4)} ` +
+      `still answers ${analysis.falseAnswer}\nout-of-domain and abstains on ${analysis.falseAbstain} ` +
+      'in-domain (accuracy ' + pct(analysis.accuracy) + ').\n\n' +
+      'Before blaming the reranker, check whether the "in-domain" queries it rejects are\n' +
+      'answerable from THIS corpus at all — a question about fees is correctly abstained\n' +
+      'on when no fee document has been ingested. Confirm with --label, and move any\n' +
+      'genuinely-unanswerable query out of the in-domain set.',
+    );
+  }
+
+  const lowInDomain = inDomain
+    .map((e, i) => ({ query: e.query, score: inScores[i]! }))
+    .filter((e) => e.score < RERANK_CONFIG.minScore);
+  if (lowInDomain.length > 0) {
+    console.log(
+      `\n${lowInDomain.length} in-domain quer(ies) fall below the current floor. For each, decide:\n` +
+      'is the answer actually IN the corpus (→ lower the floor) or not (→ correct abstention,\n' +
+      'and the query does not belong in the in-domain set)?',
+    );
+    for (const e of lowInDomain) console.log(`  ${e.score.toFixed(4)}  ${e.query}`);
+  }
 }
 
 // ── Corpus reachability control ──────────────────────────────────────────────
@@ -526,6 +794,10 @@ function report(
 async function main() {
   if (CORPUS) {
     await inspectCorpus();
+    return;
+  }
+  if (SCORES) {
+    await runScoreCalibration();
     return;
   }
   if (LABEL) {

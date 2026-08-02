@@ -117,10 +117,70 @@ export const RETRIEVAL_CONFIG = {
   /**
    * Minimum maxScore to treat results as genuinely relevant (not just "above noise floor").
    * When the best match scores below this, retrieval returns abstention even if found=true.
-   * Prevents off-topic chunks that barely clear scoreThreshold from surfacing as high-confidence.
-   * 0.55 is calibrated for mistral-embed — tune up to cut false positives, down if over-abstaining.
+   *
+   * MEASURED, not guessed (pnpm eval:retrieval --scores, 2026-08-02, 454-vector corpus):
+   *
+   *   in-domain (12 queries)      0.694 – 0.808
+   *   out-of-domain (10 probes)   0.611 – 0.744
+   *
+   * At the previous value of 0.55, ALL TEN out-of-domain probes were answered —
+   * "how do I bake sourdough bread" returned handbook chunks as VERIFIED SOURCES
+   * at confidence=high. The gate was effectively inert (54.5% accuracy).
+   *
+   * 0.68 sits just under the lowest observed in-domain score and cuts
+   * out-of-domain answers from 10/10 to 3/10 with no in-domain loss on that
+   * sample.
+   *
+   * THIS IS TRIAGE, NOT THE FIX. The two distributions OVERLAP (margin -0.051):
+   * "weather in Benin City" (0.744) and "how do I apply to Harvard University"
+   * (0.712) both outscore the weakest genuine query ("who is the current vice
+   * chancellor", 0.694). No scalar cutoff can separate them, because both share
+   * heavy vocabulary with the corpus while answering nothing in it. The real
+   * signal is a cross-encoder — see RERANK_CONFIG below, which is what actually
+   * targets that class.
+   *
+   * Note the thin margin: 0.68 leaves only ~0.014 below the weakest genuine
+   * query, on a sample of 12. Re-run --scores after labelling more in-domain
+   * queries before trusting it further, and treat 0.694 as a canary.
    */
-  relevanceThreshold: envFloat('RETRIEVAL_RELEVANCE_THRESHOLD', 0.55),
+  relevanceThreshold: envFloat('RETRIEVAL_RELEVANCE_THRESHOLD', 0.68),
+} as const;
+
+// ---------------------------------------------------------------------------
+// Reranking — cross-encoder relevance over the retrieved candidates
+// ---------------------------------------------------------------------------
+/**
+ * The measured fix for what relevanceThreshold cannot do (see its comment).
+ *
+ * A bi-encoder embeds query and document separately, so it scores topical
+ * overlap: "weather in Benin City" hits a Uniben handbook at 0.744 because both
+ * are about Benin and a university. A cross-encoder reads the pair together and
+ * scores whether the passage ANSWERS the query, which is the signal the score
+ * distributions say is missing.
+ *
+ * Runs through Pinecone's hosted inference — no new vendor, same API key.
+ *
+ * Costs one extra network round-trip per retrieval. It is FAIL-SOFT: any error
+ * falls back to embedding order (see rerank.ts), so it can degrade relevance
+ * but never break an answer.
+ */
+export const RERANK_CONFIG = {
+  /**
+   * Off by default so this ships dark: enable it deliberately, after running
+   * `pnpm eval:retrieval --scores` to calibrate minScore against YOUR corpus.
+   * A relevance floor copied from someone else's data is how 0.55 happened.
+   */
+  enabled: envBool('RERANK_ENABLED', false),
+  /** Pinecone-hosted cross-encoder. */
+  model: envString('RERANK_MODEL', 'bge-reranker-v2-m3'),
+  /**
+   * Minimum cross-encoder score to keep a chunk. Unlike embedding similarity,
+   * these scores are calibrated probabilities of relevance, so a low value is
+   * genuinely low — but the right cutoff is still corpus-specific. Measure it.
+   */
+  minScore: envFloat('RERANK_MIN_SCORE', 0.3),
+  /** Candidates to rerank. More candidates = better recall, slightly more cost. */
+  topN: envInt('RERANK_TOP_N', 10),
 } as const;
 
 // ---------------------------------------------------------------------------

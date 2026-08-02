@@ -11,6 +11,8 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  analyzeSeparation,
+  classifyAtThreshold,
   matchesLabel,
   precisionAtK,
   recallAtK,
@@ -186,6 +188,60 @@ describe('scoreCase', () => {
     const wrongFirst = scoreCase([item('other.pdf'), item('handbook.pdf')], ['handbook'], 3);
     assert.equal(wrongFirst.precisionAt1, 0);
     assert.equal(wrongFirst.precision, 0.5);
+  });
+});
+
+describe('analyzeSeparation — threshold calibration', () => {
+  test('clean separation is reported with a positive margin', () => {
+    const analysis = analyzeSeparation([0.80, 0.85, 0.90], [0.40, 0.50, 0.55]);
+    assert.equal(analysis.cleanlySeparable, true);
+    assert.ok(analysis.margin > 0);
+    assert.equal(analysis.falseAbstain, 0);
+    assert.equal(analysis.falseAnswer, 0);
+    assert.equal(analysis.accuracy, 1);
+    // Must exclude the top out-of-domain score and admit the lowest in-domain one.
+    assert.ok(analysis.bestThreshold > 0.55 && analysis.bestThreshold <= 0.80);
+  });
+
+  /**
+   * The case that actually matters for this corpus: out-of-domain queries score
+   * ABOVE some in-domain ones, so no cutoff classifies everything correctly.
+   * Reporting a confident threshold here would be the wrong answer dressed up
+   * as a measurement.
+   */
+  test('overlap is reported as not cleanly separable, with a negative margin', () => {
+    const analysis = analyzeSeparation([0.60, 0.70, 0.80], [0.50, 0.66, 0.74]);
+    assert.equal(analysis.cleanlySeparable, false);
+    assert.ok(analysis.margin < 0);
+    assert.ok(analysis.accuracy < 1, 'no threshold should achieve perfect accuracy under overlap');
+    assert.ok(analysis.falseAbstain + analysis.falseAnswer > 0);
+  });
+
+  /**
+   * Fail closed: with equal accuracy available on either side of a gap, prefer
+   * the higher threshold. Abstaining on a real question is recoverable;
+   * answering an out-of-domain question from unrelated documents is fabrication.
+   */
+  test('ties are broken toward the higher threshold', () => {
+    const analysis = analyzeSeparation([0.90], [0.30]);
+    assert.equal(analysis.accuracy, 1);
+    assert.ok(
+      analysis.bestThreshold > 0.30,
+      `expected a threshold above the out-of-domain score, got ${analysis.bestThreshold}`,
+    );
+  });
+
+  test('classifyAtThreshold counts both error directions', () => {
+    const result = classifyAtThreshold([0.4, 0.9], [0.3, 0.8], 0.5);
+    assert.equal(result.falseAbstain, 1); // 0.4 in-domain falls below
+    assert.equal(result.falseAnswer, 1);  // 0.8 out-of-domain clears
+    assert.equal(result.accuracy, 0.5);
+  });
+
+  test('empty inputs do not throw or claim separability', () => {
+    const analysis = analyzeSeparation([], []);
+    assert.equal(analysis.cleanlySeparable, false);
+    assert.equal(analysis.accuracy, 0);
   });
 });
 

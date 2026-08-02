@@ -159,6 +159,89 @@ export function mean(values: number[]): number {
   return values.length === 0 ? 0 : values.reduce((a, b) => a + b, 0) / values.length;
 }
 
+// ── Threshold calibration ────────────────────────────────────────────────────
+
+export interface SeparationAnalysis {
+  /** True when every in-domain score exceeds every out-of-domain score. */
+  cleanlySeparable: boolean;
+  inDomainMin: number;
+  outOfDomainMax: number;
+  /** The threshold that classifies the most queries correctly. */
+  bestThreshold: number;
+  /** In-domain queries that would be wrongly abstained on at bestThreshold. */
+  falseAbstain: number;
+  /** Out-of-domain queries that would be wrongly answered at bestThreshold. */
+  falseAnswer: number;
+  accuracy: number;
+  /** Margin between the two groups; negative when they overlap. */
+  margin: number;
+}
+
+/** Classification outcome of a single candidate threshold. */
+export function classifyAtThreshold(
+  inDomain: number[],
+  outOfDomain: number[],
+  threshold: number,
+): { falseAbstain: number; falseAnswer: number; accuracy: number } {
+  const falseAbstain = inDomain.filter((s) => s < threshold).length;
+  const falseAnswer  = outOfDomain.filter((s) => s >= threshold).length;
+  const total = inDomain.length + outOfDomain.length;
+  return {
+    falseAbstain,
+    falseAnswer,
+    accuracy: total === 0 ? 0 : (total - falseAbstain - falseAnswer) / total,
+  };
+}
+
+/**
+ * Find the relevance threshold best separating queries that SHOULD retrieve
+ * from queries that should abstain.
+ *
+ * The honest outcome of this function is often "no threshold works". When the
+ * groups overlap, `cleanlySeparable` is false and `margin` is negative — that
+ * is the evidence that a scalar cutoff on embedding similarity cannot express
+ * relevance for this corpus, and that the fix is a better signal (hybrid
+ * retrieval, reranking) rather than a better number.
+ *
+ * Ties are broken toward the HIGHER threshold: given equal accuracy, abstaining
+ * on a real question is a worse-but-recoverable outcome ("no verified
+ * information found"), while answering an out-of-domain question from unrelated
+ * documents is a fabrication. Fail closed.
+ */
+export function analyzeSeparation(inDomain: number[], outOfDomain: number[]): SeparationAnalysis {
+  const inDomainMin    = inDomain.length    ? Math.min(...inDomain)    : 0;
+  const outOfDomainMax = outOfDomain.length ? Math.max(...outOfDomain) : 0;
+
+  // Candidates: every observed score, plus a step above each out-of-domain
+  // score (the threshold must EXCEED it to exclude it).
+  const candidates = [...new Set([
+    ...inDomain,
+    ...outOfDomain.map((s) => s + 0.001),
+    inDomainMin,
+    outOfDomainMax + 0.001,
+  ])].sort((a, b) => a - b);
+
+  let best = { threshold: candidates[0] ?? 0, accuracy: -1, falseAbstain: 0, falseAnswer: 0 };
+  for (const threshold of candidates) {
+    const result = classifyAtThreshold(inDomain, outOfDomain, threshold);
+    // `>=` keeps the LAST (highest) threshold among equals — fail closed.
+    if (result.accuracy >= best.accuracy) {
+      best = { threshold, ...result };
+    }
+  }
+
+  return {
+    cleanlySeparable: inDomain.length > 0 && outOfDomain.length > 0 && inDomainMin > outOfDomainMax,
+    inDomainMin,
+    outOfDomainMax,
+    bestThreshold: best.threshold,
+    falseAbstain: best.falseAbstain,
+    falseAnswer: best.falseAnswer,
+    accuracy: best.accuracy,
+    margin: inDomainMin - outOfDomainMax,
+  };
+}
+
 export interface RetrievalSummary {
   retrievalCases: number;
   precision: number;
