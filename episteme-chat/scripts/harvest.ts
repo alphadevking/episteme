@@ -39,22 +39,16 @@ import {
   docIdFromUrl,
   type HarvestEntry,
 } from '../lib/harvest/manifest';
-import { parseRobotsTxt, isAllowed, robotsPath, type RobotsTxt } from '../lib/harvest/robots';
+import { parseRobotsTxt, type RobotsTxt } from '../lib/harvest/robots';
+// The crawl's manners live in one module, shared with the admin harvest UI.
+// Two implementations of "may we fetch this" is how a UI ends up politer or
+// ruder than the CLI without anyone choosing that. See lib/harvest/gate.ts.
+import { USER_AGENT, isThin, originOf, textLengthOf, verdictFor } from '../lib/harvest/gate';
+import { bucketSample } from '../lib/harvest/plan';
 
 const CORE_BASE = process.env.MASTRA_BASE_URL ?? 'http://localhost:4111';
 const ADMIN_KEY = process.env.MASTRA_ADMIN_KEY;
 const INSTITUTION_ID = process.env.HARVEST_INSTITUTION_ID;
-
-/**
- * Identify ourselves honestly in robots matching. We cannot set the header the
- * origin sees — the Cloudflare Worker makes the actual request — but the rules
- * we obey should be the ones written for a bot, not the ones written for a
- * browser.
- */
-const USER_AGENT = 'EpistemeHarvester';
-
-/** Space out requests. Overridden upward by a Crawl-delay if robots declares one. */
-const DEFAULT_DELAY_MS = 1_500;
 
 const OUT_DIR = join(process.cwd(), '.harvest');
 
@@ -119,7 +113,7 @@ const robotsCache = new Map<string, RobotsTxt | null>();
  * was told not to go.
  */
 async function robotsFor(hostUrl: string): Promise<RobotsTxt | null> {
-  const origin = new URL(hostUrl).origin;
+  const origin = originOf(hostUrl);
   if (robotsCache.has(origin)) return robotsCache.get(origin)!;
 
   let parsed: RobotsTxt | null = null;
@@ -138,15 +132,8 @@ async function robotsFor(hostUrl: string): Promise<RobotsTxt | null> {
 
 /** Gate one URL on robots, reporting the reason when it is refused. */
 async function permitted(url: string): Promise<{ ok: boolean; reason?: string; delayMs: number }> {
-  const robots = await robotsFor(url);
-  if (robots === null) {
-    return { ok: false, reason: 'robots.txt could not be read — refusing to guess', delayMs: DEFAULT_DELAY_MS };
-  }
-  const delayMs = Math.max(DEFAULT_DELAY_MS, (robots.crawlDelay ?? 0) * 1000);
-  if (!isAllowed(robots, robotsPath(url))) {
-    return { ok: false, reason: 'disallowed by robots.txt', delayMs };
-  }
-  return { ok: true, delayMs };
+  const verdict = verdictFor(await robotsFor(url), url);
+  return { ok: verdict.allowed, reason: verdict.reason, delayMs: verdict.delayMs };
 }
 
 // ── Phases ───────────────────────────────────────────────────────────────────
@@ -179,17 +166,17 @@ async function phaseFetch(entries: HarvestEntry[]): Promise<PhaseRow[]> {
       // Text length after tag-stripping approximates what the extractor will
       // see. A page that cleans down to almost nothing is the failure this
       // phase exists to catch, and it is invisible in the byte count.
-      const textOnly = page.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      const textLength = textLengthOf(page.html);
       await writeFile(join(OUT_DIR, `${docId}.html`), page.html, 'utf8');
 
-      const thin = textOnly.length < 400;
+      const thin = isThin(textLength);
       rows.push({
         url: entry.url,
         docId,
         status: thin ? 'failed' : 'ok',
-        detail: `${textOnly.length} chars of text${thin ? ' — TOO THIN, cleaning likely stripped the content' : ''}`,
+        detail: `${textLength} chars of text${thin ? ' — TOO THIN, cleaning likely stripped the content' : ''}`,
       });
-      console.log(`${thin ? 'THIN ' : 'OK   '} ${entry.url}\n      ${textOnly.length} chars → .harvest/${docId}.html`);
+      console.log(`${thin ? 'THIN ' : 'OK   '} ${entry.url}\n      ${textLength} chars → .harvest/${docId}.html`);
     } catch (err) {
       rows.push({ url: entry.url, docId, status: 'failed', detail: (err as Error).message });
       console.log(`FAIL  ${entry.url}\n      ${(err as Error).message}`);
@@ -317,11 +304,7 @@ async function main(): Promise<void> {
       // One page per (host, namespace) unless --all: pages sharing a template
       // and a scope chunk alike, so a second sample from the same bucket costs
       // an Unstructured call to re-learn what the first already showed.
-      const sample = all
-        ? MANIFEST
-        : [...new Map(
-            MANIFEST.map((e) => [`${new URL(e.url).hostname}|${e.namespace}`, e]),
-          ).values()];
+      const sample = all ? MANIFEST : bucketSample(MANIFEST, (e) => e);
       console.log(`Previewing ${sample.length} of ${MANIFEST.length} entries (${sample.length} Unstructured calls).`);
       console.log(all ? '' : 'One per host+namespace. Use --all to preview every page.\n');
       rows = await phaseIngest(sample, true);

@@ -10,7 +10,8 @@
 //   POST (reingest) → touch last_changed_at in kb_document_sources.
 //   PATCH (scope) → no kb_document_sources fields affected; audit log only.
 
-import { createSupabaseServerClientReadOnly, createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { assertKbAdmin, kbAdminHeaders, mastraBaseUrl } from "@/lib/admin/kb-auth";
 import { revalidatePath } from "next/cache";
 
 export const maxDuration = 300;
@@ -23,54 +24,7 @@ const KB_ADMIN_PATH = "/admin/knowledge";
 type Params = { params: Promise<{ docId: string }> };
 
 function mastraKbUrl(docId: string, suffix = ""): string {
-  const base = process.env.MASTRA_BASE_URL ?? "http://localhost:4111";
-  return `${base.replace(/\/$/, "")}/kb/documents/${encodeURIComponent(docId)}${suffix}`;
-}
-
-function adminKey(): string {
-  const key = process.env.MASTRA_ADMIN_KEY;
-  if (!key) throw new Error("MASTRA_ADMIN_KEY is not set");
-  return key;
-}
-
-type AssertAdminResult =
-  | { error: Response; institutionId: null }
-  | { error: null; institutionId: string | null };
-
-async function assertAdmin(requestedInstitutionId?: string | null): Promise<AssertAdminResult> {
-  const supabase = await createSupabaseServerClientReadOnly();
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return { error: Response.json({ error: "Unauthorized" }, { status: 401 }), institutionId: null };
-  }
-
-  const { data: rows, error: rpcError } = await supabase.rpc("fn_assert_active_admin");
-  if (rpcError || !rows || rows.length === 0) {
-    const status = rpcError?.code === "P0002" ? 403 : 401;
-    return { error: Response.json({ error: status === 403 ? "Forbidden" : "Unauthorized" }, { status }), institutionId: null };
-  }
-
-  const profile = rows[0] as { user_id: string; is_superadmin: boolean; institution_id: string | null };
-
-  const institutionId: string | null = profile.is_superadmin
-    ? (requestedInstitutionId ?? profile.institution_id ?? null)
-    : (profile.institution_id ?? null);
-
-  const { data: scopeValid } = await supabase
-    .rpc("fn_validate_institution_scope", { p_institution_id: institutionId });
-
-  if (!scopeValid) {
-    return { error: Response.json({ error: "Forbidden: invalid institution scope" }, { status: 403 }), institutionId: null };
-  }
-
-  return { error: null, institutionId };
-}
-
-function adminHeaders(institutionId: string | null): HeadersInit {
-  const headers: Record<string, string> = { "x-episteme-admin-key": adminKey() };
-  if (institutionId) headers["x-episteme-institution-id"] = institutionId;
-  return headers;
+  return `${mastraBaseUrl()}/kb/documents/${encodeURIComponent(docId)}${suffix}`;
 }
 
 // ── DELETE /api/admin/kb/:docId ──────────────────────────────────────────────
@@ -81,7 +35,7 @@ export async function DELETE(req: Request, { params }: Params) {
     requestedInstitutionId = body?.institutionId ?? null;
   } catch { /* no body — fine */ }
 
-  const { error, institutionId } = await assertAdmin(requestedInstitutionId);
+  const { error, institutionId } = await assertKbAdmin(requestedInstitutionId);
   if (error) return error;
 
   const { docId } = await params;
@@ -89,7 +43,7 @@ export async function DELETE(req: Request, { params }: Params) {
   try {
     const res  = await fetch(mastraKbUrl(docId), {
       method:  "DELETE",
-      headers: adminHeaders(institutionId),
+      headers: kbAdminHeaders(institutionId),
     });
     const data = await res.json();
 
@@ -132,7 +86,7 @@ export async function PATCH(req: Request, { params }: Params) {
   }
 
   const requestedInstitutionId = body.institutionId as string | null | undefined;
-  const { error, institutionId } = await assertAdmin(requestedInstitutionId);
+  const { error, institutionId } = await assertKbAdmin(requestedInstitutionId);
   if (error) return error;
 
   const { docId } = await params;
@@ -141,7 +95,7 @@ export async function PATCH(req: Request, { params }: Params) {
   try {
     const res  = await fetch(mastraKbUrl(docId, "/scope"), {
       method:  "PATCH",
-      headers: { "Content-Type": "application/json", ...adminHeaders(institutionId) },
+      headers: { "Content-Type": "application/json", ...kbAdminHeaders(institutionId) },
       body:    JSON.stringify({ roles, levels, programme, category, contentType, updatedAt }),
     });
     const data = await res.json();
@@ -196,7 +150,7 @@ export async function POST(req: Request, { params }: Params) {
     requestedInstitutionId = body?.institutionId ?? null;
   } catch { /* no body — fine */ }
 
-  const { error, institutionId } = await assertAdmin(requestedInstitutionId);
+  const { error, institutionId } = await assertKbAdmin(requestedInstitutionId);
   if (error) return error;
 
   const { docId } = await params;
@@ -204,7 +158,7 @@ export async function POST(req: Request, { params }: Params) {
   try {
     const res = await fetch(mastraKbUrl(docId, "/reingest"), {
       method:  "POST",
-      headers: adminHeaders(institutionId),
+      headers: kbAdminHeaders(institutionId),
     });
 
     // Pre-stream failures (401/404/422) are returned by Mastra as JSON, not SSE.

@@ -16,7 +16,9 @@
 //   On successful ingest → upsert row (doc_id, institution_id, source_url if URL).
 //   Supabase is the source of truth for the admin dashboard; LibSQL is Mastra-internal.
 
-import { createSupabaseServerClientReadOnly, createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { assertKbAdmin, kbAdminHeaders, mastraBaseUrl } from "@/lib/admin/kb-auth";
+import { shouldRecordIngest, type IngestDonePayload } from "@/lib/admin/kb-sync";
 import { revalidatePath } from "next/cache";
 
 // Ingestion pipelines can take minutes for large PDFs (Unstructured + embedding + Pinecone upsert).
@@ -26,63 +28,16 @@ export const maxDuration = 300;
 const KB_ADMIN_PATH = "/admin/knowledge";
 
 function mastraKbUrl(path = ""): string {
-  const base = process.env.MASTRA_BASE_URL ?? "http://localhost:4111";
-  return `${base.replace(/\/$/, "")}/kb/documents${path}`;
-}
-
-function adminKey(): string {
-  const key = process.env.MASTRA_ADMIN_KEY;
-  if (!key) throw new Error("MASTRA_ADMIN_KEY is not set");
-  return key;
-}
-
-type AssertAdminResult =
-  | { error: Response; institutionId: null }
-  | { error: null; institutionId: string | null };
-
-async function assertAdmin(requestedInstitutionId?: string | null): Promise<AssertAdminResult> {
-  const supabase = await createSupabaseServerClientReadOnly();
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return { error: Response.json({ error: "Unauthorized" }, { status: 401 }), institutionId: null };
-  }
-
-  const { data: rows, error: rpcError } = await supabase.rpc("fn_assert_active_admin");
-  if (rpcError || !rows || rows.length === 0) {
-    const status = rpcError?.code === "P0002" ? 403 : 401;
-    return { error: Response.json({ error: status === 403 ? "Forbidden" : "Unauthorized" }, { status }), institutionId: null };
-  }
-
-  const profile = rows[0] as { user_id: string; is_superadmin: boolean; institution_id: string | null };
-
-  const institutionId: string | null = profile.is_superadmin
-    ? (requestedInstitutionId ?? profile.institution_id ?? null)
-    : (profile.institution_id ?? null);
-
-  const { data: scopeValid } = await supabase
-    .rpc("fn_validate_institution_scope", { p_institution_id: institutionId });
-
-  if (!scopeValid) {
-    return { error: Response.json({ error: "Forbidden: invalid institution scope" }, { status: 403 }), institutionId: null };
-  }
-
-  return { error: null, institutionId };
-}
-
-function adminHeaders(institutionId: string | null): HeadersInit {
-  const headers: Record<string, string> = { "x-episteme-admin-key": adminKey() };
-  if (institutionId) headers["x-episteme-institution-id"] = institutionId;
-  return headers;
+  return `${mastraBaseUrl()}/kb/documents${path}`;
 }
 
 // ── GET /api/admin/kb ────────────────────────────────────────────────────────
 export async function GET() {
-  const { error, institutionId } = await assertAdmin();
+  const { error, institutionId } = await assertKbAdmin();
   if (error) return error;
 
   try {
-    const res  = await fetch(mastraKbUrl(), { headers: adminHeaders(institutionId) });
+    const res  = await fetch(mastraKbUrl(), { headers: kbAdminHeaders(institutionId) });
     const data = await res.json();
     return Response.json(data, { status: res.status });
   } catch (err) {
@@ -105,14 +60,22 @@ export async function POST(req: Request) {
   const requestedInstitutionId = (body.scope as Record<string, unknown> | undefined)
     ?.institutionId as string | null | undefined;
 
-  const { error, institutionId } = await assertAdmin(requestedInstitutionId);
+  const { error, institutionId } = await assertKbAdmin(requestedInstitutionId);
   if (error) return error;
+
+  // A preview writes nothing upstream — core's dryRun path reaches only
+  // prepareDocument — so nothing may be recorded downstream either. Read from
+  // the REQUEST, not from the stream's `done` payload: the authority on whether
+  // this was a preview is what we asked for. Without this, previewing a page
+  // would register it in kb_document_sources and file a
+  // "kb_document_created" audit entry for a document that does not exist.
+  const isDryRun = body.dryRun === true;
 
   let mastraRes: Response;
   try {
     mastraRes = await fetch(mastraKbUrl(), {
       method:  "POST",
-      headers: { "Content-Type": "application/json", ...adminHeaders(institutionId) },
+      headers: { "Content-Type": "application/json", ...kbAdminHeaders(institutionId) },
       body:    JSON.stringify(body),
     });
   } catch (err) {
@@ -133,7 +96,14 @@ export async function POST(req: Request) {
   // Capture scope for the Supabase side-effect.
   const docId     = body.docId     as string | undefined;
   const source    = body.source    as string | undefined;
-  const sourceUrl = source?.startsWith("http") ? source : null;
+
+  // Prefer the explicit sourceUrl. The old heuristic — "source looks like a
+  // URL" — holds for the single-document form, which puts the URL in both
+  // fields, but not for a harvest entry, whose `source` is a human citation
+  // label ("UNIBEN — Admission Requirements"). Those rows would have recorded
+  // a null source_url and dropped out of any future freshness re-check.
+  const explicitSourceUrl = typeof body.sourceUrl === "string" ? body.sourceUrl : null;
+  const sourceUrl = explicitSourceUrl ?? (source?.startsWith("http") ? source : null);
   const supabase  = await createSupabaseServerClient();
 
   // Pipe Mastra's SSE stream to the browser.
@@ -163,8 +133,8 @@ export async function POST(req: Request) {
             if (evtMatch?.[1] !== "done" || !dataMatch) continue;
 
             try {
-              const payload = JSON.parse(dataMatch[1]) as { success?: boolean };
-              if (payload.success && docId && institutionId) {
+              const payload = JSON.parse(dataMatch[1]) as IngestDonePayload;
+              if (shouldRecordIngest({ requestedDryRun: isDryRun, payload, docId, institutionId })) {
                 // Fire-and-forget — stream is already flowing, don't block it.
                 Promise.all([
                   supabase.from("kb_document_sources").upsert(

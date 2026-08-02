@@ -2,7 +2,7 @@
 import { PageHeader } from "@/components/admin/page-header";
 import { KbDocumentTable } from "@/components/admin/kb-document-table";
 import { Button } from "@/components/ui/button";
-import { DatabaseIcon, LayersIcon, NetworkIcon, UploadCloudIcon } from "lucide-react";
+import { DatabaseIcon, GlobeIcon, LayersIcon, NetworkIcon, UploadCloudIcon } from "lucide-react";
 import Link from "next/link";
 import type { KbDocument } from "@/lib/types/kb";
 
@@ -46,12 +46,21 @@ export default async function KnowledgePage() {
         title="Knowledge Base"
         description="Manage ingested documents powering the Episteme AI assistant."
         action={
-          <Button size="sm" asChild>
-            <Link href="/admin/knowledge/ingest">
-              <UploadCloudIcon className="size-4 mr-2" />
-              Ingest Document
-            </Link>
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* Many uniben.edu pages in one reviewed run — validate, preview, commit. */}
+            <Button size="sm" variant="outline" asChild>
+              <Link href="/admin/knowledge/harvest">
+                <GlobeIcon className="size-4 mr-2" />
+                Bulk Harvest
+              </Link>
+            </Button>
+            <Button size="sm" asChild>
+              <Link href="/admin/knowledge/ingest">
+                <UploadCloudIcon className="size-4 mr-2" />
+                Ingest Document
+              </Link>
+            </Button>
+          </div>
         }
       />
 
