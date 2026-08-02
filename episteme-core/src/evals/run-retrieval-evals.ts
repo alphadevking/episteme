@@ -23,6 +23,7 @@
 import { RETRIEVAL_CONFIG, RERANK_CONFIG } from '../mastra/config';
 import { resolvePlatformNamespaces } from '../mastra/security/retrieval-gate';
 import { searchPlatformDocs } from '../mastra/tools/platform-docs-tier';
+import { clearsRelevanceGate } from '../mastra/tools/relevance-gate';
 import {
   analyzeSeparation,
   classifyAtThreshold,
@@ -33,6 +34,7 @@ import {
   type RetrievedItem,
 } from './retrieval-metrics';
 import {
+  CASCADE_CASES,
   KB_CASES,
   KB_ENTITLEMENT_CASES,
   KB_UNLABELLED,
@@ -187,10 +189,11 @@ async function runKbCases() {
       : [];
 
     if (c.expect === 'abstain') {
-      // Abstention is judged the way the app judges it: found=false, or a best
-      // score below the relevance floor. A match that clears scoreThreshold but
-      // not relevanceThreshold is not an answer — see RETRIEVAL_CONFIG.
-      const abstained = !res.found || res.maxScore < RETRIEVAL_CONFIG.relevanceThreshold;
+      // Abstention is judged EXACTLY as the app judges it — through the same
+      // clearsRelevanceGate rule, so the eval cannot drift from production.
+      // Comparing maxScore here directly would report the wrong verdict as soon
+      // as reranking is on, since the cross-encoder owns the decision then.
+      const abstained = !clearsRelevanceGate(res, RETRIEVAL_CONFIG.relevanceThreshold);
       abstentionResults.push(abstained);
       console.log(
         `${abstained ? 'PASS' : 'FAIL'}  [abstain] ${c.id}` +
@@ -492,6 +495,75 @@ async function reportRerankCalibration(
     );
     for (const e of lowInDomain) console.log(`  ${e.score.toFixed(4)}  ${e.query}`);
   }
+}
+
+// ── Cascade tier (KB → news → web) ───────────────────────────────────────────
+
+/**
+ * Exercises the WHOLE grounded cascade, not just retrieval.
+ *
+ * Everything above measures tier 1 in isolation. But the user-visible behaviour
+ * of a KB miss is decided by what happens next: an institutional question the
+ * corpus cannot answer should fall through to news or web and come back with a
+ * caveated answer, NOT abstain. Nothing tested that path, and tightening the
+ * relevance gate makes it fire far more often — precisely the moment it stops
+ * being safe to assume it works.
+ *
+ * Reports the tier that answered rather than pass/fail, because the honest
+ * expectation is environment-dependent: the web tier is allowlisted to
+ * uniben.edu and the national regulators, so whether a given query resolves
+ * depends on what those sites actually publish today. A hard assertion here
+ * would fail for reasons that are not defects.
+ */
+async function runCascadeCases() {
+  console.log(bar('CASCADE (KB → news → web) — which tier answers'));
+
+  if (!hasKbCredentials()) {
+    console.log('SKIPPED — KB credentials not set.');
+    return;
+  }
+
+  const { RequestContext } = await import('@mastra/core/request-context');
+  const { SESSION_KEYS } = await import('../mastra/server/session-context');
+  const { groundedResponseTool } = await import('../mastra/tools/grounded-response-tool');
+
+  for (const c of CASCADE_CASES) {
+    const rc = new RequestContext();
+    rc.set(SESSION_KEYS.role, c.role);
+    rc.set(SESSION_KEYS.roles, [c.role]);
+    rc.set(SESSION_KEYS.trustLevel, c.trustLevel);
+    rc.set(SESSION_KEYS.isPlatformAdmin, c.isPlatformAdmin === true);
+    if (EVAL_INSTITUTION_ID) rc.set(SESSION_KEYS.institutionId, EVAL_INSTITUTION_ID);
+
+    try {
+      const result = await (groundedResponseTool.execute as unknown as (
+        input: unknown, ctx: unknown,
+      ) => Promise<{ tier?: string; confidence?: string }>)(
+        { query: c.query },
+        { requestContext: rc },
+      );
+
+      const tier = result?.tier ?? 'unknown';
+      const confidence = result?.confidence ?? 'unknown';
+      // Flag both failure shapes: nothing answered when something should have,
+      // and the WRONG tier answering — which is how the platform/KB hijack
+      // showed up in the first place.
+      const flag =
+        c.expectAnswered && tier === 'none' ? '  ← expected a fallback tier to answer this'
+        : c.expectTier && tier !== c.expectTier ? `  ← expected tier=${c.expectTier}`
+        : '';
+      console.log(`  tier=${String(tier).padEnd(9)} confidence=${String(confidence).padEnd(5)} ${c.query}${flag}`);
+    } catch (err) {
+      console.log(`  ERROR     ${c.query}: ${(err as Error).message}`);
+    }
+  }
+
+  console.log(
+    '\n  Read this as coverage, not a score: `kb` means the corpus answered, `news`/`web`\n' +
+    '  mean the fallback did its job, and `none` on an institutional question is the\n' +
+    '  signal worth investigating — either the allowlist is too narrow or the question\n' +
+    '  genuinely has no published source.',
+  );
 }
 
 // ── Corpus reachability control ──────────────────────────────────────────────
@@ -832,6 +904,7 @@ async function main() {
 
   const kb          = await runKbCases();
   const entitlement = await runEntitlementCases();
+  await runCascadeCases();
 
   console.log(bar('SUMMARY'));
   const platformOk = report('Platform documentation tier', platform);

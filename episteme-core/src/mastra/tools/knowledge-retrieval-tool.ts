@@ -6,6 +6,7 @@ import { RETRIEVAL_CONFIG, RERANK_CONFIG } from '../config';
 import { resolveNamespacesForRoles, buildRetrievalFilter } from '../security/retrieval-gate';
 import { getSessionContext } from '../server/session-context';
 import { rerankChunks } from './rerank';
+import type { RelevanceJudge } from './relevance-gate';
 
 
 function getEnv(key: string): string {
@@ -40,7 +41,22 @@ export type KnowledgeRetrievalResult = {
 };
 
 export type KnowledgeRetrievalResponse =
-  | { found: true; results: KnowledgeRetrievalResult[]; maxScore: number }
+  | {
+      found: true;
+      results: KnowledgeRetrievalResult[];
+      /**
+       * Best EMBEDDING score. NOT a relevance gate on its own once a
+       * cross-encoder has ruled — see `judgedBy` and tools/relevance-gate.ts.
+       */
+      maxScore: number;
+      /**
+       * Which judge decided this result set: the cross-encoder when reranking
+       * ran, otherwise embedding similarity. Callers must gate through
+       * clearsRelevanceGate rather than comparing maxScore themselves, or a
+       * rerank-approved result gets vetoed by a threshold on a different scale.
+       */
+      judgedBy: RelevanceJudge;
+    }
   | { found: false; results: []; message: string };
 
 /**
@@ -107,9 +123,9 @@ type ScoredMatch = { score: number; metadata: Record<string, unknown> };
 async function rerankMatches(
   query: string,
   matches: ScoredMatch[],
-): Promise<{ matches: ScoredMatch[]; emptiedByRerank: boolean }> {
+): Promise<{ matches: ScoredMatch[]; emptiedByRerank: boolean; judged: boolean }> {
   if (!RERANK_CONFIG.enabled || matches.length === 0) {
-    return { matches, emptiedByRerank: false };
+    return { matches, emptiedByRerank: false, judged: false };
   }
 
   const candidates = matches.slice(0, RERANK_CONFIG.topN).map((m) => ({
@@ -138,13 +154,15 @@ async function rerankMatches(
   });
 
   if (outcome.status !== 'reranked') {
-    // Disabled, empty, or failed — keep embedding order, never abstain on it.
-    return { matches, emptiedByRerank: false };
+    // Disabled, empty, or failed — keep embedding order, never abstain on it,
+    // and leave the embedding threshold as the relevance gate.
+    return { matches, emptiedByRerank: false, judged: false };
   }
 
   return {
     matches: outcome.results.map((c) => c.match),
     emptiedByRerank: outcome.results.length === 0,
+    judged: true,
   };
 }
 
@@ -314,7 +332,12 @@ export async function retrieveKnowledge(inputData: {
     });
   }
 
-  return { found: true, results: retrievalResults, maxScore };
+  return {
+    found: true,
+    results: retrievalResults,
+    maxScore,
+    judgedBy: reranked.judged ? 'rerank' : 'embedding',
+  };
 }
 
 export const knowledgeRetrievalTool = createTool({

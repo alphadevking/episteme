@@ -11,6 +11,7 @@ import { getSessionContext } from '../server/session-context';
 import { searchPlatformDocs } from './platform-docs-tier';
 import { resolvePlatformNamespaces } from '../security/retrieval-gate';
 import { documentSource, sourceSchema, type Source } from './source';
+import { clearsRelevanceGate } from './relevance-gate';
 
 // ── Query rewriting ───────────────────────────────────────────────────────────
 // Prepends available session context to the user's query before embedding.
@@ -362,35 +363,29 @@ export const groundedResponseTool = createTool({
       }
     }
 
-    // ── Tier 0: platform documentation ───────────────────────────────────────
-    // Served from Markdown on disk, not Pinecone. Ahead of the KB because the
-    // two corpora answer disjoint questions — a question about Episteme has no
-    // institutional answer — and because its coverage gate is strict enough
-    // that an institutional question will not match it. A miss costs one
-    // in-process scan of a few dozen sections, no network call.
-    const platformHit = await searchPlatformDocs(
-      query,
-      resolvePlatformNamespaces({
-        trustLevel: session.trustLevel,
-        isPlatformAdmin: session.isPlatformAdmin,
-      }),
-      logger,
-    );
-    if (platformHit) {
-      return {
-        answer: platformHit.context,
-        confidence: 'high' as const,
-        tier: 'platform' as const,
-        sources: platformHit.sources,
-      };
-    }
-
     // ── Tier 1: knowledge base — broad literal query first, scoped+enriched fallback ──
+    //
+    // AHEAD OF THE PLATFORM DOCS since 2026-08-02. It used to run second, on the
+    // assumption that the two corpora answer disjoint questions and the platform
+    // coverage gate was strict enough to keep institutional questions out. The
+    // eval's cascade tier disproved that: "what are the admission requirements"
+    // — the single most common prospective-student question — resolved to
+    // tier=platform, matching help/getting-started.md because its "What it can
+    // answer" section LISTS admissions as an example question. A product doc
+    // that advertises a question outranked the verified document that answers
+    // it.
+    //
+    // Institutional content is authoritative for institutional questions, so it
+    // goes first, and platform docs catch what it misses. A genuine platform
+    // question ("how do I ingest a document") has no institutional match and
+    // falls through cleanly — the relevance gate is what makes that safe.
+    // Cost: one embedding + Pinecone round-trip on platform questions that
+    // previously short-circuited in-process.
     let retrieval = await tryKb(query, false);
 
-    if (!retrieval.found || retrieval.maxScore < RETRIEVAL_CONFIG.relevanceThreshold) {
+    if (!clearsRelevanceGate(retrieval, RETRIEVAL_CONFIG.relevanceThreshold)) {
       const scopedRetrieval = await tryKb(enrichedQuery, true);
-      if (scopedRetrieval.found && scopedRetrieval.maxScore >= RETRIEVAL_CONFIG.relevanceThreshold) {
+      if (clearsRelevanceGate(scopedRetrieval, RETRIEVAL_CONFIG.relevanceThreshold)) {
         retrieval = scopedRetrieval;
       }
     }
@@ -398,7 +393,7 @@ export const groundedResponseTool = createTool({
     // KB found results — but only surface them if the best score clears the relevance gate.
     // A maxScore below relevanceThreshold means retrieval found the "best available" match,
     // not a genuinely on-topic one. Treat it as not found and fall through to the next tier.
-    if (retrieval.found && retrieval.maxScore >= RETRIEVAL_CONFIG.relevanceThreshold) {
+    if (clearsRelevanceGate(retrieval, RETRIEVAL_CONFIG.relevanceThreshold)) {
       const { context: ctx, sources } = buildGroundedContext(retrieval);
 
       // "Relevant" is not the same as "current" — the top match may itself be
@@ -421,6 +416,28 @@ export const groundedResponseTool = createTool({
       if (webHit) return { answer: webHit.answer, confidence: 'high' as const, tier: webHit.tier, sources: webHit.sources };
 
       return { answer: ctx, confidence: 'high' as const, tier: 'kb' as const, sources };
+    }
+
+    // ── Tier 2: platform documentation ───────────────────────────────────────
+    // Markdown on disk, no network call. Reached only when the institutional
+    // corpus had no confident answer, so a question about Episteme itself lands
+    // here while an institutional question can no longer be captured by a
+    // product doc that merely mentions the topic.
+    const platformHit = await searchPlatformDocs(
+      query,
+      resolvePlatformNamespaces({
+        trustLevel: session.trustLevel,
+        isPlatformAdmin: session.isPlatformAdmin,
+      }),
+      logger,
+    );
+    if (platformHit) {
+      return {
+        answer: platformHit.context,
+        confidence: 'high' as const,
+        tier: 'platform' as const,
+        sources: platformHit.sources,
+      };
     }
 
     // Below the relevance gate entirely — same cascade, no stale content to fall back to.

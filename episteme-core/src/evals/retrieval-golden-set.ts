@@ -237,10 +237,13 @@ export const KB_UNLABELLED: Array<Omit<KbCase, 'expectedSources' | 'why'>> = [
  * Each is a property of the individual result, so truncation cannot produce a
  * false alarm, and a violation is unambiguously a leak.
  *
- * Queries are deliberately BROAD. A narrow query that retrieves nothing makes
- * the check pass vacuously; broad ones maximise the number of chunks actually
- * examined. The runner reports how many chunks it inspected so a vacuous pass
- * is visible rather than silent.
+ * Queries must ACTUALLY RETRIEVE, or the check examines nothing and passes
+ * vacuously. They were originally broad keyword lists on the theory that more
+ * terms means more matches; enabling the cross-encoder disproved that — it
+ * rejects term soup as not-a-question, and entitlement coverage collapsed from
+ * 12 chunks to 1. They are now ordinary questions the corpus demonstrably
+ * answers. The runner reports how many chunks it inspected, so if the corpus
+ * changes and these stop retrieving, the vacuum is visible rather than silent.
  */
 export interface EntitlementCase {
   id: string;
@@ -255,7 +258,11 @@ export interface EntitlementCase {
 export const KB_ENTITLEMENT_CASES: EntitlementCase[] = [
   {
     id: 'entitlement-prospective-public-tier',
-    query: 'university policy fees registration requirements students',
+    // Natural question, not a keyword salad. The cross-encoder correctly
+    // rejects term soup as "not a question", which left this case retrieving
+    // nothing and verifying nothing — a security check that examines zero
+    // chunks passes vacuously.
+    query: 'what are the admission requirements',
     roles: ['prospective'],
     trustLevel: 1,
     why:
@@ -265,7 +272,7 @@ export const KB_ENTITLEMENT_CASES: EntitlementCase[] = [
   },
   {
     id: 'entitlement-student-trust2',
-    query: 'academic policy grading fees payment deadline',
+    query: 'how do I apply for hostel accommodation',
     roles: ['student'],
     trustLevel: 2,
     why:
@@ -274,7 +281,7 @@ export const KB_ENTITLEMENT_CASES: EntitlementCase[] = [
   },
   {
     id: 'entitlement-staff-claimed-at-low-trust',
-    query: 'internal staff memo policy confidential procedure',
+    query: 'what are the admission requirements',
     roles: ['staff'],
     trustLevel: 1,
     why:
@@ -283,7 +290,7 @@ export const KB_ENTITLEMENT_CASES: EntitlementCase[] = [
   },
   {
     id: 'entitlement-parent-allowlist',
-    query: 'fees payment academic results hostel',
+    query: 'how do I apply for hostel accommodation',
     roles: ['parent'],
     trustLevel: 3,
     namespaceAllowlist: ['admissions', 'general'],
@@ -291,6 +298,104 @@ export const KB_ENTITLEMENT_CASES: EntitlementCase[] = [
       'A parent whose link grants neither fee nor academic visibility. The ' +
       'allowlist may only narrow, so financial-aid and academic-policy content ' +
       'must not appear even though trust 3 would otherwise permit them.',
+  },
+];
+
+// ── Cascade cases — the whole tiered answer path, not just retrieval ─────────
+
+/**
+ * Questions that exercise KB → news → web routing.
+ *
+ * `expectAnswered` means "some tier should produce an answer" — not which one.
+ * Which tier is right is environment-dependent (the web tier is allowlisted to
+ * uniben.edu and the national regulators), so the eval reports the tier rather
+ * than asserting it. `none` on an institutional question is the interesting
+ * signal: the cascade ran out of options.
+ */
+export interface CascadeCase {
+  query: string;
+  role: Role;
+  trustLevel: number;
+  /** Operator bit — required for the platform-admin namespace to be visible. */
+  isPlatformAdmin?: boolean;
+  expectAnswered: boolean;
+  /** The tier this SHOULD resolve from, when that is knowable. Reported, not asserted. */
+  expectTier?: 'kb' | 'platform' | 'news' | 'web' | 'none';
+  why: string;
+}
+
+export const CASCADE_CASES: CascadeCase[] = [
+  {
+    query: 'what are the admission requirements',
+    role: 'prospective',
+    trustLevel: 1,
+    expectAnswered: true,
+    why: 'The corpus answers this — expect tier=kb. A miss here means retrieval regressed.',
+  },
+  {
+    query: 'how is CGPA calculated at the University of Benin',
+    role: 'student',
+    trustLevel: 2,
+    expectAnswered: true,
+    why:
+      'No grading document is ingested, so the KB should miss and the web tier should ' +
+      'answer from uniben.edu with the unverified caveat. This is the LMS-assistant ' +
+      'path: a real student question the corpus cannot cover yet.',
+  },
+  {
+    query: 'how do I request an official transcript from Uniben',
+    role: 'student',
+    trustLevel: 2,
+    expectAnswered: true,
+    why: 'Same shape — a records procedure with no ingested source. Should reach a fallback tier.',
+  },
+  {
+    query: 'what is the JAMB cutoff mark policy for Nigerian universities',
+    role: 'prospective',
+    trustLevel: 1,
+    expectAnswered: true,
+    why:
+      'National regulatory question — jamb.gov.ng is on the web allowlist, so this is ' +
+      'the clearest test that the web tier can resolve at all.',
+  },
+  /**
+   * REGRESSION GUARD for the 2026-08-02 tier reorder. The KB now runs before the
+   * platform docs, which fixed institutional questions being captured by a
+   * product doc — but it creates the opposite risk: a genuine platform question
+   * being captured by handbook content that happens to mention "documents".
+   * The relevance gate is what should prevent that, and this is what proves it.
+   */
+  {
+    query: 'how do I add a document to the knowledge base',
+    role: 'staff',
+    trustLevel: 4,
+    isPlatformAdmin: true,
+    expectAnswered: true,
+    expectTier: 'platform',
+    why:
+      'Rule 1d: a question about operating Episteme. The KB has no answer for it, ' +
+      'so it must fall through to the platform docs rather than be answered from ' +
+      'the student handbook.',
+  },
+  {
+    query: 'what can this assistant do',
+    role: 'student',
+    trustLevel: 2,
+    expectAnswered: true,
+    expectTier: 'platform',
+    why:
+      'The help namespace is visible to every role and needs no operator bit. ' +
+      'Same reorder risk, from the lowest-privilege side.',
+  },
+  {
+    query: 'how do I bake sourdough bread at home',
+    role: 'student',
+    trustLevel: 2,
+    expectAnswered: false,
+    expectTier: 'none',
+    why:
+      'Out of domain at EVERY tier. tier=none with confidence=low is the correct ' +
+      'outcome — the cascade must not rescue a question it should refuse.',
   },
 ];
 
