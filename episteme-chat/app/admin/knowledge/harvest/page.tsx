@@ -33,6 +33,7 @@ import {
   AlertTriangleIcon,
   ArrowLeftIcon,
   BanIcon,
+  BookOpenIcon,
   BuildingIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
@@ -53,6 +54,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { inputBase, selectBase, LabelledSelect, PillToggleGroup } from "@/components/admin/form-controls";
+import { PreviewDrawer } from "@/components/admin/preview-drawer";
 import { NAMESPACE_OPTIONS, CONTENT_TYPE_OPTIONS, ROLES, ROLE_LABELS } from "@/lib/constants/kb";
 import {
   MANIFEST,
@@ -253,7 +255,8 @@ export default function HarvestPage() {
   const [selected, setSelected] = useState<Set<string>>(() => new Set(MANIFEST.map((e) => e.url)));
   /** URLs added by hand this session — the only rows whose citation label is editable here. */
   const [adHocUrls, setAdHocUrls] = useState<Set<string>>(() => new Set());
-  const [expanded, setExpanded] = useState<string | null>(null);
+  /** URL of the row whose preview is open in the reading drawer. */
+  const [viewing, setViewing] = useState<string | null>(null);
 
   const [running, setRunning] = useState<Phase | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -321,6 +324,10 @@ export default function HarvestPage() {
   }, [entries]);
   const selectedRows = useMemo(() => rows.filter((r) => selected.has(r.entry.url)), [rows, selected]);
   const summary = useMemo(() => summarize(rows), [rows]);
+  const viewingRow = useMemo(
+    () => (viewing ? rows.find((r) => r.entry.url === viewing) ?? null : null),
+    [rows, viewing],
+  );
 
   const toValidate = eligibleFor(selectedRows, "validate");
   const toPreviewAll = eligibleFor(selectedRows, "preview");
@@ -376,7 +383,7 @@ export default function HarvestPage() {
     setAdHocUrls(new Set());
     setOrigins([]);
     setRunError(null);
-    setExpanded(null);
+    setViewing(null);
     setConfirmingCommit(false);
   }
 
@@ -689,7 +696,6 @@ export default function HarvestPage() {
             <div className="divide-y divide-border/60">
               {rows.map((row) => {
                 const url = row.entry.url;
-                const isOpen = expanded === url;
                 const isAdHoc = adHocUrls.has(url);
                 return (
                   <div key={url} className={selected.has(url) ? "" : "opacity-50"}>
@@ -744,17 +750,15 @@ export default function HarvestPage() {
                         {row.report && (
                           <button
                             type="button"
-                            onClick={() => setExpanded(isOpen ? null : url)}
-                            className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                            onClick={() => setViewing(url)}
+                            className="flex items-center gap-1 rounded-md border border-primary/40 bg-primary/5 px-2 py-1 text-[11px] font-medium text-primary hover:bg-primary/10 transition-colors"
                           >
-                            {isOpen ? <ChevronDownIcon className="size-2.5" /> : <ChevronRightIcon className="size-2.5" />}
-                            Chunks
+                            <BookOpenIcon className="size-2.5" />
+                            Read
                           </button>
                         )}
                       </div>
                     </div>
-
-                    {isOpen && row.report && <PreviewDetail report={row.report} />}
                   </div>
                 );
               })}
@@ -930,6 +934,15 @@ export default function HarvestPage() {
           </div>
         </div>
       </div>
+
+      {viewingRow?.report && (
+        <PreviewDrawer
+          report={viewingRow.report}
+          title={viewingRow.entry.source}
+          url={viewingRow.entry.url}
+          onClose={() => setViewing(null)}
+        />
+      )}
     </div>
   );
 }
@@ -983,34 +996,6 @@ function SummaryLine({ label, value, tone }: { label: string; value: number; ton
     <div className="flex items-center justify-between">
       <dt className="text-muted-foreground">{label}</dt>
       <dd className={`font-mono tabular-nums ${toneClass}`}>{value}</dd>
-    </div>
-  );
-}
-
-function PreviewDetail({ report }: { report: PreviewReport }) {
-  return (
-    <div className="border-t border-border/60 bg-muted/20 px-4 py-3 space-y-3">
-      <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-muted-foreground">
-        <span>{report.textLength.toLocaleString()} chars extracted</span>
-        <span>{report.parentChunks} parent chunks</span>
-        <span>{report.childChunks} child chunks</span>
-        <span>namespace {report.namespace}</span>
-        <span>roles {report.roles.join(", ")}</span>
-        {report.replacesExisting && <span className="text-amber-600 dark:text-amber-400">replaces an existing document</span>}
-        {report.movesFromNamespace && (
-          <span className="text-amber-600 dark:text-amber-400">moves from {report.movesFromNamespace}</span>
-        )}
-      </div>
-      {report.sampleChunks.map((chunk) => (
-        <div key={chunk.index} className="space-y-1">
-          <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-            chunk {chunk.index} · {chunk.length} chars
-          </p>
-          <p className="text-[11px] leading-relaxed text-foreground/80 line-clamp-4">
-            {chunk.text.replace(/\s+/g, " ").slice(0, 500)}…
-          </p>
-        </div>
-      ))}
     </div>
   );
 }

@@ -203,23 +203,77 @@ export interface DryRunReport {
   childChunks: number;
   /** Vectors that WOULD be upserted. Nothing was written. */
   vectorsWouldUpsert: number;
-  /** Leading parent chunks, so the reviewer sees real retrievable units. */
-  sampleChunks: { index: number; length: number; text: string }[];
+  /**
+   * The parent chunks, verbatim and in order — the units retrieval hands the
+   * model. Bounded by a character budget; see `chunksTruncated`.
+   */
+  chunks: DryRunChunk[];
+  /**
+   * True when the budget stopped the list short of every parent. The reviewer
+   * is then looking at part of the document, and must be told so.
+   */
+  chunksTruncated: boolean;
 }
+
+/** One reviewable unit of the prepared document. */
+export interface DryRunChunk {
+  index: number;
+  /** Characters in the chunk. Equal to `text.length` — nothing here is elided. */
+  length: number;
+  /** Exactly what would be stored. Never truncated: see summarizePrepared. */
+  text: string;
+  /** Source page, when the extractor knew one (PDFs). */
+  pageNumber: number | null;
+  /** Children derived from this parent — one embedded vector each. */
+  childCount: number;
+}
+
+/**
+ * How much chunk text one report may carry, in characters.
+ *
+ * Generous on purpose. A preview exists so a person can read what is about to
+ * enter the knowledge base, and a preview that shows three paragraphs of a
+ * twenty-page policy cannot support that decision — it can only support
+ * "extraction produced something". Harvested web pages run tens of KB; this
+ * covers them whole and still bounds the pathological PDF.
+ */
+const CHUNK_TEXT_BUDGET = 500_000;
 
 /**
  * Summarise a prepared document without writing anything.
  *
- * Samples PARENT chunks, not children: a parent is what retrieval hands to the
- * model as context, so it is the unit a reviewer needs to judge. `length` is the
- * full parent length even though `text` is truncated — a reviewer judging chunk
- * size needs the real number, not the preview's.
+ * Reports PARENT chunks, not children: a parent is what retrieval hands to the
+ * model as context, so it is the unit a reviewer needs to judge.
+ *
+ * Chunk text is returned WHOLE. An earlier version truncated each chunk to 600
+ * characters, which made the report cheap to send and impossible to review
+ * against — the reviewer could not tell a clean extraction from one that had
+ * swallowed a navigation menu 700 characters in. When the budget runs out this
+ * drops whole chunks and says so, rather than silently shortening every chunk:
+ * a partial list of complete chunks is honest, a complete list of partial
+ * chunks is not.
  */
 export function summarizePrepared(
   prepared: PreparedDocument,
-  sampleCount = 3,
-  sampleChars = 600,
+  budget = CHUNK_TEXT_BUDGET,
 ): DryRunReport {
+  const chunks: DryRunChunk[] = [];
+  let spent = 0;
+
+  for (const [index, parent] of prepared.parents.entries()) {
+    // Always include the first chunk, however long — a report with no content
+    // at all is worse than one over budget by a single chunk.
+    if (spent + parent.text.length > budget && chunks.length > 0) break;
+    chunks.push({
+      index,
+      length: parent.text.length,
+      text: parent.text,
+      pageNumber: parent.pageNumber,
+      childCount: parent.children.length,
+    });
+    spent += parent.text.length;
+  }
+
   return {
     docId: prepared.docId,
     fileName: prepared.fileName,
@@ -235,10 +289,7 @@ export function summarizePrepared(
     parentChunks: prepared.parents.length,
     childChunks: prepared.children.length,
     vectorsWouldUpsert: prepared.children.length,
-    sampleChunks: prepared.parents.slice(0, sampleCount).map((p, i) => ({
-      index: i,
-      length: p.text.length,
-      text: p.text.slice(0, sampleChars),
-    })),
+    chunks,
+    chunksTruncated: chunks.length < prepared.parents.length,
   };
 }

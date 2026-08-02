@@ -158,20 +158,47 @@ describe('summarizePrepared — the dry-run report', () => {
     assert.equal(report.textLength, prepared.textLength);
   });
 
-  test('samples PARENT chunks — the unit retrieval actually hands the model', async () => {
+  test('reports PARENT chunks — the unit retrieval actually hands the model', async () => {
     const { prepareDocument, summarizePrepared } = await import('./prepare');
     const prepared = await prepareDocument(baseOptions);
-    const report = summarizePrepared(prepared, 2, 100);
+    const report = summarizePrepared(prepared);
 
-    assert.ok(report.sampleChunks.length <= 2);
-    for (const sample of report.sampleChunks) {
-      assert.ok(sample.text.length <= 100, 'sample text exceeded the truncation limit');
-      // `length` is the FULL parent length, not the truncated preview — a
-      // reviewer judging chunk size needs the real number.
-      const parent = prepared.parents[sample.index];
-      assert.equal(sample.length, parent.text.length);
-      assert.ok(parent.text.startsWith(sample.text));
+    assert.equal(report.chunks.length, prepared.parents.length);
+    assert.equal(report.chunksTruncated, false);
+
+    for (const chunk of report.chunks) {
+      const parent = prepared.parents[chunk.index];
+      // Verbatim, not a preview: what the reviewer reads is what gets stored.
+      assert.equal(chunk.text, parent.text);
+      assert.equal(chunk.length, parent.text.length);
+      assert.equal(chunk.childCount, parent.children.length);
+      assert.equal(chunk.pageNumber, parent.pageNumber);
     }
+  });
+
+  test('chunks are in document order', async () => {
+    const { prepareDocument, summarizePrepared } = await import('./prepare');
+    const report = summarizePrepared(await prepareDocument(baseOptions));
+    assert.deepEqual(
+      report.chunks.map((c) => c.index),
+      report.chunks.map((_, i) => i),
+    );
+  });
+
+  test('a tight budget drops whole chunks and admits it', async () => {
+    const { prepareDocument, summarizePrepared } = await import('./prepare');
+    const prepared = await prepareDocument(baseOptions);
+    const report = summarizePrepared(prepared, 1);
+
+    // A partial list of COMPLETE chunks — never a complete list of shortened
+    // ones, which would read as a clean extraction that had been quietly cut.
+    assert.equal(report.chunks.length, 1, 'the first chunk is always included');
+    assert.equal(report.chunks[0].text, prepared.parents[0].text);
+    assert.equal(report.chunksTruncated, prepared.parents.length > 1);
+
+    // The counts still describe the whole document, not the truncated view.
+    assert.equal(report.parentChunks, prepared.parents.length);
+    assert.equal(report.childChunks, prepared.children.length);
   });
 
   test('carries the scope fields a reviewer needs to approve the ingest', async () => {

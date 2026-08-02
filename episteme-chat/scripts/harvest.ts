@@ -217,9 +217,17 @@ async function phaseIngest(entries: HarvestEntry[], dryRun: boolean): Promise<Ph
           (r.movesFromNamespace ? ` [MOVES FROM ${r.movesFromNamespace}]` : '');
         rows.push({ url: entry.url, docId, status: 'ok', detail });
         console.log(`\n── ${entry.source}\n   ${entry.url}\n   ${detail}`);
-        for (const sample of (r.sampleChunks as { index: number; length: number; text: string }[])) {
-          console.log(`\n   [chunk ${sample.index}, ${sample.length} chars]`);
-          console.log(`   ${sample.text.replace(/\s+/g, ' ').slice(0, 400)}…`);
+        // The report now carries every chunk verbatim. A terminal is the wrong
+        // place to read a whole document, so the CLI keeps showing the leading
+        // few, truncated — enough to tell a clean extraction from a broken one.
+        // The admin harvest UI renders the full set; see /admin/knowledge/harvest.
+        const chunks = r.chunks as { index: number; length: number; text: string }[];
+        for (const chunk of chunks.slice(0, 3)) {
+          console.log(`\n   [chunk ${chunk.index}, ${chunk.length} chars]`);
+          console.log(`   ${chunk.text.replace(/\s+/g, ' ').slice(0, 400)}…`);
+        }
+        if (chunks.length > 3) {
+          console.log(`\n   … ${chunks.length - 3} more chunk${chunks.length - 3 === 1 ? '' : 's'} not shown`);
         }
       } else {
         const audit = done.data.audit as Record<string, unknown>;

@@ -125,7 +125,8 @@ describe('POST /kb/documents — dry run', () => {
     assert.deepEqual(report['roles'], ['student']);
     assert.equal(report['replacesExisting'], false);
     assert.equal(report['movesFromNamespace'], null);
-    assert.ok((report['sampleChunks'] as unknown[]).length > 0, 'no sample chunks to review');
+    assert.ok((report['chunks'] as unknown[]).length > 0, 'no chunks to review');
+    assert.equal(report['chunksTruncated'], false);
 
     // The claim that matters: the registry never learned about this document.
     assert.equal(

@@ -43,16 +43,53 @@ export type RowPhase =
   | 'skipped'
   | 'failed';
 
-/** Chunk counts and scope from a dry run — what a commit would actually write. */
+/**
+ * One reviewable unit of a previewed document — a PARENT chunk, which is what
+ * retrieval hands the model as context. Text is verbatim, never elided.
+ */
+export interface PreviewChunk {
+  index: number;
+  length: number;
+  text: string;
+  /** Source page, when the extractor knew one (PDFs). */
+  pageNumber: number | null;
+  /** Children derived from this parent — one embedded vector each. */
+  childCount: number;
+}
+
+/**
+ * What a commit would actually write, from core's dry run.
+ *
+ * Mirrors DryRunReport in episteme-core plus the two fields the route adds
+ * (`replacesExisting`, `movesFromNamespace`). Kept as a plain interface rather
+ * than an import because the two projects do not share a package — the field
+ * names are the contract, and the dry-run route tests pin them on the core side.
+ */
 export interface PreviewReport {
+  docId: string;
+  fileName: string;
+  namespace: string;
+  category: string;
+  contentType: string;
+  roles: string[];
+  levels: string[];
+  programme: string | null;
+  updatedAt: string | null;
+  /** Characters of text extracted before chunking. */
+  textLength: number;
   parentChunks: number;
   childChunks: number;
-  textLength: number;
-  namespace: string;
-  roles: string[];
+  /** Vectors that WOULD be upserted. Nothing was written. */
+  vectorsWouldUpsert: number;
+  /** True when a real ingest would replace an existing document. */
   replacesExisting: boolean;
+  /** Set when this run would also move the doc between namespaces. */
   movesFromNamespace: string | null;
-  sampleChunks: { index: number; length: number; text: string }[];
+  sourceUrl: string | null;
+  contentHash: string | null;
+  chunks: PreviewChunk[];
+  /** True when a character budget stopped the list short of every chunk. */
+  chunksTruncated: boolean;
 }
 
 export interface HarvestRow {
