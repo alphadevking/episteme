@@ -36,6 +36,9 @@ export const Assistant = ({ suggestions, initialMessage, threadId, initialTitle 
   const [titleLoading, setTitleLoading] = useState(false);
   // Tracks whether the current remoteId is the one the server already gave us a title for.
   const initialRemoteId = useRef(threadId);
+  // Set once the server-provided title has been honoured, so it is never
+  // re-used after the title state has moved on to another thread.
+  const initialTitleUsed = useRef(false);
 
   // Track the remoteId of the currently active thread via the runtime.
   // This updates on every thread switch — including pushState switches where
@@ -61,20 +64,33 @@ export const Assistant = ({ suggestions, initialMessage, threadId, initialTitle 
   useEffect(() => {
     if (!currentRemoteId) return;
 
-    // Skip the loading skeleton for the initial thread — the server already
-    // provided `initialTitle` so there's nothing stale to clear.
-    const isInitial = currentRemoteId === initialRemoteId.current && !!initialTitle;
-    if (!isInitial) setTitleLoading(true);
+    // The server already resolved this exact thread's title and it is on screen.
+    // Re-querying it would spend a round-trip to learn what we were told — and
+    // the realtime subscription below still catches any later change, so this
+    // skips the fetch without giving up liveness.
+    //
+    // Strictly one-shot: after switching to another thread, `threadTitle` holds
+    // that other thread's title, so coming BACK here must re-fetch rather than
+    // trust a flag that is still nominally true.
+    const isInitial =
+      !initialTitleUsed.current &&
+      currentRemoteId === initialRemoteId.current &&
+      !!initialTitle;
+    initialTitleUsed.current = true;
 
-    supabase
-      .from("chat_threads")
-      .select("title")
-      .eq("id", currentRemoteId)
-      .maybeSingle()
-      .then(({ data }) => {
-        if (data?.title?.trim()) setThreadTitle(data.title.trim());
-        setTitleLoading(false);
-      });
+    if (!isInitial) {
+      setTitleLoading(true);
+
+      supabase
+        .from("chat_threads")
+        .select("title")
+        .eq("id", currentRemoteId)
+        .maybeSingle()
+        .then(({ data }) => {
+          if (data?.title?.trim()) setThreadTitle(data.title.trim());
+          setTitleLoading(false);
+        });
+    }
 
     const channel = supabase
       .channel(`thread-title:${currentRemoteId}`)

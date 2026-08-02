@@ -20,6 +20,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import type { Tables } from "@/lib/types/database";
 import { useUser } from "@/lib/hooks/use-user";
+import { peekSidebarThreads } from "@/lib/runtime/server-snapshot";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -51,6 +52,15 @@ function readCache(key: string): CachedThread[] {
   }
 }
 
+/** Row → display shape. One definition for every source (server, cache, live). */
+function toCachedThread(row: { id: string; title: string | null; is_archived: boolean }): CachedThread {
+  return {
+    remoteId: row.id,
+    title:    row.title ?? "New conversation",
+    status:   row.is_archived ? "archived" : "regular",
+  };
+}
+
 /** Writes up to CACHE_MAX entries — silently drops the rest. */
 function writeCache(key: string, threads: CachedThread[]): void {
   try {
@@ -65,9 +75,13 @@ export const ThreadList: FC = () => {
   const router   = useRouter();
   const pathname = usePathname();
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
-  const { user } = useUser();
+  const { user, loading: userLoading } = useUser();
   const userId   = user?.id ?? null;
 
+  // Note: the server snapshot is read inside the effect below, never during
+  // render. Rendering from it would make the first client render disagree with
+  // the SSR HTML (a hydration mismatch), and would read a module store that is
+  // deliberately inert on the server anyway.
   const [threads,      setThreads]      = useState<CachedThread[]>([]);
   const [loading,      setLoading]      = useState(true);
   const [hasMore,      setHasMore]      = useState(false);
@@ -82,6 +96,13 @@ export const ThreadList: FC = () => {
   // ── 1. Initial Supabase fetch (first page) ─────────────────────────────
 
   useEffect(() => {
+    // "Who is this?" is not yet answered. Deciding now would render the
+    // signed-out empty state ("No conversations yet") over a user who is in
+    // fact signed in with threads — the flash this component used to show on
+    // every mount, because useUser() legitimately starts at { user: null,
+    // loading: true }. Absence of an answer is not an answer.
+    if (userLoading) return;
+
     // Clear state when no user is present (e.g. after sign-out).
     if (!userId) {
       userCacheKey.current = null;
@@ -93,15 +114,25 @@ export const ThreadList: FC = () => {
     const key = cacheKey(userId);
     userCacheKey.current = key;
 
-    // Seed from this user's cache for instant first paint.
-    const cached = readCache(key);
-    if (cached.length > 0) {
-      setThreads(cached);
+    // Prefer the page's own server-rendered first page; fall back to this
+    // user's localStorage cache. Either way it's a head start, not the answer.
+    const primed = peekSidebarThreads();
+    if (primed) {
+      setThreads(primed.map(toCachedThread));
       setLoading(false);
     } else {
-      setLoading(true);
+      const cached = readCache(key);
+      if (cached.length > 0) {
+        setThreads(cached);
+        setLoading(false);
+      } else {
+        setLoading(true);
+      }
     }
 
+    // Revalidate regardless of how we painted. The network stays authoritative,
+    // so a stale cache or an older snapshot can only ever be a head start, not
+    // the final word.
     supabase
       .from("chat_threads")
       .select("id, title, is_archived")
@@ -110,17 +141,13 @@ export const ThreadList: FC = () => {
       .range(0, PAGE_SIZE - 1)
       .then(({ data }) => {
         if (!data) { setLoading(false); return; }
-        const items: CachedThread[] = data.map((row) => ({
-          remoteId: row.id,
-          title:    row.title ?? "New conversation",
-          status:   row.is_archived ? "archived" : "regular",
-        }));
+        const items = data.map(toCachedThread);
         setThreads(items);
         setHasMore(data.length === PAGE_SIZE);
         writeCache(key, items);
         setLoading(false);
       });
-  }, [supabase, userId]);
+  }, [supabase, userId, userLoading]);
 
   // ── 2. Runtime subscription — isMain only ──────────────────────────────
 
@@ -202,11 +229,7 @@ export const ThreadList: FC = () => {
       .range(threads.length, threads.length + PAGE_SIZE - 1);
 
     if (data) {
-      const items: CachedThread[] = data.map((row) => ({
-        remoteId: row.id,
-        title:    row.title ?? "New conversation",
-        status:   row.is_archived ? "archived" : "regular",
-      }));
+      const items = data.map(toCachedThread);
       setThreads((prev) => {
         const deduped = items.filter((n) => !prev.some((p) => p.remoteId === n.remoteId));
         // Don't expand the cache beyond CACHE_MAX — only the first page is cached.

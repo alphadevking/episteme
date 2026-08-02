@@ -1,23 +1,28 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { AuthChangeEvent, Session } from "@supabase/supabase-js";
 import { createSupabaseBrowserClient } from "../supabase/browser";
+import { buildUserInfo, type UserInfo } from "../user-info";
+import { UserSeedContext } from "./user-context";
 
-export type UserInfo = {
-  email: string | null;
-  fullName: string | null;
-  avatarUrl: string | null;
-  id: string | null;
-  primary_role?: string | null;
-  roles?: string[];
-  institution_id?: string | null;
-};
+export type { UserInfo };
 
 export function useUser() {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
-  const [user, setUser] = useState<UserInfo | null>(null);
-  const [loading, setLoading] = useState(true);
+
+  // Server-provided seed, when a <UserSeedProvider> is mounted above.
+  // Absent (undefined) → unchanged legacy behaviour: fetch on mount.
+  const seed = useContext(UserSeedContext);
+
+  const [user, setUser]       = useState<UserInfo | null>(seed?.user ?? null);
+  const [loading, setLoading] = useState(seed === undefined);
+
+  // Guards live in refs so the auth-subscription effect never re-runs because
+  // of them — re-running it would resubscribe and re-fire INITIAL_SESSION.
+  const seededRef        = useRef(seed !== undefined);
+  const sawInitialRef    = useRef(false);
+  const currentUserIdRef = useRef<string | null>(seed?.user?.id ?? null);
 
   useEffect(() => {
     let isMounted = true;
@@ -27,6 +32,7 @@ export function useUser() {
 
       const u = session?.user;
       if (!u) {
+        currentUserIdRef.current = null;
         setUser(null);
         setLoading(false);
         return;
@@ -39,27 +45,43 @@ export function useUser() {
         .eq("auth_id", u.id)
         .maybeSingle();
 
-      setUser({
-        id: u.id,
-        email: u.email ?? null,
-        fullName: (u.user_metadata?.full_name as string) || (u.user_metadata?.name as string) || null,
-        avatarUrl: (u.user_metadata?.avatar_url as string) || (u.user_metadata?.picture as string) || null,
-        primary_role: profile?.primary_role,
-        roles: profile?.roles ?? [],
-        institution_id: profile?.institution_id,
-      });
+      if (!isMounted) return;
+
+      currentUserIdRef.current = u.id;
+      setUser(buildUserInfo(u, profile));
       setLoading(false);
     };
 
-    const hydrate = async () => {
-      const { data } = await supabase.auth.getSession();
-      await setFromSession(data.session);
-    };
-
-    void hydrate();
+    // Unseeded: resolve from the session ourselves, exactly as before.
+    if (!seededRef.current) {
+      void (async () => {
+        const { data } = await supabase.auth.getSession();
+        await setFromSession(data.session);
+      })();
+    }
 
     const { data: sub } = supabase.auth.onAuthStateChange(
-      (_event: AuthChangeEvent, session: Session | null) => {
+      (event: AuthChangeEvent, session: Session | null) => {
+        // Supabase emits INITIAL_SESSION immediately on subscribe. When we were
+        // seeded by the server, that event carries nothing we don't already
+        // know — honouring it would re-issue the very profile query the seed
+        // exists to avoid. Every later event is handled normally, so sign-out
+        // and account switches still propagate.
+        if (event === "INITIAL_SESSION" && !sawInitialRef.current) {
+          sawInitialRef.current = true;
+          if (seededRef.current) return;
+        }
+
+        // A token refresh cannot change the profile row. Skip the refetch when
+        // it's the same user we already have loaded.
+        if (
+          event === "TOKEN_REFRESHED" &&
+          session?.user?.id &&
+          session.user.id === currentUserIdRef.current
+        ) {
+          return;
+        }
+
         void setFromSession(session);
       },
     );

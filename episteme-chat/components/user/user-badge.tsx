@@ -15,6 +15,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { useRouter } from "next/navigation";
 import { useUser } from "@/lib/hooks/use-user";
+import { clearSnapshot } from "@/lib/runtime/server-snapshot";
 import { cn } from "@/lib/utils";
 
 export function UserBadge({ compact = false }: { compact?: boolean }) {
@@ -31,6 +32,9 @@ export function UserBadge({ compact = false }: { compact?: boolean }) {
     Object.keys(localStorage)
       .filter((k) => k.startsWith("episteme:thread-list:"))
       .forEach((k) => localStorage.removeItem(k));
+    // In-memory server snapshot is per-user too — drop it with the cache so no
+    // thread titles can survive into the next session in this tab.
+    clearSnapshot();
     // Constrained, non-forgeable auth logger (actor derived server-side).
     void (supabase as unknown as {
       rpc(fn: "fn_log_auth_event", args: { p_action: string }): Promise<unknown>;

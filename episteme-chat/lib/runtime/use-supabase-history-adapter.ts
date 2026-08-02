@@ -13,7 +13,11 @@ import type {
   MessageStorageEntry,
 } from "@assistant-ui/react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { consumeMessages, type SnapshotMessageRow } from "@/lib/runtime/server-snapshot";
 import type { Json } from "@/lib/types/database";
+
+/** Row shape shared by the primed snapshot and the live query. */
+type MessageRow = SnapshotMessageRow;
 
 export function useSupabaseHistoryAdapter(): ThreadHistoryAdapter {
   // Stabilize the client — createSupabaseBrowserClient() returns a new object
@@ -51,26 +55,34 @@ export function useSupabaseHistoryAdapter(): ThreadHistoryAdapter {
               return { messages: [] };
             }
 
-            const { data, error } = await supabase
-              .from("thread_messages")
-              .select("sdk_message_id, parent_id, format, content_json, created_at")
-              .eq("thread_id", threadId)
-              .eq("format", formatAdapter.format)
-              .order("created_at", { ascending: true });
+            let rows: MessageRow[];
 
-            if (error) {
-              console.error("[history] load() error:", error.message);
-              return { messages: [] };
+            // First load after a server render: the page already shipped these
+            // rows. Available once per navigation — a later load() (thread
+            // switched away and back) falls through to the query below.
+            const primed = consumeMessages(threadId);
+            if (primed) {
+              // The server primes every format for the thread; the format
+              // filter is applied here so it can never drift from the value
+              // this adapter actually decodes.
+              rows = primed.filter((r) => r.format === formatAdapter.format);
+            } else {
+              const { data, error } = await supabase
+                .from("thread_messages")
+                .select("sdk_message_id, parent_id, format, content_json, created_at")
+                .eq("thread_id", threadId)
+                .eq("format", formatAdapter.format)
+                .order("created_at", { ascending: true });
+
+              if (error) {
+                console.error("[history] load() error:", error.message);
+                return { messages: [] };
+              }
+
+              rows = data as MessageRow[];
             }
 
-            const messages: MessageFormatItem<TMessage>[] = (
-              data as {
-                sdk_message_id: string | null;
-                parent_id:      string | null;
-                format:         string | null;
-                content_json:   unknown;
-              }[]
-            ).map((row) =>
+            const messages: MessageFormatItem<TMessage>[] = rows.map((row) =>
               formatAdapter.decode({
                 id:        row.sdk_message_id ?? "",
                 parent_id: row.parent_id ?? null,

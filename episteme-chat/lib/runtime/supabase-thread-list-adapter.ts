@@ -4,6 +4,7 @@
 // The class is structurally compatible; cast to `never` at usage site in episteme-runtime.tsx.
 import type { ThreadMessage } from "@assistant-ui/react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { consumeRuntimeThreads } from "@/lib/runtime/server-snapshot";
 
 // Inline types — verified from @assistant-ui/core@0.1.7 source
 type RemoteThreadInitializeResponse = {
@@ -43,6 +44,21 @@ export class SupabaseThreadListAdapter {
   }
 
   async list(): Promise<RemoteThreadListResponse> {
+    // First call after a server render: the page already shipped this list, so
+    // resolve without a round-trip. Available exactly once per navigation —
+    // every refresh after it goes to the database below.
+    const primed = consumeRuntimeThreads();
+    if (primed) {
+      return {
+        threads: primed.map((t) => ({
+          status:     t.is_archived ? ("archived" as const) : ("regular" as const),
+          remoteId:   t.id,
+          externalId: undefined,
+          title:      t.title ?? "Untitled",
+        })),
+      };
+    }
+
     // Use a SECURITY DEFINER RPC so the result is always scoped to the
     // authenticated user's own threads, regardless of RLS policies.
     const { data, error } = await this.supabase.rpc("fn_list_my_chat_threads");
