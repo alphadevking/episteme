@@ -10,15 +10,23 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  alignRow,
+  classifyCell,
   decodeEntities,
+  extractTables,
   htmlTableToMarkdown,
   isSeparatorLine,
   isTableLine,
   parseHtmlTable,
   parseMarkdownTable,
   splitMarkdownTable,
+  tableSimilarity,
   toMarkdownTable,
+  upgradeTablesFromSource,
 } from './table-markdown';
+
+/** Mirrors the module's internal cell classification, for the alignment tests. */
+type CellType = 'empty' | 'number' | 'text';
 
 const FEE_TABLE_HTML = `
 <table>
@@ -36,9 +44,14 @@ const FEE_TABLE_HTML = `
     <tr><td>4</td><td>Maintenance Fee</td><td>15,000.00</td><td>15,000.00</td></tr>
     <tr><td>5</td><td>MTN Net Library</td><td>4,000.00</td><td>4,000.00</td></tr>
     <tr><td>6</td><td>College Development Levy (Medical Students Only)</td><td>20,000.00</td><td>-</td></tr>
-    <tr><td>TOTAL</td><td></td><td>80,000.00</td><td>60,000.00</td></tr>
+    <tr><td>TOTAL</td><td>80,000.00</td><td>60,000.00</td></tr>
   </tbody>
 </table>`;
+// ^ THREE cells on the TOTAL row, not four. That is what Unstructured actually
+// returns for this page: uniben.edu writes `<td colspan="2">TOTAL</td>` and
+// text_as_html drops the colspan. An earlier version of this fixture invented
+// a fourth cell, which is why the suite passed while the real page came out
+// with its totals a column to the left. Fixtures are observations, not guesses.
 
 describe('parseHtmlTable — the uniben fee table', () => {
   test('recovers the header, including the decoded naira sign', () => {
@@ -62,7 +75,12 @@ describe('parseHtmlTable — the uniben fee table', () => {
       '20,000.00',
       '-',
     ]);
-    assert.deepEqual(table.rows[6], ['TOTAL', '', '80,000.00', '60,000.00']);
+    // The regression that shipped: with the colspan gone, padding on the right
+    // put 80,000.00 under ITEMS and 60,000.00 under MEDICAL, so the medical
+    // total read as the other-candidates total.
+    assert.deepEqual(table.rows[6], ['', 'TOTAL', '80,000.00', '60,000.00']);
+    assert.equal(table.rows[6]![2], '80,000.00', 'medical total left its column');
+    assert.equal(table.rows[6]![3], '60,000.00', 'other-candidates total left its column');
   });
 
   test('the extracted figures still reconcile', () => {
@@ -70,21 +88,119 @@ describe('parseHtmlTable — the uniben fee table', () => {
     // column, the column totals would stop adding up.
     const table = parseHtmlTable(FEE_TABLE_HTML)!;
     const money = (cell: string) => Number(cell.replace(/[^0-9.]/g, '')) || 0;
-    const items = table.rows.filter((r) => r[0] !== 'TOTAL');
+
+    // Found by content, not by column: the summary label legitimately moves
+    // between the columns its dropped colspan used to span.
+    const isTotal = (row: string[]) => row.includes('TOTAL');
+    const items = table.rows.filter((r) => !isTotal(r));
+    const total = table.rows.find(isTotal)!;
 
     assert.equal(items.reduce((sum, r) => sum + money(r[2]!), 0), 80_000);
     assert.equal(items.reduce((sum, r) => sum + money(r[3]!), 0), 60_000);
+    // And the stated totals agree with the columns they sit above.
+    assert.equal(money(total[2]!), 80_000);
+    assert.equal(money(total[3]!), 60_000);
+  });
+});
+
+describe('alignRow — where the gap goes in a short row', () => {
+  const money = ['number', 'number'] as const;
+
+  test('a trailing label row right-aligns, keeping figures under their headings', () => {
+    // TOTAL | 80,000.00 | 60,000.00  →  _ | TOTAL | 80,000.00 | 60,000.00
+    const types = ['number', 'text', ...money] as (CellType | null)[];
+    assert.deepEqual(alignRow(['TOTAL', '80,000.00', '60,000.00'], 4, types), [
+      '',
+      'TOTAL',
+      '80,000.00',
+      '60,000.00',
+    ]);
+  });
+
+  test('a row missing its LAST value left-aligns when the types say so', () => {
+    // The case a blanket right-align would corrupt. The final column is text
+    // here, so placing the figure there scores worse than leaving the gap at
+    // the end — the types carry the answer and alignment follows them.
+    const types = ['number', 'text', 'number', 'text'] as (CellType | null)[];
+    assert.deepEqual(alignRow(['7', 'Extra Fee', '1,000.00'], 4, types), [
+      '7',
+      'Extra Fee',
+      '1,000.00',
+      '',
+    ]);
+  });
+
+  test('a genuine tie resolves to right-alignment, by documented choice', () => {
+    // Two adjacent numeric columns and one number to place: nothing in the
+    // data says which column is missing, and no cleverness can invent it.
+    // Right-alignment wins because a short row is far more often a summary row
+    // whose merged label lost its colspan than a row missing a trailing value.
+    // Recorded here so the behaviour is a decision, not an accident.
+    const types = ['number', 'text', ...money] as (CellType | null)[];
+    assert.deepEqual(alignRow(['7', 'Extra Fee', '1,000.00'], 4, types), [
+      '7',
+      'Extra Fee',
+      '',
+      '1,000.00',
+    ]);
+  });
+
+  test('falls back to right-alignment when the columns say nothing', () => {
+    // No learned types — the summary-row convention is the safer default.
+    assert.deepEqual(alignRow(['a', 'b'], 4, [null, null, null, null]), ['', '', 'a', 'b']);
+  });
+
+  test('a full-width row is returned unchanged', () => {
+    const types = ['text', 'text'] as (CellType | null)[];
+    assert.deepEqual(alignRow(['a', 'b'], 2, types), ['a', 'b']);
+  });
+
+  test('an over-wide row is trimmed rather than widening the table', () => {
+    assert.deepEqual(alignRow(['a', 'b', 'c'], 2, [null, null]), ['a', 'b']);
+  });
+
+  test('an empty row becomes blanks, not a crash', () => {
+    assert.deepEqual(alignRow([], 3, [null, null, null]), ['', '', '']);
+  });
+
+  test('cell order is always preserved', () => {
+    const types = ['text', 'number', 'text', 'number'] as (CellType | null)[];
+    const out = alignRow(['x', '1'], 4, types);
+    const kept = out.filter((c) => c !== '');
+    assert.deepEqual(kept, ['x', '1']);
+  });
+});
+
+describe('classifyCell', () => {
+  test('recognises money, plain numbers and percentages', () => {
+    for (const value of ['80,000.00', '5000', '₦20,000.00', '3', '12%']) {
+      assert.equal(classifyCell(value), 'number', value);
+    }
+  });
+
+  test('treats a dash placeholder as an empty value column, not as prose', () => {
+    // Row 6's "-" stands in for a figure; calling it text would teach the
+    // column the wrong type.
+    for (const value of ['-', '–', '—']) assert.equal(classifyCell(value), 'empty', value);
+    assert.equal(classifyCell('   '), 'empty');
+  });
+
+  test('everything else is text', () => {
+    assert.equal(classifyCell('Bank/Portal Charges'), 'text');
+    assert.equal(classifyCell('TOTAL'), 'text');
   });
 });
 
 describe('parseHtmlTable — structure', () => {
-  test('pads short rows so later values cannot shift left', () => {
-    // The corruption this module exists to prevent: a missing cell silently
-    // promoting every value after it into the wrong column.
+  test('a short row cannot shift a value into the wrong column', () => {
+    // The corruption this module exists to prevent, in miniature: the number
+    // must stay under the numeric column.
     const table = parseHtmlTable(
-      '<table><tr><th>A</th><th>B</th><th>C</th></tr><tr><td>1</td><td>2</td></tr></table>',
+      '<table><tr><th>N</th><th>ITEM</th><th>FEE</th></tr>' +
+        '<tr><td>1</td><td>ICT Levy</td><td>6,000.00</td></tr>' +
+        '<tr><td>TOTAL</td><td>6,000.00</td></tr></table>',
     )!;
-    assert.deepEqual(table.rows[0], ['1', '2', '']);
+    assert.deepEqual(table.rows[1], ['', 'TOTAL', '6,000.00']);
   });
 
   test('expands colspan into every column it covers', () => {
@@ -173,7 +289,10 @@ describe('toMarkdownTable', () => {
     assert.equal(lines.length, 9); // header + separator + 7 rows
     assert.equal(lines[0], '| S/NO | ITEMS | COLLEGE OF MEDICAL SCIENCES CANDIDATES (₦) | OTHER CANDIDATES (₦) |');
     assert.equal(lines[1], '| --- | --- | --- | --- |');
-    assert.equal(lines[8], '| TOTAL |  | 80,000.00 | 60,000.00 |');
+    // TOTAL sits under ITEMS with S/NO blank — the merged label had to land in
+    // one of the two columns it spanned, and either reads correctly. What
+    // matters is that both figures stayed under their own headings.
+    assert.equal(lines[8], '|  | TOTAL | 80,000.00 | 60,000.00 |');
   });
 
   test('every row carries the same number of columns as the header', () => {
@@ -192,6 +311,111 @@ describe('toMarkdownTable', () => {
 
   test('returns null for a table with a header and no rows', () => {
     assert.equal(htmlTableToMarkdown('<table><tr><th>A</th></tr></table>'), null);
+  });
+});
+
+describe('upgradeTablesFromSource — the original HTML wins', () => {
+  /** What uniben.edu actually serves: the TOTAL label spans two columns. */
+  const SOURCE_PAGE = `
+    <html><body>
+      <h1>Acceptance Fee</h1>
+      <table>
+        <tr><th>S/NO</th><th>ITEMS</th><th>MEDICAL</th><th>OTHER</th></tr>
+        <tr><td>1</td><td>ICT Levy</td><td>6,000.00</td><td>6,000.00</td></tr>
+        <tr><td colspan="2">TOTAL</td><td>80,000.00</td><td>60,000.00</td></tr>
+      </table>
+    </body></html>`;
+
+  /** What Unstructured hands back for it — colspan gone. */
+  const lossy = [
+    { type: 'Title', text: 'Acceptance Fee' },
+    { type: 'Table', text: 'S/NO ITEMS MEDICAL OTHER 1 ICT Levy 6,000.00 6,000.00 TOTAL 80,000.00 60,000.00' },
+  ];
+
+  test('recovers the merged label instead of inferring around it', () => {
+    const [, table] = upgradeTablesFromSource(lossy, SOURCE_PAGE);
+    const parsed = parseMarkdownTable(table!.text)!;
+
+    // Both columns the colspan covered carry the label — no inference needed.
+    assert.equal(parsed.rows[1], '| TOTAL | TOTAL | 80,000.00 | 60,000.00 |');
+  });
+
+  test('leaves non-Table elements untouched', () => {
+    const [title] = upgradeTablesFromSource(lossy, SOURCE_PAGE);
+    assert.deepEqual(title, { type: 'Title', text: 'Acceptance Fee' });
+  });
+
+  test('matches by content, not by position', () => {
+    const twoTables = `
+      <table><tr><th>CODE</th><th>UNITS</th></tr><tr><td>CSC111</td><td>3</td></tr></table>
+      <table><tr><th>ITEM</th><th>FEE</th></tr><tr><td>ICT Levy</td><td>6,000.00</td></tr></table>`;
+    // Deliberately reversed relative to the source order.
+    const elements = [
+      { type: 'Table', text: 'ITEM FEE ICT Levy 6,000.00' },
+      { type: 'Table', text: 'CODE UNITS CSC111 3' },
+    ];
+
+    const [first, second] = upgradeTablesFromSource(elements, twoTables);
+    assert.match(first!.text, /ICT Levy/);
+    assert.match(second!.text, /CSC111/);
+    assert.doesNotMatch(first!.text, /CSC111/);
+  });
+
+  test('a source table is consumed at most once', () => {
+    const source = '<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>';
+    const elements = [
+      { type: 'Table', text: 'A B 1 2' },
+      { type: 'Table', text: 'A B 1 2' },
+    ];
+    const [first, second] = upgradeTablesFromSource(elements, source);
+
+    assert.notEqual(parseMarkdownTable(first!.text), null, 'the first should be upgraded');
+    // The second has no source left to claim, so it keeps its own text rather
+    // than being handed a copy of a table it is not.
+    assert.equal(second!.text, 'A B 1 2');
+  });
+
+  test('an unrelated table is not substituted', () => {
+    const source = '<table><tr><th>CODE</th><th>UNITS</th></tr><tr><td>CSC111</td><td>3</td></tr></table>';
+    const elements = [{ type: 'Table', text: 'Completely different content about hostel allocation' }];
+    assert.equal(upgradeTablesFromSource(elements, source)[0]!.text, elements[0]!.text);
+  });
+
+  test('HTML with no table changes nothing', () => {
+    assert.deepEqual(upgradeTablesFromSource(lossy, '<p>no tables here</p>'), lossy);
+    assert.deepEqual(upgradeTablesFromSource(lossy, ''), lossy);
+  });
+});
+
+describe('extractTables', () => {
+  test('returns each table in document order', () => {
+    const tables = extractTables('<p>a</p><table><tr><td>1</td></tr></table><p>b</p><table><tr><td>2</td></tr></table>');
+    assert.equal(tables.length, 2);
+    assert.match(tables[0]!, /<td>1<\/td>/);
+    assert.match(tables[1]!, /<td>2<\/td>/);
+  });
+
+  test('returns nothing when there is no table', () => {
+    assert.deepEqual(extractTables('<p>prose</p>'), []);
+  });
+});
+
+describe('tableSimilarity', () => {
+  test('identical content scores 1', () => {
+    assert.equal(tableSimilarity('a b 1 2', 'a b 1 2'), 1);
+  });
+
+  test('ignores markup and ordering of the rendering', () => {
+    assert.ok(tableSimilarity('ITEM FEE ICT Levy 6,000.00', '| ITEM | FEE |\n| ICT Levy | 6,000.00 |') > 0.9);
+  });
+
+  test('unrelated content scores near zero', () => {
+    assert.ok(tableSimilarity('hostel allocation policy', 'CODE UNITS CSC111 3') < 0.3);
+  });
+
+  test('empty input scores zero rather than dividing by zero', () => {
+    assert.equal(tableSimilarity('', 'a b'), 0);
+    assert.equal(tableSimilarity('a b', ''), 0);
   });
 });
 

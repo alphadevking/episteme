@@ -1,6 +1,6 @@
 import { UnstructuredClient } from 'unstructured-client';
 import { Strategy } from 'unstructured-client/sdk/models/shared/partitionparameters';
-import { htmlTableToMarkdown, isTableLine } from './table-markdown';
+import { htmlTableToMarkdown, isTableLine, upgradeTablesFromSource } from './table-markdown';
 
 
 export interface ProcessedElement {
@@ -51,18 +51,37 @@ export async function processDocument(
     throw new Error(`No elements extracted from ${fileName}`);
   }
 
-  return elements
-    .map((el: Record<string, any>) => {
-      const type = (el['type'] as string) ?? 'Unknown';
-      const text = (el['text'] as string) ?? '';
-      return {
-        text: preferTableMarkdown(type, text, el['metadata']?.['text_as_html'] as unknown),
-        type,
-        pageNumber: (el['metadata']?.['page_number'] as number | null) ?? null,
-        category,
-      };
-    })
-    .filter((el: ProcessedElement) => el.text.trim().length > 0);
+  const mapped: ProcessedElement[] = elements.map((el: Record<string, any>) => {
+    const type = (el['type'] as string) ?? 'Unknown';
+    const text = (el['text'] as string) ?? '';
+    return {
+      text: preferTableMarkdown(type, text, el['metadata']?.['text_as_html'] as unknown),
+      type,
+      pageNumber: (el['metadata']?.['page_number'] as number | null) ?? null,
+      category,
+    };
+  });
+
+  // For HTML the uploaded bytes ARE the source document, and its tables still
+  // carry the colspan/rowspan that Unstructured's reconstruction drops. Prefer
+  // the original wherever a table can be matched to it — knowing beats
+  // inferring, and this is the one input where we can know.
+  const upgraded = isHtml(ext) ? upgradeTablesFromSource(mapped, decodeUtf8(fileBuffer)) : mapped;
+
+  return upgraded.filter((el: ProcessedElement) => el.text.trim().length > 0);
+}
+
+function isHtml(ext: string): boolean {
+  return ext === 'html' || ext === 'htm' || ext === 'xhtml';
+}
+
+/** Decode without throwing — a mis-declared encoding must not fail the ingest. */
+function decodeUtf8(buffer: Uint8Array): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: false }).decode(buffer);
+  } catch {
+    return '';
+  }
 }
 
 /**

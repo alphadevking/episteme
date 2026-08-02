@@ -101,6 +101,134 @@ interface RawCell {
   isHeader: boolean;
 }
 
+// ── Aligning rows that arrive short ──────────────────────────────────────────
+
+/**
+ * WHY THIS EXISTS — measured, not theorised.
+ *
+ * uniben.edu writes its fee table's last row as a merged label:
+ *
+ *     <td colspan="2">TOTAL</td><td>80,000.00</td><td>60,000.00</td>
+ *
+ * Unstructured's `text_as_html` DROPS the colspan and emits three plain cells
+ * for a four-column table. Padding the gap on the right then produced
+ *
+ *     | TOTAL | 80,000.00 | 60,000.00 |          (under S/NO | ITEMS | MEDICAL)
+ *
+ * — the medical total filed under ITEMS and the other-candidates total filed
+ * under MEDICAL. Asking "what is the total fee for a medical student" returned
+ * 60,000 instead of 80,000: the exact corruption this module was written to
+ * prevent, reintroduced by the padding meant to prevent it.
+ *
+ * The gap's position cannot be recovered from the short row alone. It CAN be
+ * recovered from the columns: the full-width rows establish what each column
+ * holds, and a cell is placed where its own shape agrees. Trailing money
+ * columns then keep their money, whichever end the missing cell was at.
+ */
+type CellType = 'empty' | 'number' | 'text';
+
+/** Numbers, currency and placeholders — the shapes a value column holds. */
+export function classifyCell(value: string): CellType {
+  const trimmed = value.trim();
+  if (trimmed === '') return 'empty';
+  // A dash is how a table writes "no value here"; it belongs with the column
+  // it stands in for, not with prose.
+  if (/^[-–—]$/.test(trimmed)) return 'empty';
+  if (/^[₦$€£]?\s*[\d,]+(\.\d+)?\s*%?$/.test(trimmed)) return 'number';
+  return 'text';
+}
+
+/**
+ * What each column holds, learned only from rows that are already the right
+ * width — the rows whose alignment is not in question.
+ */
+function columnTypes(rows: string[][], width: number): (CellType | null)[] {
+  const types: (CellType | null)[] = Array.from({ length: width }, () => null);
+
+  for (let col = 0; col < width; col++) {
+    const counts: Record<CellType, number> = { empty: 0, number: 0, text: 0 };
+    let seen = 0;
+    for (const row of rows) {
+      if (row.length !== width) continue;
+      const type = classifyCell(row[col] ?? '');
+      if (type === 'empty') continue; // says nothing about the column
+      counts[type] += 1;
+      seen += 1;
+    }
+    if (seen === 0) continue;
+    types[col] = counts.number >= counts.text ? 'number' : 'text';
+  }
+
+  return types;
+}
+
+/**
+ * Place a short row's cells into `width` columns, in order, leaving the gaps
+ * where the cell shapes best agree with the columns.
+ *
+ * Ties break toward leaving the gap EARLIER, which right-aligns the row. That
+ * is the summary-row convention — `TOTAL` spanning the leading label columns
+ * with the figures under their own headings — and it is the safe default when
+ * the column types say nothing.
+ *
+ * KNOWN LIMIT: two adjacent columns of the same type leave a real ambiguity
+ * that no heuristic can resolve, because the information is genuinely absent
+ * from the row. The tie-break above is a considered default, not a deduction.
+ * The way to remove the ambiguity rather than guess it is to stop losing the
+ * colspan in the first place — for URL-sourced pages the original HTML still
+ * has it, and parsing tables from there instead of from Unstructured's
+ * reconstruction would make this path unnecessary for the harvest corpus.
+ */
+export function alignRow(cells: string[], width: number, types: (CellType | null)[]): string[] {
+  if (cells.length >= width) return cells.slice(0, width);
+  if (cells.length === 0) return Array.from({ length: width }, () => '');
+
+  const score = (cell: string, col: number): number => {
+    const columnType = types[col];
+    if (!columnType) return 0;
+    return classifyCell(cell) === columnType ? 1 : 0;
+  };
+
+  const n = cells.length;
+  // best[i][j] — highest score placing the first i cells within the first j
+  // columns. Standard order-preserving alignment; both dimensions are tiny.
+  const best: number[][] = Array.from({ length: n + 1 }, () =>
+    Array.from({ length: width + 1 }, () => Number.NEGATIVE_INFINITY),
+  );
+  for (let j = 0; j <= width; j++) best[0]![j] = 0;
+
+  for (let i = 1; i <= n; i++) {
+    for (let j = i; j <= width; j++) {
+      const skipColumn = best[i]![j - 1]!;
+      const placeHere = best[i - 1]![j - 1]! + score(cells[i - 1]!, j - 1);
+      best[i]![j] = Math.max(skipColumn, placeHere);
+    }
+  }
+
+  // Walk back from the last column. On a tie, PLACE rather than skip: filling
+  // the rightmost columns first pushes the gaps to the left, which is the
+  // right-aligned summary-row default. (Preferring the skip here would leave
+  // the blanks on the right instead — left-alignment, the very behaviour that
+  // put 80,000.00 under ITEMS.)
+  const out = Array.from({ length: width }, () => '');
+  let i = n;
+  let j = width;
+  while (i > 0 && j > 0) {
+    // Only skip if enough columns remain for the cells still to be placed.
+    const skipColumn = j - 1 >= i ? best[i]![j - 1]! : Number.NEGATIVE_INFINITY;
+    const placeHere = best[i - 1]![j - 1]! + score(cells[i - 1]!, j - 1);
+    if (skipColumn > placeHere) {
+      j -= 1;
+    } else {
+      out[j - 1] = cells[i - 1]!;
+      i -= 1;
+      j -= 1;
+    }
+  }
+
+  return out;
+}
+
 const TABLE_RE = /<table\b[^>]*>([\s\S]*?)<\/table>/i;
 const ROW_RE = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
 const CELL_RE = /<(t[hd])\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi;
@@ -186,11 +314,6 @@ export function parseHtmlTable(html: string): HtmlTable | null {
   const width = Math.max(...grid.map((r) => r.length));
   if (width === 0) return null;
 
-  const rectangular = grid.map((row) => {
-    const filled = Array.from({ length: width }, (_, i) => row[i] ?? '');
-    return filled;
-  });
-
   // Header selection: an all-<th> first row is the header. Otherwise the first
   // row is promoted, which is the conventional reading of a leading row and
   // matches every table this pipeline has met. A table whose first row is data
@@ -199,8 +322,16 @@ export function parseHtmlTable(html: string): HtmlTable | null {
   const headerIndex = headerFlags.findIndex(Boolean);
   const useIndex = headerIndex === -1 ? 0 : headerIndex;
 
-  const header = rectangular[useIndex]!;
-  const rows = rectangular.filter((_, i) => i !== useIndex);
+  // A short header is padded on the right: header labels lead, and there is no
+  // column of established types to align them against yet.
+  const headerRow = grid[useIndex]!;
+  const header = Array.from({ length: width }, (_, i) => headerRow[i] ?? '');
+
+  const bodyRows = grid.filter((_, i) => i !== useIndex);
+  // Learn the columns from the rows that are already the right width, then use
+  // them to place the ones that are not. See alignRow.
+  const types = columnTypes(bodyRows, width);
+  const rows = bodyRows.map((row) => alignRow(row, width, types));
 
   // A header of entirely empty labels is worse than none — it produces
   // `| | | |`, which reads as a broken table. Number the columns instead.
@@ -241,6 +372,101 @@ export function htmlTableToMarkdown(html: string): string | null {
   if (!table) return null;
   if (table.rows.length === 0) return null;
   return toMarkdownTable(table);
+}
+
+// ── Recovering tables from the original HTML ─────────────────────────────────
+
+/**
+ * Every `<table>` in the source, in document order.
+ *
+ * A nested table makes the non-greedy match close on the inner `</table>`,
+ * producing an unbalanced fragment. That fragment fails parseHtmlTable and is
+ * skipped, which is the outcome we want anyway — parseHtmlTable refuses nested
+ * tables deliberately.
+ */
+export function extractTables(html: string): string[] {
+  return [...html.matchAll(/<table\b[^>]*>[\s\S]*?<\/table>/gi)].map((m) => m[0]);
+}
+
+/** Words and numbers, lowercased — what two renderings of one table share. */
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[^a-z0-9.,]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/**
+ * Dice similarity over token multisets — 1.0 when two texts contain the same
+ * words the same number of times, regardless of order or markup.
+ */
+export function tableSimilarity(a: string, b: string): number {
+  const left = tokenize(a);
+  const right = tokenize(b);
+  if (left.length === 0 || right.length === 0) return 0;
+
+  const counts = new Map<string, number>();
+  for (const token of left) counts.set(token, (counts.get(token) ?? 0) + 1);
+
+  let shared = 0;
+  for (const token of right) {
+    const remaining = counts.get(token) ?? 0;
+    if (remaining > 0) {
+      shared += 1;
+      counts.set(token, remaining - 1);
+    }
+  }
+
+  return (2 * shared) / (left.length + right.length);
+}
+
+/** Below this, two tables are different tables and must not be substituted. */
+const TABLE_MATCH_THRESHOLD = 0.6;
+
+/**
+ * Replace extracted Table elements with the same table parsed from the
+ * ORIGINAL HTML, which still has the structure Unstructured discarded.
+ *
+ * WHY: uniben.edu writes `<td colspan="2">TOTAL</td>`; Unstructured's
+ * `text_as_html` drops the colspan and hands back three cells for a
+ * four-column row. alignRow can usually infer where the gap belongs, but
+ * inference is not knowledge — two adjacent money columns leave a tie no
+ * heuristic can settle. The source HTML has the answer outright, and for
+ * URL-harvested pages and uploaded .html we are holding it the whole time.
+ *
+ * Matched by content, never by position: a page whose tables Unstructured
+ * merged, split, or skipped would otherwise have one table's grid stamped onto
+ * another's text. Each source table is consumed at most once, and anything
+ * unmatched keeps exactly the text it arrived with.
+ */
+export function upgradeTablesFromSource<T extends { type: string; text: string }>(
+  elements: T[],
+  sourceHtml: string,
+): T[] {
+  const candidates = extractTables(sourceHtml)
+    .map((html) => ({ markdown: htmlTableToMarkdown(html), used: false }))
+    .filter((c): c is { markdown: string; used: boolean } => c.markdown !== null);
+
+  if (candidates.length === 0) return elements;
+
+  return elements.map((element) => {
+    if (element.type !== 'Table') return element;
+
+    let best: { index: number; score: number } | null = null;
+    for (const [index, candidate] of candidates.entries()) {
+      if (candidate.used) continue;
+      const score = tableSimilarity(element.text, candidate.markdown);
+      if (!best || score > best.score) best = { index, score };
+    }
+
+    if (!best || best.score < TABLE_MATCH_THRESHOLD) return element;
+
+    candidates[best.index]!.used = true;
+    return { ...element, text: candidates[best.index]!.markdown };
+  });
 }
 
 // ── Markdown table structure ─────────────────────────────────────────────────
