@@ -54,6 +54,14 @@ alone would let a typo publish an operator runbook to every user.
 | `namespace` | `platform-help` or `platform-admin`. Must match the directory. |
 | `roles` | Retrieval roles that may match. All five for `help/`; staff/hod for `admin/`. |
 | `updated` | ISO date. Editorial metadata only — it drives no runtime behaviour. |
+| `keywords` | Optional list. Words a reader uses for this page that the page never writes. |
+
+`keywords` exist because ranking is lexical: a query term must literally appear
+somewhere in the section. *"What are your capabilities"* scored zero against a
+page that explains capabilities at length but never uses the word, so the
+assistant abstained on a question about itself. Keywords are ranked as **heading
+terms** — they are the author asserting what the page answers to — and are never
+shown to the model or cited. Add the reader's vocabulary, not more of ours.
 
 ## Writing for retrieval
 
@@ -69,6 +77,28 @@ concepts using institutional examples, and terms like *fees*, *students* and
 *level* appear incidentally. A body mention alone will not capture an
 institutional question (heading-anchoring exists precisely to stop that), but
 keep such examples out of headings.
+
+## Deployment — these files must be copied into the build
+
+**`mastra build` bundles JavaScript and copies nothing else.** Without an
+explicit step, this entire tree is absent from the deployed function and the
+platform tier answers *nothing* — while every local test passes, because in
+development the files are simply there. That is not hypothetical: it is what
+production did, and the symptom was the assistant abstaining on *"what can this
+assistant do"* on the deployed site only.
+
+Two things keep it fixed:
+
+- `vercel.json` copies `src/content` next to the function entrypoint. If you
+  change the build command, keep that copy. It is load-bearing, not tidying.
+- `loadPlatformDocs` **throws** when it finds zero documents, and the tier logs
+  `CORPUS FAILED TO LOAD` with every path it checked. An empty corpus is a
+  broken deployment, never a valid state — the original bug survived because it
+  was silent, so silence is now impossible.
+
+`platform-docs-tier.ts` tries several content roots (dev layout, bundled layout,
+cwd-relative) and uses the first that exists, so a deployer layout change
+degrades to a loud error rather than a wrong answer.
 
 ## Verifying a change
 
