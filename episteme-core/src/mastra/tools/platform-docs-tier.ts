@@ -13,6 +13,7 @@
  * platform docs" rather than taking the whole chat path down with it.
  */
 import { join, dirname } from 'node:path';
+import { readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import {
   loadPlatformDocs,
@@ -25,9 +26,48 @@ import { PLATFORM_DOCS_CONFIG } from '../config';
 import { PLATFORM_HELP_NAMESPACE } from '../security/retrieval-gate';
 import { documentSource, type Source } from './source';
 
-const CONTENT_ROOT = join(
-  dirname(fileURLToPath(import.meta.url)), '..', '..', 'content', 'platform',
-);
+/**
+ * Where the Markdown corpus lives — which is NOT the same place in development
+ * and in a deployed build.
+ *
+ * This used to be a single path relative to this module: `../../content/platform`,
+ * correct under tsx (src/mastra/tools → src/content/platform) and wrong in every
+ * build. `mastra build` bundles the JavaScript into a flat function directory and
+ * copies no Markdown, so the resolved path pointed at a directory that does not
+ * exist and the platform tier silently served NOTHING in production. "What can
+ * this assistant do" abstained on the deployed site while passing every local
+ * test — the corpus was simply absent.
+ *
+ * Candidates are tried in order and the first that exists wins:
+ *   1. dev/tsx — this file sits in src/mastra/tools
+ *   2. bundled — the build copies src/content next to the function entrypoint
+ *      (see vercel.json); the bundle is flat, so content/ is a sibling
+ *   3-4. cwd-relative, for runners that execute from the package root
+ */
+const CONTENT_ROOT_CANDIDATES = [
+  join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'content', 'platform'),
+  join(dirname(fileURLToPath(import.meta.url)), 'content', 'platform'),
+  join(process.cwd(), 'content', 'platform'),
+  join(process.cwd(), 'src', 'content', 'platform'),
+];
+
+/**
+ * First candidate that actually contains the corpus.
+ *
+ * Falls back to the dev path when none match, so the error message names a real
+ * location rather than reporting success against an empty directory.
+ */
+async function resolveContentRoot(): Promise<string> {
+  for (const candidate of CONTENT_ROOT_CANDIDATES) {
+    try {
+      const entries = await readdir(candidate);
+      if (entries.length > 0) return candidate;
+    } catch {
+      // Not this one — try the next.
+    }
+  }
+  return CONTENT_ROOT_CANDIDATES[0]!;
+}
 
 let cache: Promise<PlatformSection[]> | null = null;
 
@@ -35,12 +75,24 @@ let cache: Promise<PlatformSection[]> | null = null;
 export function loadPlatformSections(
   logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
 ): Promise<PlatformSection[]> {
-  cache ??= loadPlatformDocs(CONTENT_ROOT)
+  cache ??= resolveContentRoot()
+    .then((root) => loadPlatformDocs(root))
     .then((docs) => docs.flatMap(splitIntoSections))
     .catch((err) => {
       // Fail soft: a broken corpus must not break institutional retrieval. The
       // corpus is validated in CI by platform-docs.test.ts, so reaching here
-      // means something is wrong with the deployment itself.
+      // means something is wrong with the DEPLOYMENT, not the content.
+      //
+      // console.error, not just the optional logger: this went unnoticed in
+      // production precisely because the only signal was a `logger?.warn` that
+      // callers may not pass, on a path whose symptom — "no platform docs" —
+      // is indistinguishable from a legitimate miss. An absent corpus is never
+      // legitimate, so it must be loud on every deployment that has one.
+      console.error(
+        '[platformDocs] CORPUS FAILED TO LOAD — the platform tier will answer nothing. ' +
+        'Checked: ' + CONTENT_ROOT_CANDIDATES.join(', '),
+        (err as Error).message,
+      );
       logger?.warn('[platformDocs] failed to load corpus', { error: (err as Error).message });
       return [];
     });

@@ -319,3 +319,33 @@ describe('the committed corpus', () => {
     }
   });
 });
+
+describe('an absent corpus is a deployment failure, not an empty result', () => {
+  /**
+   * REGRESSION — the bug that reached production.
+   *
+   * `mastra build` bundles JavaScript and copies no Markdown, so the deployed
+   * function resolved a content root that did not exist. loadPlatformDocs
+   * skipped each missing directory with `continue`, returned zero documents,
+   * and the platform tier served nothing while reporting no error at all. A
+   * broken deployment was indistinguishable from a healthy one, and "what can
+   * this assistant do" abstained in production for weeks of local green tests.
+   *
+   * Returning [] here is the dangerous outcome, so it must throw.
+   */
+  test('throws when no documents are found anywhere', async () => {
+    await assert.rejects(
+      () => loadPlatformDocs(join(dirname(fileURLToPath(import.meta.url)), '__nonexistent_corpus__')),
+      /no platform documents found/,
+      'an empty corpus resolved silently — the production failure mode',
+    );
+  });
+
+  test('the error names the path it checked', async () => {
+    // Without the path, "corpus missing" is unactionable in a deploy log.
+    await assert.rejects(
+      () => loadPlatformDocs('/definitely/not/a/real/content/root'),
+      /definitely\/not\/a\/real\/content\/root|definitely\not\a\real/,
+    );
+  });
+});

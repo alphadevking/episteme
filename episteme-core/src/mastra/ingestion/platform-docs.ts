@@ -227,6 +227,22 @@ export async function loadPlatformDocs(contentRoot: string): Promise<PlatformDoc
     }
   }
 
+  // An EMPTY corpus is a broken deployment, never a valid state.
+  //
+  // The per-directory `continue` above tolerates a missing help/ or admin/
+  // folder, which is right while the repo is being set up. But finding NOTHING
+  // anywhere means the Markdown never reached this machine — exactly what
+  // happened on Vercel, where the build bundles JS and copies no content. It
+  // failed silently: zero documents, no error, and a platform tier that
+  // abstained on every question about the product itself while every local
+  // test passed. Throw so the caller can say so out loud.
+  if (docs.length === 0) {
+    throw new Error(
+      `no platform documents found under ${contentRoot} — ` +
+      'the corpus is missing from this deployment (the build must copy src/content)',
+    );
+  }
+
   assertUniqueDocIds(docs);
   return docs;
 }

@@ -1,4 +1,20 @@
 {
   "version": 2,
-  "buildCommand": "pnpm mastra build"
+  "//": [
+    "The copy step is load-bearing, not housekeeping.",
+    "",
+    "`mastra build` bundles JavaScript into a flat function directory and copies",
+    "no other assets. src/content/platform holds the platform documentation",
+    "corpus — plain Markdown read from disk at request time, deliberately never",
+    "ingested into Pinecone — so without this the deployed function has NO",
+    "platform docs at all. It failed silently: the tier answered nothing, and",
+    "'what can this assistant do' abstained in production while passing every",
+    "local test, because in dev the files are simply there.",
+    "",
+    "The destination is the function root because the bundle is flat; the runtime",
+    "resolver in platform-docs-tier.ts looks for `content/platform` beside the",
+    "entrypoint. If the deployer's output layout ever changes, the corpus loader",
+    "now throws and logs CORPUS FAILED TO LOAD rather than degrading quietly."
+  ],
+  "buildCommand": "pnpm mastra build && cp -r src/content .vercel/output/functions/index.func/content"
 }
