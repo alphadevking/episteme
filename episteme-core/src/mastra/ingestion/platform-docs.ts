@@ -56,6 +56,22 @@ export interface PlatformDoc {
   roles: string[];
   /** ISO string — the content's own editorial date. Drives staleness. */
   updated: string;
+  /**
+   * Vocabulary this document answers to but does not itself use.
+   *
+   * The ranker is purely lexical: a query term must literally appear in the
+   * text. That is fine for a corpus we author, EXCEPT that readers do not know
+   * our wording. "What are your capabilities" scored zero against a help page
+   * that explains capabilities at length but never writes the word — so the
+   * assistant abstained on a question about itself.
+   *
+   * Keywords close that gap without embeddings: they are the author stating
+   * "this page answers to these words too". Treated exactly like heading terms,
+   * because that is what they are — a claim about what the page is ABOUT.
+   *
+   * Optional; a document that omits them behaves as before.
+   */
+  keywords: string[];
   body: string;
   /** Path relative to the content root, e.g. "admin/institution-setup.md". */
   relPath: string;
@@ -154,6 +170,19 @@ export function parsePlatformDoc(
     throw new Error(`${relPath}: "updated" is in the future: ${updatedRaw}`);
   }
 
+  // Optional, but must be a list of non-empty strings when present — a typo'd
+  // scalar would otherwise be silently ignored and the alias never applied.
+  const rawKeywords = data['keywords'];
+  if (rawKeywords !== undefined && !Array.isArray(rawKeywords)) {
+    throw new Error(`${relPath}: frontmatter "keywords" must be a list`);
+  }
+  const keywords = ((rawKeywords as unknown[]) ?? []).map((k) => {
+    if (typeof k !== 'string' || !k.trim()) {
+      throw new Error(`${relPath}: "keywords" entries must be non-empty strings`);
+    }
+    return k.trim();
+  });
+
   if (!body.trim()) throw new Error(`${relPath}: document body is empty`);
 
   return {
@@ -162,6 +191,7 @@ export function parsePlatformDoc(
     namespace,
     roles,
     updated: updatedDate.toISOString(),
+    keywords,
     body,
     relPath,
   };
@@ -219,6 +249,15 @@ export interface PlatformSection {
   heading: string;
   /** Heading + prose, ready to hand to the model. */
   text: string;
+  /**
+   * Document-level `keywords` from frontmatter, carried onto every section.
+   *
+   * Ranked as heading terms (see rankSections), NOT as body text: they are the
+   * author's statement of what the document answers to, which is precisely what
+   * a heading is. They are deliberately kept OUT of `text` so they never reach
+   * the model — a keyword is a retrieval alias, not content to cite.
+   */
+  keywords: string[];
   namespace: string;
   roles: string[];
   relPath: string;
@@ -246,6 +285,7 @@ export function splitIntoSections(doc: PlatformDoc): PlatformSection[] {
     if (text) {
       sections.push({
         docId: doc.docId,
+        keywords: doc.keywords,
         title: doc.title,
         heading,
         text: `${heading}\n\n${text}`,
@@ -370,9 +410,14 @@ export function rankSections(
   const queryTerms = Array.from(new Set(stemAll(tokenize(query))));
   if (queryTerms.length === 0 || sections.length === 0) return [];
 
+  // Frontmatter keywords join the HEADING term space, not the body: both are
+  // the author asserting what this section is about, and both should therefore
+  // satisfy the "is it about this, or does it merely mention it?" gate. Folding
+  // them into the body instead would let an alias sneak a section past coverage
+  // without ever making it the section's subject.
   const docTerms = sections.map((s) => ({
     body:    stemAll(tokenize(s.text)),
-    heading: stemAll(tokenize(s.heading)),
+    heading: stemAll(tokenize([s.heading, ...s.keywords].join(' '))),
   }));
 
   const lengths = docTerms.map((d) => d.body.length + d.heading.length * HEADING_WEIGHT);

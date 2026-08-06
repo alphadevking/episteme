@@ -4,6 +4,11 @@ title: Getting started with Episteme
 namespace: platform-help
 roles: [prospective, student, parent, staff, hod]
 updated: 2026-07-28
+# Words a reader uses for this page that the page itself never writes. The
+# ranker is lexical, so "what are your capabilities" scored zero here and the
+# assistant abstained on a question about itself. Retrieval aliases only —
+# these are never shown to the model or cited.
+keywords: [capabilities, capability, features, abilities, functions, purpose, help, guide, introduction, overview, usage, instructions, tips, works]
 ---
 
 # Getting started with Episteme

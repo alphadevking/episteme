@@ -408,11 +408,34 @@ export const groundedResponseTool = createTool({
         return { answer: ctx, confidence: 'high' as const, tier: 'kb' as const, sources };
       }
 
+      // ── AUTHORITY BEFORE FRESHNESS ────────────────────────────────────────
+      //
+      // A stale KB match may be superseded ONLY by dated official news — never
+      // by web search.
+      //
+      // This block used to try web as well, and that quietly disabled most of
+      // the knowledge base. STUDENTHANDBOOK.pdf is dated 2022-12-19 and is 391
+      // of the corpus's 454 vectors, so with a 365-day freshness threshold
+      // EVERY handbook-backed answer was stale, and every one of them was
+      // handed to web search instead. A user asking "what are the examination
+      // rules" got a third-party page prefaced with "these sources are external
+      // and unverified" while the university's own handbook — retrieved,
+      // relevant at 0.794, and citable by page number — sat unused.
+      //
+      // Freshness is not authority. A newer document is better evidence only
+      // when it is comparably authoritative; a random allowlisted page is not
+      // more authoritative than the institution's own handbook. Age is already
+      // communicated honestly through staleWarning, which travels with `ctx` —
+      // that is the right place to express "this may be out of date", rather
+      // than silently preferring a weaker source.
+      //
+      // News keeps its precedence because it is BOTH dated and official, which
+      // is exactly the case the divert was built for: "who is the current vice
+      // chancellor" answered from a 2022 handbook. That still works — the news
+      // tier holds the announcement — and now it is the only thing that can
+      // outrank the corpus.
       const newsHit = await tryNewsFallback(query, logger);
       if (newsHit) return { answer: newsHit.answer, confidence: 'high' as const, tier: newsHit.tier, sources: newsHit.sources };
-
-      const webHit = await tryWebFallback(query, logger);
-      if (webHit) return { answer: webHit.answer, confidence: 'high' as const, tier: webHit.tier, sources: webHit.sources };
 
       return { answer: ctx, confidence: 'high' as const, tier: 'kb' as const, sources };
     }

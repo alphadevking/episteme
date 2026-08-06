@@ -186,9 +186,14 @@ describe('assertUniqueDocIds', () => {
 });
 
 describe('rankSections', () => {
-  const section = (heading: string, text: string, namespace = 'platform-admin') => ({
+  const section = (
+    heading: string,
+    text: string,
+    namespace = 'platform-admin',
+    keywords: string[] = [],
+  ) => ({
     docId: heading, title: heading, heading, text: `${heading}\n\n${text}`,
-    namespace, roles: ['staff'], relPath: `admin/${heading}.md`,
+    keywords, namespace, roles: ['staff'], relPath: `admin/${heading}.md`,
   });
 
   const corpus = [

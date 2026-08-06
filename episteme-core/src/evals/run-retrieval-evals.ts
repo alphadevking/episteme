@@ -864,7 +864,25 @@ async function runSuggestionCases() {
   if (kbEntries.length > 0 && !kbUsable) {
     console.log('  (KB-backed chips skipped — no KB credentials)');
   }
-  const retrieveKnowledge = kbEntries.length > 0 && kbUsable ? await loadRetriever() : null;
+  // THROUGH THE WHOLE CASCADE, not just retrieval.
+  //
+  // This used to call retrieveKnowledge directly, and that made it report green
+  // on a chip users saw fail. Retrieval was genuinely fine — "what are the
+  // examination rules" matched the handbook at 0.794 — but the handbook is
+  // dated 2022, the cascade treated any stale match as beatable, and web search
+  // answered instead. The guard asserted the component while the product did
+  // something else.
+  //
+  // A chip is a promise about the ANSWER, so it has to be judged on the answer.
+  // tier must come back `kb`: not "something replied", but "the corpus replied",
+  // which is the only outcome that makes a knowledge-base chip honest.
+  const cascade = kbEntries.length > 0 && kbUsable
+    ? {
+        tool: (await import('../mastra/tools/grounded-response-tool')).groundedResponseTool,
+        RequestContext: (await import('@mastra/core/request-context')).RequestContext,
+        SESSION_KEYS: (await import('../mastra/server/session-context')).SESSION_KEYS,
+      }
+    : null;
 
   for (const entry of catalogue.entries) {
     for (const role of entry.roles) {
@@ -892,7 +910,7 @@ async function runSuggestionCases() {
         continue;
       }
 
-      if (!retrieveKnowledge) continue;
+      if (!cascade) continue;
 
       // The catalogue is JSON, so its roles are untyped strings. A role that is
       // not in the retrieval role space cannot be gated correctly — silently
@@ -909,28 +927,55 @@ async function runSuggestionCases() {
         continue;
       }
 
-      const res = await retrieveKnowledge({
-        query: entry.prompt,
-        role: retrievalRole,
-        roles: [retrievalRole],
-        trustLevel: entry.minTrust,
-        institutionId: EVAL_INSTITUTION_ID,
-      });
+      const rc = new cascade.RequestContext();
+      rc.set(cascade.SESSION_KEYS.role, retrievalRole);
+      rc.set(cascade.SESSION_KEYS.roles, [retrievalRole]);
+      rc.set(cascade.SESSION_KEYS.trustLevel, entry.minTrust);
+      rc.set(cascade.SESSION_KEYS.isPlatformAdmin, entry.requiresPlatformAdmin === true);
+      if (EVAL_INSTITUTION_ID) rc.set(cascade.SESSION_KEYS.institutionId, EVAL_INSTITUTION_ID);
 
-      // Judged by the SAME relevance rule the app applies. A chip whose sources
-      // come back below the gate is not a working chip: the user sees the
-      // abstention message, which is precisely the outcome being prevented.
-      const cleared = clearsRelevanceGate(res, RETRIEVAL_CONFIG.relevanceThreshold);
-      const sources = res.found ? res.results.map((r) => r.source) : [];
-      const ok = cleared && sources.some((s) => matchesLabel(s, entry.expectedSource));
+      let tier = 'error';
+      let titles: string[] = [];
+      // Match on the URL as well as the display title. `expectedSource` names a
+      // DOCUMENT, and the url is its stable identifier; the title is derived for
+      // presentation (deriveTitle renders "admission_policy.html" as "Admission
+      // Policy"), so asserting on the title alone fails whenever a filename
+      // contains a separator — a formatting difference reported as a broken
+      // chip. STUDENTHANDBOOK only passed because it has nothing to reformat.
+      let identifiers: string[] = [];
+      try {
+        const result = await (cascade.tool.execute as unknown as (
+          input: unknown, ctx: unknown,
+        ) => Promise<{ tier?: string; sources?: Array<{ title?: string; url?: string }> }>)(
+          { query: entry.prompt },
+          { requestContext: rc },
+        );
+        tier = result?.tier ?? 'none';
+        titles = (result?.sources ?? []).map((src) => src.title ?? '');
+        identifiers = (result?.sources ?? []).flatMap((src) =>
+          [src.title, src.url].filter((v): v is string => Boolean(v)),
+        );
+      } catch (err) {
+        failures.push(`${label}: cascade threw — ${(err as Error).message}`);
+      }
+
+      const answeredByKb = tier === 'kb';
+      const ok = answeredByKb && identifiers.some((id) => matchesLabel(id, entry.expectedSource));
 
       checks++;
-      console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}`);
-      if (!ok) {
+      console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}  tier=${tier}`);
+      if (!ok && tier !== 'error') {
         failures.push(
-          `${label}: expected "${entry.expectedSource}", got ` +
-          (sources.length ? sources.join(', ') : '(nothing)') +
-          (res.found && !cleared ? '  ← retrieved but BELOW the relevance gate; the user would see an abstention' : ''),
+          `${label}: expected tier=kb citing "${entry.expectedSource}", got tier=${tier}` +
+          (titles.length ? ` citing ${titles.join(', ')}` : ' with no sources') +
+          (answeredByKb
+            // Right tier, wrong document. The user is NOT seeing an abstention
+            // here, so it must not be described as one — this is either a stale
+            // expectedSource or the corpus genuinely answering from elsewhere.
+            ? '  ← the corpus answered, but cited a different document; check expectedSource'
+            : tier === 'none'
+              ? '  ← the user sees "no verified information" for a chip we offer them'
+              : `  ← a ${tier} source answered instead of the corpus`),
         );
       }
     }
