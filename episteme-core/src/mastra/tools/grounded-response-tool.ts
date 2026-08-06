@@ -9,6 +9,8 @@ import { searchWeb, buildWebContext } from './web-search-tool';
 import { RETRIEVAL_CONFIG, UNIBEN_NEWS_CONFIG } from '../config';
 import { getSessionContext } from '../server/session-context';
 import { searchPlatformDocs } from './platform-docs-tier';
+import { listReachableSources } from './corpus-manifest';
+import { buildAbstentionAnswer } from './abstention';
 import { resolvePlatformNamespaces } from '../security/retrieval-gate';
 import { documentSource, sourceSchema, type Source } from './source';
 import { clearsRelevanceGate } from './relevance-gate';
@@ -158,9 +160,6 @@ function buildGroundedContext(
   return { context: lines.join('\n'), sources };
 }
 
-function buildAbstentionAnswer(query: string): string {
-  return `NO_RESULTS: The knowledge base does not contain verified information matching this query ("${query}"). Use this signal to acknowledge the gap and offer the user 2–3 concrete retrieval refinements based on their context and what was asked.`;
-}
 
 type CascadeHit = { answer: string; tier: 'news' | 'web'; sources: UnifiedSource[] };
 
@@ -448,8 +447,23 @@ export const groundedResponseTool = createTool({
     if (webHit) return { answer: webHit.answer, confidence: 'high' as const, tier: webHit.tier, sources: webHit.sources };
 
     // ── Nothing found at any tier ────────────────────────────────────────────
+    // Only here — after every tier has failed — do we spend a probe discovering
+    // what this caller CAN read. On the answering paths it would be pure cost;
+    // on this one it is the difference between offering real alternatives and
+    // inviting the model to invent them. Bounded by the same gate as retrieval,
+    // and fails soft to [] (see corpus-manifest.ts).
+    const reachable = await listReachableSources(
+      {
+        roles:      session.roles,
+        trustLevel: session.trustLevel,
+        ...(session.institutionId      ? { institutionId:      session.institutionId } : {}),
+        ...(session.namespaceAllowlist ? { namespaceAllowlist: session.namespaceAllowlist } : {}),
+      },
+      logger,
+    );
+
     return {
-      answer: buildAbstentionAnswer(query),
+      answer: buildAbstentionAnswer(query, reachable),
       confidence: 'low' as const,
       tier: 'none' as const,
       sources: [],

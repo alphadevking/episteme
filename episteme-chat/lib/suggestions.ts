@@ -1,72 +1,116 @@
 // lib/suggestions.ts
-// Hardcoded role-based chat suggestions.
-// TODO: replace with DB-driven suggestions per institution (configurable).
+// Role- and trust-aware chat suggestions, resolved from the canonical catalogue.
+//
+// WHY THIS IS NOT A HARDCODED LIST ANY MORE
+//
+// The previous version keyed four fixed chips off `primary_role`. Two things
+// were wrong with that, and both produced chips that could only ever fail:
+//
+//   1. It ignored TRUST. Access is intersection(role namespaces, trust ceiling).
+//      A chip whose source lives in `academic-policy` is unreachable below
+//      trust 3, so showing it to an unverified student guaranteed a refusal.
+//
+//   2. It ignored the CORPUS. Chips existed for scholarships, fees, results,
+//      accreditation and departmental budgets — none of which any ingested
+//      document covers. A suggestion chip is a promise the product makes; the
+//      first click was often spent on "I don't have information on that".
+//
+// The catalogue records, per entry, which roles and trust level can actually
+// reach its backing source, and the retrieval eval asserts those claims stay
+// true. See suggestions.catalogue.json for the admission rule.
 
+import catalogue from "./suggestions.catalogue.json";
+
+/** What the UI consumes. Unchanged shape — components read label + prompt. */
 export type Suggestion = {
-  label: string;
+  id:     string;
+  label:  string;
   prompt: string;
 };
 
-const SUGGESTIONS: Record<string, Suggestion[]> = {
-  prospective: [
-    { label: "Explore programs", prompt: "What undergraduate programs are available and what are the entry requirements?" },
-    { label: "Application process", prompt: "Walk me through the application process step by step." },
-    { label: "Scholarships & funding", prompt: "What scholarships and bursaries are available for new students?" },
-    { label: "Campus life", prompt: "What is student life like on campus? Accommodation, clubs, support services?" },
-  ],
-  student: [
-    { label: "Transcript request", prompt: "How do I request an official transcript?" },
-    { label: "Exam preparation", prompt: "Give me a study plan and tips for upcoming exams." },
-    { label: "Course registration", prompt: "How do I register for next semester's courses and what are the deadlines?" },
-    { label: "Academic support", prompt: "What academic support services are available to me as a student?" },
-  ],
-  parent: [
-    { label: "Fee payment", prompt: "How do I view and pay my child's outstanding fees?" },
-    { label: "Academic progress", prompt: "How can I check my child's academic progress and results?" },
-    { label: "Campus safety", prompt: "What safety and security measures are in place on campus?" },
-    { label: "Communication channels", prompt: "How do I communicate with faculty or the institution on my child's behalf?" },
-  ],
-  guardian: [
-    { label: "Fee payment", prompt: "How do I view and pay outstanding fees for the student I support?" },
-    { label: "Academic progress", prompt: "How can I check the student's academic progress and results?" },
-    { label: "Campus safety", prompt: "What safety and security measures are in place on campus?" },
-    { label: "Communication channels", prompt: "How do I communicate with faculty or the institution?" },
-  ],
-  staff: [
-    { label: "Student records", prompt: "How do I access and update student records in the system?" },
-    { label: "Policy & procedures", prompt: "Summarise the key institutional policies I need to be aware of." },
-    { label: "Claim review workflow", prompt: "Walk me through the process for reviewing and approving verification claims." },
-    { label: "Department reporting", prompt: "What reports can I generate for my department and how?" },
-  ],
-  hod: [
-    { label: "Department overview", prompt: "Give me a summary of my department's current status, staff, and programs." },
-    { label: "Staff management", prompt: "What tools do I have for managing staff assignments and workloads?" },
-    { label: "Program accreditation", prompt: "What are the accreditation requirements for our degree programs?" },
-    { label: "Budget & resources", prompt: "How do I submit a budget request or resource allocation for my department?" },
-  ],
-  admin: [
-    { label: "Pending claims", prompt: "Show me a summary of all pending verification claims that need review." },
-    { label: "User onboarding", prompt: "How do I onboard new staff members and set their access levels?" },
-    { label: "Institution settings", prompt: "Walk me through the institution configuration settings I can manage." },
-    { label: "Compliance report", prompt: "What compliance reports do I need to generate and when are they due?" },
-  ],
-  // superadmin: [
-  //   { label: "Platform overview", prompt: "Give me a high-level overview of all institutions on the platform." },
-  //   { label: "New institution setup", prompt: "Walk me through setting up a new institution from scratch." },
-  //   { label: "Audit & compliance", prompt: "Summarise recent platform-wide audit log activity." },
-  //   { label: "Admin provisioning", prompt: "How do I provision a new institution admin and what access do they get?" },
-  // ],
+/** A catalogue entry, including the provenance the eval asserts against. */
+export type CatalogueEntry = Suggestion & {
+  /**
+   * RETRIEVAL roles that can reach the backing source — mirrors the record-level
+   * `roles` metadata on the document, not merely the namespace grant. The two
+   * differ (an HOD holds the `admissions` namespace but matches no record in it).
+   */
+  roles:                 string[];
+  /** Trust level at which the backing namespace opens. */
+  minTrust:              number;
+  tier:                  "kb" | "platform";
+  /**
+   * The namespace holding the backing source. Used to honour a parent's
+   * link-derived allowlist, which can only ever NARROW access — a parent with
+   * no fee permission must not be shown a chip whose source sits in
+   * `financial-aid`, even though their role and trust would otherwise allow it.
+   * Platform namespaces are resolved on their own axis and are never narrowed
+   * by the allowlist; see resolvePlatformNamespaces.
+   */
+  namespace:             string;
+  /** Substring the eval expects in a returned source. */
+  expectedSource:        string;
+  requiresPlatformAdmin?: boolean;
+  why:                   string;
 };
 
-// Fallback for unknown roles
-const DEFAULT_SUGGESTIONS: Suggestion[] = [
-  { label: "Get started", prompt: "What can you help me with on this platform?" },
-  { label: "Platform features", prompt: "What features are available to me?" },
-  { label: "Support", prompt: "How do I get help or contact support?" },
-  { label: "Account settings", prompt: "How do I update my profile and account settings?" },
-];
+export const CATALOGUE: CatalogueEntry[] = catalogue.suggestions as CatalogueEntry[];
 
-export function getSuggestions(role?: string | null): Suggestion[] {
-  if (!role) return DEFAULT_SUGGESTIONS;
-  return SUGGESTIONS[role] ?? DEFAULT_SUGGESTIONS;
+/** How many chips the welcome grid shows. */
+export const MAX_SUGGESTIONS = 4;
+
+export type SuggestionContext = {
+  /**
+   * The caller's RETRIEVAL roles — the union from `resolveRetrievalRoles`, not
+   * `primary_role`. A user with roles ['student','hod'] queries with both, so
+   * showing them only one role's chips misrepresents what they can ask.
+   */
+  roles:            string[];
+  /** From `deriveTrustLevel`. Defaults to the floor, never upward. */
+  trustLevel?:      number;
+  /** The platform-operator bit, from `isPlatformAdmin`. */
+  isPlatformAdmin?: boolean;
+  /**
+   * A parent's link-derived namespace allowlist. Narrows only; omit when the
+   * caller holds no parent role, exactly as the chat route does.
+   */
+  namespaceAllowlist?: string[] | null;
+  limit?:           number;
+};
+
+/**
+ * Chips this caller can actually get an answer to.
+ *
+ * Fails closed on every axis: an unknown trust level degrades to 1, a missing
+ * operator bit hides operator content, and an empty role list matches nothing
+ * except entries open to the role it degrades to. Returning FEWER chips is
+ * always the correct failure mode — a missing suggestion costs a user nothing,
+ * while a dead one costs them their first impression.
+ */
+export function getSuggestions(ctx: SuggestionContext): Suggestion[] {
+  const roles = ctx.roles.length > 0 ? ctx.roles : ["prospective"];
+  // Clamp rather than trust: the caller derives this, but a bad value must not
+  // widen what we advertise.
+  const trust = Number.isInteger(ctx.trustLevel) ? Math.max(1, Math.min(4, ctx.trustLevel as number)) : 1;
+  const isOperator = ctx.isPlatformAdmin === true;
+  const limit = ctx.limit ?? MAX_SUGGESTIONS;
+
+  const roleSet = new Set(roles);
+  // An empty array means "not supplied" — matching resolveNamespaces, where an
+  // empty allowlist would otherwise deny everything.
+  const allowlist =
+    ctx.namespaceAllowlist && ctx.namespaceAllowlist.length > 0
+      ? new Set(ctx.namespaceAllowlist)
+      : null;
+
+  return CATALOGUE.filter((entry) => {
+    if (entry.requiresPlatformAdmin && !isOperator) return false;
+    if (trust < entry.minTrust) return false;
+    // Platform docs sit outside the institutional namespace axis, so a parent's
+    // allowlist must not strip their ability to ask how the product works.
+    if (allowlist && entry.tier === "kb" && !allowlist.has(entry.namespace)) return false;
+    return entry.roles.some((r) => roleSet.has(r));
+  })
+    .slice(0, limit)
+    .map(({ id, label, prompt }) => ({ id, label, prompt }));
 }

@@ -2,9 +2,9 @@
 import { Assistant } from "@/app/assistant";
 import { ThreadSwitcher } from "@/app/episteme-runtime";
 import { SnapshotPrimer } from "@/components/assistant-ui/snapshot-primer";
-import { getServerSupabase, getUserProfile } from "@/lib/supabase/server-auth";
+import { getServerSupabase } from "@/lib/supabase/server-auth";
 import { buildServerSnapshot } from "@/lib/runtime/server-snapshot.server";
-import { getSuggestions } from "@/lib/suggestions";
+import { getSuggestionsForCurrentUser } from "@/lib/suggestions-server";
 
 export default async function Page({
   params,
@@ -19,13 +19,12 @@ export default async function Page({
 
   // All three run concurrently. `getUserProfile()` is request-cached, so the
   // layout's guard and this call share a single auth + profile round-trip.
-  const [profile, thread, snapshot] = await Promise.all([
-    getUserProfile(),
+  const [suggestions, thread, snapshot] = await Promise.all([
+    getSuggestionsForCurrentUser(),
     supabase.from("chat_threads").select("title").eq("id", threadId).maybeSingle(),
     buildServerSnapshot(threadId),
   ]);
 
-  const suggestions    = getSuggestions(profile?.primary_role ?? null);
   const initialMessage = q ? decodeURIComponent(q) : undefined;
   const initialTitle   = thread.data?.title ?? undefined;
 

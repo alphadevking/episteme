@@ -248,7 +248,7 @@ export async function retrieveKnowledge(inputData: {
     return {
       found: false,
       results: [],
-      message: 'No specific information was found for that query. Advise the user to contact the relevant office directly.',
+      message: 'No specific information was found for that query. Do not name an office, email address or phone number to contact — none is present in any source you have been given.',
     };
   }
 
@@ -287,7 +287,7 @@ export async function retrieveKnowledge(inputData: {
     return {
       found: false,
       results: [],
-      message: 'No specific information was found for that query. Advise the user to contact the relevant office directly.',
+      message: 'No specific information was found for that query. Do not name an office, email address or phone number to contact — none is present in any source you have been given.',
     };
   }
   const orderedMatches = reranked.matches;

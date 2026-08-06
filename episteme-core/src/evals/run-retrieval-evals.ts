@@ -20,6 +20,8 @@
  * on live services, so it must never gate `pnpm test`. The scoring rules that
  * must not drift are pure and unit-tested in retrieval-metrics.test.ts.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { RETRIEVAL_CONFIG, RERANK_CONFIG } from '../mastra/config';
 import { resolvePlatformNamespaces } from '../mastra/security/retrieval-gate';
 import { searchPlatformDocs } from '../mastra/tools/platform-docs-tier';
@@ -71,6 +73,12 @@ const EVAL_INSTITUTION_ID = process.env['EVAL_INSTITUTION_ID'];
 
 /** Every role, for the maximally-privileged control caller. */
 const ALL_ROLES = ['prospective', 'student', 'parent', 'staff', 'hod'] as const;
+type RetrievalRole = (typeof ALL_ROLES)[number];
+
+/** Narrows an untrusted string to the retrieval role space, or null. */
+function asRetrievalRole(raw: string): RetrievalRole | null {
+  return (ALL_ROLES as readonly string[]).includes(raw) ? (raw as RetrievalRole) : null;
+}
 
 /**
  * Control queries for the corpus probe. Broad, ordinary institutional language:
@@ -776,6 +784,161 @@ async function runEntitlementCases() {
   return { failures, chunksInspected, casesWithResults, totalCases: KB_ENTITLEMENT_CASES.length };
 }
 
+// ── Suggestion chips (the product's promises) ────────────────────────────────
+
+/**
+ * A shipped suggestion chip, as recorded in episteme-chat's catalogue.
+ * Mirrors CatalogueEntry there; only the fields this eval asserts against.
+ */
+type SuggestionEntry = {
+  id: string;
+  prompt: string;
+  roles: string[];
+  minTrust: number;
+  tier: 'kb' | 'platform';
+  namespace: string;
+  expectedSource: string;
+  requiresPlatformAdmin?: boolean;
+};
+
+/**
+ * WHY THE CHIPS ARE EVALUATED HERE.
+ *
+ * A suggestion chip is a promise: it tells a user "ask me this and I will
+ * answer". Before this ran, the chips were a hardcoded list that had drifted
+ * completely away from the corpus — offering scholarships, fee payment, exam
+ * results, accreditation and departmental budgets, none of which any ingested
+ * document covers. Every one of those spent a user's FIRST click on a refusal.
+ *
+ * Hand-auditing the list fixes the day it is audited and rots by the next
+ * ingest. So the list is data, and this asserts the data is still true against
+ * the live corpus: same retrieval path, same gate, same relevance rule the app
+ * uses. A chip that stops being answerable now fails the run.
+ *
+ * EACH ROLE IS TESTED SEPARATELY, not as a union. The union hides exactly the
+ * bug that motivated this: an HOD holds the `admissions` namespace but matches
+ * no record in it, so a chip shown to [prospective, student, hod] would pass on
+ * the union while failing for the one role that could not answer it.
+ *
+ * The catalogue lives in episteme-chat because that is where chips are
+ * rendered; the packages share no workspace, so it is read from disk. That
+ * coupling is dev-time only — this eval is a developer tool, never a runtime
+ * dependency of either service.
+ */
+function loadSuggestionCatalogue(): { entries: SuggestionEntry[]; path: string } | null {
+  const override = process.env['EVAL_SUGGESTION_CATALOGUE'];
+  const url = override
+    ? new URL(`file://${override.replace(/\\/g, '/')}`)
+    : new URL('../../../episteme-chat/lib/suggestions.catalogue.json', import.meta.url);
+
+  try {
+    const raw = readFileSync(url, 'utf8');
+    const parsed = JSON.parse(raw) as { suggestions?: SuggestionEntry[] };
+    if (!Array.isArray(parsed.suggestions)) return null;
+    return { entries: parsed.suggestions, path: fileURLToPath(url) };
+  } catch {
+    return null;
+  }
+}
+
+async function runSuggestionCases() {
+  console.log(bar('SUGGESTION CHIPS (every shipped chip must still be answerable)'));
+
+  const catalogue = loadSuggestionCatalogue();
+  if (!catalogue) {
+    console.log(
+      'SKIPPED — suggestions.catalogue.json not found.\n' +
+      'Expected alongside episteme-chat/lib/. Set EVAL_SUGGESTION_CATALOGUE=<abs path>\n' +
+      'if the chat package lives elsewhere on this machine.',
+    );
+    return null;
+  }
+
+  console.log(`catalogue: ${catalogue.path}  (${catalogue.entries.length} shipped chip(s))\n`);
+
+  const failures: string[] = [];
+  let checks = 0;
+
+  const kbEntries = catalogue.entries.filter((e) => e.tier === 'kb');
+  const kbUsable  = hasKbCredentials();
+  if (kbEntries.length > 0 && !kbUsable) {
+    console.log('  (KB-backed chips skipped — no KB credentials)');
+  }
+  const retrieveKnowledge = kbEntries.length > 0 && kbUsable ? await loadRetriever() : null;
+
+  for (const entry of catalogue.entries) {
+    for (const role of entry.roles) {
+      // The exact envelope this chip is shown under: one role, and the lowest
+      // trust at which the UI will display it. Testing it any wider would prove
+      // something the UI never relies on.
+      const label = `${entry.id} [role=${role} trust=${entry.minTrust}]`;
+
+      if (entry.tier === 'platform') {
+        const namespaces = resolvePlatformNamespaces({
+          trustLevel: entry.minTrust,
+          isPlatformAdmin: entry.requiresPlatformAdmin === true,
+        });
+        const hit = await searchPlatformDocs(entry.prompt, namespaces);
+        const titles = (hit?.sources ?? []).map((s) => s.title);
+        const ok = titles.some((t) => matchesLabel(t, entry.expectedSource));
+        checks++;
+        console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}`);
+        if (!ok) {
+          failures.push(
+            `${label}: expected "${entry.expectedSource}", got ` +
+            (titles.length ? titles.join(', ') : '(nothing)'),
+          );
+        }
+        continue;
+      }
+
+      if (!retrieveKnowledge) continue;
+
+      // The catalogue is JSON, so its roles are untyped strings. A role that is
+      // not in the retrieval role space cannot be gated correctly — silently
+      // casting it would test a chip under an envelope the app would never
+      // produce, so it fails here instead.
+      const retrievalRole = asRetrievalRole(role);
+      if (!retrievalRole) {
+        checks++;
+        console.log(`FAIL  ${label}`);
+        failures.push(
+          `${label}: "${role}" is not a retrieval role (${ALL_ROLES.join(', ')}) — ` +
+          'the chip would be filtered by a role the gate does not understand',
+        );
+        continue;
+      }
+
+      const res = await retrieveKnowledge({
+        query: entry.prompt,
+        role: retrievalRole,
+        roles: [retrievalRole],
+        trustLevel: entry.minTrust,
+        institutionId: EVAL_INSTITUTION_ID,
+      });
+
+      // Judged by the SAME relevance rule the app applies. A chip whose sources
+      // come back below the gate is not a working chip: the user sees the
+      // abstention message, which is precisely the outcome being prevented.
+      const cleared = clearsRelevanceGate(res, RETRIEVAL_CONFIG.relevanceThreshold);
+      const sources = res.found ? res.results.map((r) => r.source) : [];
+      const ok = cleared && sources.some((s) => matchesLabel(s, entry.expectedSource));
+
+      checks++;
+      console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}`);
+      if (!ok) {
+        failures.push(
+          `${label}: expected "${entry.expectedSource}", got ` +
+          (sources.length ? sources.join(', ') : '(nothing)') +
+          (res.found && !cleared ? '  ← retrieved but BELOW the relevance gate; the user would see an abstention' : ''),
+        );
+      }
+    }
+  }
+
+  return { failures, checks };
+}
+
 // ── Labelling aid ────────────────────────────────────────────────────────────
 
 async function runLabelMode() {
@@ -903,6 +1066,7 @@ async function main() {
   }
 
   const kb          = await runKbCases();
+  const suggestions = await runSuggestionCases();
   const entitlement = await runEntitlementCases();
   await runCascadeCases();
 
@@ -918,6 +1082,36 @@ async function main() {
       '    cases passed by returning nothing from a corpus the harness cannot see.\n' +
       '    They do not demonstrate that abstention works.',
     );
+  }
+
+  // A broken chip is user-visible on the very first screen, so this does NOT
+  // wait for --strict. It is gated on corpus reachability instead: when the
+  // harness cannot see the corpus, every chip "fails" for a reason that is not
+  // a defect, and a guard that cries wolf gets switched off.
+  let suggestionsOk = true;
+  if (suggestions) {
+    console.log('\nSuggestion chips');
+    console.log(`  checks         ${suggestions.checks} (one per role each chip is shown to)`);
+    if (suggestions.checks === 0) {
+      console.log('  INCONCLUSIVE — no chip was actually exercised.');
+    } else if (suggestions.failures.length === 0) {
+      console.log('  every shipped chip is answerable for every role it is offered to');
+    } else if (corpus && !corpus.reachable) {
+      console.log(
+        `  ${suggestions.failures.length} failure(s), but UNVERIFIED — the corpus is not\n` +
+        '  reachable by this harness, so these are not evidence of a broken chip.\n' +
+        '  Fix reachability first (run with --corpus).',
+      );
+    } else {
+      suggestionsOk = false;
+      console.log(`  ${suggestions.failures.length} BROKEN PROMISE(S):`);
+      for (const f of suggestions.failures) console.log(`    - ${f}`);
+      console.log(
+        '\n  Each line is a chip a user can click that will answer with "I have no\n' +
+        '  verified information". Either ingest a document that answers it, or remove\n' +
+        '  the chip from suggestions.catalogue.json — do not relax the assertion.',
+      );
+    }
   }
 
   let entitlementOk = true;
@@ -969,6 +1163,11 @@ async function main() {
   // warning that a passing exit code contradicts.
   if (!entitlementOk) {
     console.error('\nFAILED: entitlement violation — a caller received a document outside their access.');
+    process.exit(1);
+  }
+
+  if (!suggestionsOk) {
+    console.error('\nFAILED: a shipped suggestion chip is no longer answerable.');
     process.exit(1);
   }
 

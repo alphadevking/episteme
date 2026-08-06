@@ -105,6 +105,45 @@ export const PLATFORM_CASES: PlatformCase[] = [
       'better answers"; the help namespace is visible to every role.',
   },
   /**
+   * THE SHORT FORM OF THE SAME QUESTION — the phrasing a user actually types.
+   *
+   * platform-getting-started above passes because "better answers" matches a
+   * heading. Strip the query back to how anyone would really ask it and every
+   * word is either grammar or the product's own name, all of which `tokenize`
+   * removes as non-discriminating; rankSections then early-returns on an empty
+   * term set. The one question every role is guaranteed to be able to ask was
+   * unanswerable, while its verbose paraphrase worked — so the chip passed and
+   * the typed question failed.
+   *
+   * Kept as separate cases from the long form deliberately: they exercise the
+   * identity fallback, and the long form must keep passing through the ORDINARY
+   * ranking path. One case cannot prove both.
+   */
+  {
+    id: 'platform-identity-short',
+    query: 'what can this assistant do',
+    trustLevel: 1,
+    expect: 'retrieve',
+    expectedTitles: ['Getting started with Episteme'],
+    why:
+      'Tokenizes to zero content terms, which is precisely what identifies it: ' +
+      'every word was grammar or a product name, so it can only be a question ' +
+      'about the product. See IDENTITY_QUERY in platform-docs-tier.ts.',
+  },
+  {
+    id: 'platform-identity-operator',
+    query: 'what can this assistant do',
+    trustLevel: 4,
+    isPlatformAdmin: true,
+    expect: 'retrieve',
+    expectedTitles: ['Getting started with Episteme'],
+    why:
+      'The identity fallback is restricted to the help namespace, so an operator ' +
+      'asking what the product does gets the same introduction as everyone else ' +
+      'rather than the ingestion runbook. Guards the narrowing, which is the part ' +
+      'that could silently regress into answering from admin content.',
+  },
+  /**
    * Access control observed through retrieval rather than through the gate's
    * own unit tests: the operator runbook must not surface for a caller without
    * the platform-admin bit, no matter how well the query matches it.
@@ -153,6 +192,137 @@ export const KB_CASES: KbCase[] = [
       'admission_policy.html is the admissions-namespace document in this corpus, ' +
       'and admissions is readable at trust 1 by prospective students — so this ' +
       'exercises the ordinary public path end to end.',
+  },
+  /**
+   * Labelled from a `--label` run (2026-08-02, maxScore 0.797 — the strongest
+   * score any KB_UNLABELLED query produced).
+   *
+   * The label is a judgement, not an echo of that output: accommodation
+   * procedure is exactly what a student handbook is FOR, so the handbook is the
+   * document that *should* answer this, independent of what ranked today. It is
+   * also durable content — unlike the fee schedule or the VC's name, an
+   * application procedure does not silently expire between editions.
+   */
+  {
+    id: 'kb-hostel-accommodation',
+    query: 'how do I apply for hostel accommodation',
+    role: 'student',
+    trustLevel: 2,
+    expect: 'retrieve',
+    expectedSources: ['STUDENTHANDBOOK'],
+    why:
+      'STUDENTHANDBOOK.pdf is the general-namespace document (391 of the corpus\'s ' +
+      '454 vectors), and `general` opens at trust 1 — so an unverified student, ' +
+      'the most common real caller, can reach it.',
+  },
+  /**
+   * HANDBOOK COVERAGE, labelled from the `--label` run of 2026-08-06.
+   *
+   * The first probe batch (2026-08-02) asked about fees, registration,
+   * transcripts, CGPA and deadlines — all administrative RECORDS questions — and
+   * six of seven returned nothing. That produced a badly wrong conclusion, which
+   * these cases correct: the corpus is not thin, it is a HANDBOOK. It answers
+   * what a handbook answers (conduct, examinations, discipline, services,
+   * facilities) and says nothing about what lives in a student records system.
+   *
+   * Every case below is labelled on that reasoning, not on the score: each is
+   * subject matter a student handbook exists to cover, so the handbook is the
+   * document that SHOULD answer it however retrieval happens to rank today. All
+   * are durable — rules, procedures and services do not silently expire between
+   * editions the way a fee schedule or an office-holder's name does, which is
+   * why kb-todo-vc stays unlabelled despite retrieving from this same document.
+   *
+   * Scores at labelling ranged 0.699–0.794; the handbook is dated 2022-12-19.
+   */
+  {
+    id: 'kb-exam-regulations',
+    query: 'what are the examination rules and regulations',
+    role: 'student',
+    trustLevel: 2,
+    expect: 'retrieve',
+    expectedSources: ['STUDENTHANDBOOK'],
+    why:
+      'Examination regulations are core handbook content and the strongest-scoring ' +
+      'query in the corpus (0.794). Durable: the rules of sitting an exam are not ' +
+      'a time-varying fact.',
+  },
+  {
+    id: 'kb-student-conduct',
+    query: 'what is the student code of conduct',
+    role: 'student',
+    trustLevel: 2,
+    expect: 'retrieve',
+    expectedSources: ['STUDENTHANDBOOK'],
+    why:
+      'A code of conduct is definitionally handbook content. Reached at trust 2, ' +
+      'so an unverified student — the most common caller — gets it.',
+  },
+  {
+    id: 'kb-student-discipline',
+    query: 'what happens if a student breaks the rules',
+    role: 'student',
+    trustLevel: 2,
+    expect: 'retrieve',
+    expectedSources: ['STUDENTHANDBOOK'],
+    why:
+      'The consequences side of the same handbook material as kb-student-conduct. ' +
+      'Kept as a separate case because it is phrased as a plain-language question ' +
+      'rather than by its formal name — that phrasing gap is a real retrieval risk ' +
+      'and the lowest scorer of this batch (0.699) is where it would show first.',
+  },
+  {
+    id: 'kb-student-services',
+    query: 'what student support services are available',
+    role: 'student',
+    trustLevel: 2,
+    expect: 'retrieve',
+    expectedSources: ['STUDENTHANDBOOK'],
+    why: 'Student services are standard handbook content and reachable at trust 2.',
+  },
+  {
+    id: 'kb-health-services',
+    query: 'what medical and health services are available to students',
+    role: 'student',
+    trustLevel: 2,
+    expect: 'retrieve',
+    expectedSources: ['STUDENTHANDBOOK'],
+    why: 'Health services are standard handbook content and reachable at trust 2.',
+  },
+  {
+    id: 'kb-library',
+    query: 'how do I use the university library',
+    role: 'student',
+    trustLevel: 2,
+    expect: 'retrieve',
+    expectedSources: ['STUDENTHANDBOOK'],
+    why: 'Library access and rules are standard handbook content.',
+  },
+  {
+    id: 'kb-records-office',
+    query: 'which office do I contact about student records',
+    role: 'student',
+    trustLevel: 2,
+    expect: 'retrieve',
+    expectedSources: ['STUDENTHANDBOOK'],
+    why:
+      'Load-bearing for the abstention path, not just for coverage. When the ' +
+      'corpus cannot answer a records question (fees, transcripts, CGPA all return ' +
+      'nothing), this is the one redirect that resolves to a CITED answer instead ' +
+      'of the model naming an office from memory. If this case ever breaks, the ' +
+      'abstention path loses its only grounded escalation — see tools/abstention.ts.',
+  },
+  {
+    id: 'kb-pg-calendar-dates',
+    query: 'what are the key postgraduate dates for the 2026 session',
+    role: 'student',
+    trustLevel: 3,
+    expect: 'retrieve',
+    expectedSources: ['ACADEMIC_CALENDAR_PG_2026'],
+    why:
+      'The ONLY question the academic-policy namespace can answer: it holds 12 ' +
+      'vectors, all of them the PG calendar. Double-gated — trust 3 and ' +
+      'postgraduate-specific — so it also guards that the trust ladder still opens ' +
+      'that namespace at 3 and not below.',
   },
   {
     id: 'kb-abstain-cooking',
@@ -203,14 +373,51 @@ export const KB_CASES: KbCase[] = [
  * `expectedSources` and a `why`. Coverage is reported on every run so this list
  * shrinking is visible progress.
  */
+/**
+ * OBSERVED STATE, `--label` runs of 2026-08-02 and 2026-08-06 (corpus:
+ * admission_policy.html, STUDENTHANDBOOK.pdf, ACADEMIC_CALENDAR_PG_2026.pdf):
+ *
+ *   retrieved   examinations 0.794, conduct 0.776, library 0.770, PG dates 0.767,
+ *               health 0.749, records office 0.734, services 0.725,
+ *               discipline 0.699, hostel 0.797   → all promoted to KB_CASES
+ *   retrieved   vice chancellor ......... 0.694  → deliberately NOT promoted
+ *   nothing     fees / registration / transcript / CGPA / late registration
+ *
+ * THE FIRST BATCH LED TO A WRONG CONCLUSION, recorded here because the mistake
+ * is instructive. It probed only administrative-records questions, six of seven
+ * returned nothing, and that was read as "the corpus is nearly empty" — which
+ * drove a plan to strip the product back to almost no suggestions. The second
+ * batch disproved it: the corpus is a HANDBOOK, and answers handbook questions
+ * well. What it genuinely cannot answer is anything held in a student records
+ * system, because no such document has been ingested.
+ *
+ * The lesson for whoever probes next: a miss measures the QUERY's subject
+ * against the corpus, not the corpus. Probe across subject areas before
+ * concluding anything about coverage.
+ *
+ * WHY THE MISSES STAY UNLABELLED rather than becoming `expect: 'abstain'`:
+ * abstaining is correct *today* only because the document is absent. Labelling
+ * it as the expectation would make the eval fail the day someone ingests a fee
+ * schedule — reporting a fix as a regression, and encoding a content gap as a
+ * requirement. A missing label is honest; a wrong one is corrosive.
+ *
+ * WHY THE VC CASE IS NOT PROMOTED despite retrieving: the handbook is dated
+ * 2022-12-19. It names whoever held the post then, and would be cited with full
+ * confidence. Promoting it would assert that answering from a three-year-old
+ * document is correct behaviour for a question whose answer changes. Post-holder
+ * questions belong to the news/web tier; see the cascade cases.
+ */
 export const KB_UNLABELLED: Array<Omit<KbCase, 'expectedSources' | 'why'>> = [
+  // The first five are RECORDS questions: confirmed to retrieve nothing across
+  // both probe batches, because nothing covering a student records system has
+  // been ingested. They await a source document, not a label.
   { id: 'kb-todo-fees-200l',        query: 'what are the school fees for 200 level engineering students', role: 'student',     trustLevel: 2, level: '200L', expect: 'retrieve' },
-  { id: 'kb-todo-hostel-apply',     query: 'how do I apply for hostel accommodation',                     role: 'student',     trustLevel: 2,                expect: 'retrieve' },
   { id: 'kb-todo-registration',     query: 'when does course registration close',                          role: 'student',     trustLevel: 2,                expect: 'retrieve' },
-  { id: 'kb-todo-vc',               query: 'who is the current vice chancellor',                           role: 'prospective', trustLevel: 1,                expect: 'retrieve' },
   { id: 'kb-todo-transcript',       query: 'how do I request an official transcript',                      role: 'student',     trustLevel: 2,                expect: 'retrieve' },
   { id: 'kb-todo-cgpa',             query: 'how is CGPA calculated',                                       role: 'student',     trustLevel: 2,                expect: 'retrieve' },
   { id: 'kb-todo-late-reg',         query: 'what happens if I miss the registration deadline',             role: 'student',     trustLevel: 2,                expect: 'retrieve' },
+  // Retrieves, but from a 2022 handbook — see the VC note above.
+  { id: 'kb-todo-vc',               query: 'who is the current vice chancellor',                           role: 'prospective', trustLevel: 1,                expect: 'retrieve' },
 ];
 
 // ── Entitlement cases — access control through the real retrieval path ────────

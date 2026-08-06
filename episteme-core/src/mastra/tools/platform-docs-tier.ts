@@ -18,9 +18,11 @@ import {
   loadPlatformDocs,
   splitIntoSections,
   rankSections,
+  tokenize,
   type PlatformSection,
 } from '../ingestion/platform-docs';
 import { PLATFORM_DOCS_CONFIG } from '../config';
+import { PLATFORM_HELP_NAMESPACE } from '../security/retrieval-gate';
 import { documentSource, type Source } from './source';
 
 const CONTENT_ROOT = join(
@@ -48,6 +50,43 @@ export function loadPlatformSections(
 /** Test seam — drops the cached corpus. */
 export function resetPlatformSectionCache(): void {
   cache = null;
+}
+
+/**
+ * The query used when the user's own question carries no content terms.
+ *
+ * WHY THIS EXISTS. `tokenize` strips function words and the product's own names
+ * — `episteme`, `platform`, `system`, `assistant` — because as discriminators
+ * they are worthless: they appear in every document in this corpus. That is
+ * correct for ranking, but it has a consequence nobody intended. "What can this
+ * assistant do" tokenizes to NOTHING, rankSections early-returns on an empty
+ * term set, and the single most natural phrasing of the one question every role
+ * is guaranteed to be able to ask became unanswerable. The eval caught it as a
+ * cascade case resolving to tier=none.
+ *
+ * A query that survives stopword removal with nothing left is not a vague query
+ * — it is a precisely identifiable one. Every word in it was either grammar or
+ * this product's name, which makes it a question about the product itself. So
+ * the fallback is not a guess at intent; it is the only intent such a query can
+ * have.
+ *
+ * The terms are chosen to match the help document's own headings ("What it can
+ * answer", "Getting better answers"), and are kept FEW on purpose: `coverage` is
+ * the fraction of query terms present in a section, so every term that fails to
+ * appear drags a genuine match below the gate. Adding a plausible-sounding word
+ * here that the docs do not use would silently break this path.
+ */
+const IDENTITY_QUERY = 'what it can answer, and how to ask a better question';
+
+/**
+ * True when a query is asking what this product is or does.
+ *
+ * Requires a non-empty query: an empty string also tokenizes to nothing, but it
+ * is a caller bug rather than a question, and answering it with documentation
+ * would hide that.
+ */
+function isIdentityQuestion(query: string): boolean {
+  return query.trim().length > 0 && tokenize(query).length === 0;
 }
 
 export interface PlatformHit {
@@ -78,12 +117,28 @@ export async function searchPlatformDocs(
   const visible = sections.filter((s) => allowed.has(s.namespace));
   if (visible.length === 0) return null;
 
+  // A product-identity question ("what can this assistant do") is answered from
+  // the HELP namespace only, and never from the admin runbooks — an operator
+  // asking what the product does wants the same introduction everyone else
+  // gets, not the ingestion procedure. Narrowing here also means this path can
+  // never widen what a caller sees: `visible` is already access-filtered, and
+  // this only ever removes from it.
+  const identity = isIdentityQuestion(query);
+  const searchSpace = identity
+    ? visible.filter((s) => s.namespace === PLATFORM_HELP_NAMESPACE)
+    : visible;
+  if (searchSpace.length === 0) return null;
+
   const ranked = rankSections(
-    visible,
-    query,
+    searchSpace,
+    identity ? IDENTITY_QUERY : query,
     PLATFORM_DOCS_CONFIG.minCoverage,
     PLATFORM_DOCS_CONFIG.strongCoverage,
   ).slice(0, PLATFORM_DOCS_CONFIG.maxResults);
+  // Still fails closed: if the help document is rewritten such that IDENTITY_QUERY
+  // no longer matches it, this returns null and the cascade continues, exactly as
+  // it did before this fallback existed. The regression shows up as a failing
+  // eval case, not as a wrong answer.
   if (ranked.length === 0) return null;
 
   // One citation per DOCUMENT, not per section: two sections of the same page

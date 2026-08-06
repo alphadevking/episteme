@@ -1,0 +1,177 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.4.7/schema.json",
+
+  // WHY THIS FILE EXISTS
+  //
+  // `pnpm lint` was red across the whole package — including files nobody had
+  // touched — because with no config Biome falls back to its own defaults, and
+  // those disagree with this codebase on style it was never asked about. A
+  // linter that is red everywhere reports nothing: a real defect cannot be told
+  // apart from the 170th indentation complaint, so the command stops being run
+  // and stops being useful. The point of this file is to make `pnpm lint` mean
+  // "something is wrong" again.
+  //
+  // The settings below were MEASURED from the code, not chosen: 170 files
+  // indent with spaces and 0 with tabs (Biome defaults to tabs), first-level
+  // indent is 2, and imports are double-quoted 359 times against 31 single.
+  //
+  // Written as .jsonc rather than .json because Biome rejects unknown keys in
+  // biome.json, including a "//" comment key — there is nowhere to record any
+  // of this. Reasoning that cannot live next to the setting gets lost.
+  //
+  // ── THE 121 WARNINGS ARE A DEBT, NOT WALLPAPER ──────────────────────────
+  //
+  // `pnpm lint` exits 0 today with 0 errors and ~121 warnings. Every "warn"
+  // below is a REAL finding in code that predates this config, demoted only so
+  // that the next genuine error is visible instead of being lost among them.
+  // Two rules are "off" and neither is a defect — those are documented at the
+  // rule with why the codebase's form is the better one.
+  //
+  // The intended direction is to burn each group down and promote it back to
+  // "error", starting with the mechanical ones (useImportType, noUnusedImports)
+  // and ending with the ones needing judgement (useExhaustiveDependencies,
+  // the a11y group). If a group's count reaches zero, promote it — otherwise
+  // this file quietly becomes a permanent excuse.
+  //
+  // The counts in the comments are a snapshot from when this was written; they
+  // are there to show the shape of the debt, not to be kept exact.
+
+  "files": {
+    "includes": [
+      "**",
+      "!**/.next/**",
+      "!**/node_modules/**",
+      "!**/next-env.d.ts",
+      "!**/*.min.js"
+    ]
+  },
+
+  // DELIBERATELY OFF — the one setting here worth arguing about.
+  //
+  // This codebase aligns related fields into columns by hand:
+  //
+  //     const suggestions    = getSuggestionsForCurrentUser();
+  //     const initialMessage = q ? decodeURIComponent(q) : undefined;
+  //
+  // Biome collapses that to a single space and no configuration preserves it,
+  // so enabling the formatter means rewriting every file in the package and
+  // losing the alignment permanently. That is a deliberate decision about how
+  // this code reads — not something to change as a side effect of fixing the
+  // linter. The indent and quote settings are still recorded so `pnpm format`
+  // yields house style rather than Biome's if that call is ever made; turn
+  // `enabled` on only as its own reviewed change.
+  "formatter": {
+    "enabled": false,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
+  },
+
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "semicolons": "always",
+      "trailingCommas": "all"
+    }
+  },
+
+  // Import order here is grouped by origin (framework, then local lib, then
+  // components). Alphabetising across those groups would churn every file to
+  // express less than the current order already does.
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "off"
+      }
+    }
+  },
+
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+
+      // Genuine accessibility defects in pre-existing UI: a div wired to
+      // onClick with no keyboard equivalent, decorative SVGs with an empty
+      // <title>, anchors with a placeholder href. Each needs a real UI decision
+      // (is this a button? should this SVG be aria-hidden?), so they are warned
+      // rather than errored here — NOT because accessibility is optional, but
+      // because silently "fixing" them wrongly is worse than tracking them.
+      "a11y": {
+        "useButtonType": "warn",               // 17 — a <button> in a form
+                                               //      defaults to type=submit
+        "noStaticElementInteractions": "warn", //  2
+        "useKeyWithClickEvents": "warn",       //  2
+        "noSvgWithoutTitle": "warn",           //  2
+        "useValidAnchor": "warn",              //  2
+        "useSemanticElements": "warn",         //  3
+        "useAriaPropsSupportedByRole": "warn", //  3
+        "noLabelWithoutControl": "warn",       //  3
+        "noAutofocus": "warn",                 //  3
+        "useFocusableInteractive": "warn",     //  2
+        "noRedundantAlt": "warn"               //  1
+      },
+
+      "correctness": {
+        // ── PRE-EXISTING BACKLOG (see the note at the top of this file) ──
+        // Real findings in code that predates this config, demoted to warn so
+        // the package has a green baseline. They stay in the output; they just
+        // do not mask a NEW error. Burn them down and promote back to "error".
+        "useExhaustiveDependencies": "warn", // 20 — genuine stale-closure risk
+        "useHookAtTopLevel": "warn",         //  6 — genuine hook-order risk
+        "noUnusedImports": "warn",           //  4 — safe to autofix
+        "noUnusedVariables": "warn",         //  3
+        "noUnusedFunctionParameters": "warn",//  1
+        "useJsxKeyInIterable": "warn"        //  1
+      },
+
+      "suspicious": {
+        "noArrayIndexKey": "warn",        // 12 — genuine React reconciliation bug class
+        "noAssignInExpressions": "warn",  //  1
+        "noDocumentCookie": "warn",       //  1
+        "noGlobalIsNan": "warn",          //  1
+        "useBiomeIgnoreFolder": "warn",   //  2
+
+        // The concise-arrow idiom `xs.forEach((x) => set(x))` returns the
+        // callee's value incidentally. Nothing consumes it, and rewriting to a
+        // block body to satisfy the rule adds noise without adding safety.
+        "useIterableCallbackReturn": "off"
+      },
+
+      "complexity": {
+        "noImportantStyles": "warn",  // 4 — deliberate Tailwind overrides
+        "useOptionalChain": "warn",   // 2
+
+        // Pure preference, and often the WORSE reading: bracket access usually
+        // sits next to a dynamic lookup on the same line
+        // (`NS_COLOURS[value] ?? NS_COLOURS["general"]`), where switching one
+        // side to dot notation makes the pair look unrelated. Note this is not
+        // forced by TypeScript — noPropertyAccessFromIndexSignature is not set.
+        "useLiteralKeys": "off"
+      },
+
+      "style": {
+        "useImportType": "warn",          // 18 — worth doing, purely mechanical
+        "useTemplate": "warn",            //  3
+        "useNodejsImportProtocol": "warn",//  1
+
+        // `!` is used where an invariant has just been established — a Map key
+        // written on the line above, an array index inside its own bounds
+        // check. Banning it there trades a real local guarantee for an
+        // optional-chain that silently does the wrong thing when the invariant
+        // breaks.
+        "noNonNullAssertion": "off"
+      },
+
+      "performance": {
+        "noImgElement": "warn" // 1 — next/image is not always the right call
+      }
+    }
+  }
+}

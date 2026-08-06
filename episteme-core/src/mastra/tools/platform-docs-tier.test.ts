@@ -143,3 +143,64 @@ describe('output shape matches the KB tier', () => {
     assert.doesNotMatch(hit.context, /may be outdated/i);
   });
 });
+
+describe('product-identity questions', () => {
+  /**
+   * REGRESSION. "What can this assistant do" tokenizes to nothing — every word
+   * is grammar or a product name, all removed as non-discriminating — so
+   * rankSections early-returned and the one question every role can ask went
+   * unanswered. Its verbose paraphrase worked, which is why the suggestion chip
+   * passed while the typed question failed.
+   */
+  for (const query of [
+    'what can this assistant do',
+    'what is episteme',
+    'what can you do',
+    'what is this platform',
+  ]) {
+    test(`"${query}" is answered from the help document`, async () => {
+      const hit = await searchPlatformDocs(query, PUBLIC_NS);
+      assert.ok(hit, `"${query}" abstained — the identity fallback did not fire`);
+      assert.ok(
+        hit.sources.some((s) => /getting started/i.test(s.title)),
+        `answered from ${hit.sources.map((s) => s.title).join(', ')} instead of the help doc`,
+      );
+    });
+  }
+
+  test('an operator gets the introduction, not the admin runbooks', async () => {
+    // The fallback is restricted to the help namespace. Without that, an
+    // operator asking what the product does would be handed the ingestion
+    // procedure — the identity query's terms match those pages too.
+    const hit = await searchPlatformDocs('what can this assistant do', ADMIN_NS);
+    assert.ok(hit);
+    assert.deepEqual(
+      hit.sources.map((s) => s.title),
+      ['Getting started with Episteme'],
+    );
+  });
+
+  test('the fallback never widens what a caller may see', async () => {
+    // It filters `visible`, which is already access-filtered, so it can only
+    // ever remove. A caller with no namespaces still gets nothing.
+    assert.equal(await searchPlatformDocs('what can this assistant do', []), null);
+  });
+
+  test('an empty query is a caller bug, not an identity question', async () => {
+    // "" also tokenizes to nothing. Answering it with documentation would hide
+    // the bug behind a plausible-looking response.
+    assert.equal(await searchPlatformDocs('', PUBLIC_NS), null);
+    assert.equal(await searchPlatformDocs('   ', PUBLIC_NS), null);
+  });
+
+  test('queries that DO carry content terms are unaffected', async () => {
+    // The fallback must not become a catch-all. These have real terms, so they
+    // take the ordinary ranking path and must still abstain.
+    for (const query of [
+      'how do I bake sourdough bread at home',
+      'what are the school fees for 200 level students',
+    ]) {
+      assert.equal(await searchPlatformDocs(query, PUBLIC_NS), null, `"${query}" was captured`);
+    }
+  });
+});

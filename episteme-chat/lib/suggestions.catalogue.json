@@ -1,0 +1,192 @@
+{
+  "$comment": [
+    "CANONICAL SUGGESTION CATALOGUE — the single source of truth for what this",
+    "product offers a user as a starting point, and for the alternatives it offers",
+    "after it fails to find something.",
+    "",
+    "ADMISSION RULE: an entry belongs here only when a source that can answer it is",
+    "known to exist and to be reachable by the stated roles at the stated trust",
+    "level. A chip is a promise; an unanswerable chip spends a user's first click on",
+    "a refusal. 'Probably in the handbook' is not sufficient — verify with",
+    "`pnpm eval:retrieval --label` and record the evidence in `why`.",
+    "",
+    "TWO GATES, BOTH REAL. `roles` here mirrors the record-level `roles` metadata on",
+    "the backing document, NOT just the namespace grant in retrieval-gate.ts. Those",
+    "differ: an HOD is granted the `admissions` NAMESPACE, but every record in it is",
+    "tagged prospective/student/parent/staff, so an HOD retrieves nothing from it.",
+    "Encoding only the namespace grant would ship chips that fail for HODs alone.",
+    "",
+    "`minTrust` is the trust level at which the backing namespace opens (see",
+    "TRUST_NAMESPACES). Chips are filtered by the caller's ACTUAL trust, so an",
+    "unverified student is never shown a chip whose source their ceiling forbids.",
+    "",
+    "This file is read by episteme-chat (UI) and by episteme-core's retrieval eval",
+    "(regression guard). The packages share no workspace, so JSON on disk is the",
+    "only representation both can consume without a build step that could drift."
+  ],
+  "version": 1,
+  "suggestions": [
+    {
+      "id": "platform-getting-started",
+      "label": "What can you do?",
+      "prompt": "What can this assistant do and how do I get better answers?",
+      "roles": ["prospective", "student", "parent", "staff", "hod"],
+      "minTrust": 1,
+      "tier": "platform",
+      "namespace": "platform-help",
+      "expectedSource": "Getting started with Episteme",
+      "why": "help/getting-started.md carries both 'What it can answer' and 'Getting better answers'. The platform-help namespace is resolved on its own axis and is visible to every role with no operator bit — see resolvePlatformNamespaces. Labelled as platform-getting-started in the retrieval golden set."
+    },
+    {
+      "id": "kb-exam-regulations",
+      "label": "Exam rules",
+      "prompt": "What are the examination rules and regulations?",
+      "roles": ["student", "hod"],
+      "minTrust": 1,
+      "tier": "kb",
+      "namespace": "general",
+      "expectedSource": "STUDENTHANDBOOK",
+      "why": "Verified by --label run 2026-08-06 at maxScore 0.794 — the strongest score in the corpus. STUDENTHANDBOOK.pdf in `general` opens at trust 1, so an unverified student reaches it. Labelled as kb-exam-regulations in the golden set. NOTE on `hod`: the general-namespace records list hod, and expandAudienceRoles lets an HOD read student-tagged content, but the probe ran as `student` — the eval's per-role check is what confirms it, and this is the only role claim in the catalogue not yet confirmed by execution."
+    },
+    {
+      "id": "kb-student-conduct",
+      "label": "Code of conduct",
+      "prompt": "What is the student code of conduct?",
+      "roles": ["student", "parent", "hod"],
+      "minTrust": 1,
+      "tier": "kb",
+      "namespace": "general",
+      "expectedSource": "STUDENTHANDBOOK",
+      "why": "Verified by --label run 2026-08-06 at maxScore 0.776. Labelled as kb-student-conduct in the golden set. Offered to parents deliberately: it replaces the removed 'academic progress' and 'fee payment' chips with the one thing a parent can genuinely be told, and `general` includes the parent audience. Same unconfirmed-by-execution caveat on `hod` as kb-exam-regulations."
+    },
+    {
+      "id": "kb-admission-requirements",
+      "label": "Entry requirements",
+      "prompt": "What are the admission requirements?",
+      "roles": ["prospective", "student", "parent", "staff"],
+      "minTrust": 1,
+      "tier": "kb",
+      "namespace": "admissions",
+      "expectedSource": "admission_policy",
+      "why": "admission_policy.html is the sole document in the admissions namespace (51 vectors, corpus probe 2026-08-02), and admissions opens at trust 1. Labelled as kb-admission-requirements in the golden set. `hod` is excluded deliberately: the records are tagged prospective/student/parent/staff, so an HOD retrieves nothing here despite holding the namespace grant."
+    },
+    {
+      "id": "kb-hostel-accommodation",
+      "label": "Hostel accommodation",
+      "prompt": "How do I apply for hostel accommodation?",
+      "roles": ["prospective", "student", "parent"],
+      "minTrust": 1,
+      "tier": "kb",
+      "namespace": "general",
+      "expectedSource": "STUDENTHANDBOOK",
+      "why": "Verified by --label run 2026-08-02 at maxScore 0.797 — the strongest score any candidate produced, and the only ordinary student question the corpus answers end to end. Backed by STUDENTHANDBOOK.pdf in `general`, which opens at trust 1, so an unverified student reaches it. Scoped to the audiences the question is actually for: staff and hod can retrieve it too, but 'how do I apply for a hostel' is not their question. Labelled as kb-hostel-accommodation in the golden set."
+    },
+    {
+      "id": "kb-student-services",
+      "label": "Student services",
+      "prompt": "What student support services are available?",
+      "roles": ["student", "parent"],
+      "minTrust": 1,
+      "tier": "kb",
+      "namespace": "general",
+      "expectedSource": "STUDENTHANDBOOK",
+      "why": "Verified by --label run 2026-08-06 at maxScore 0.725. Labelled as kb-student-services in the golden set. Placed after the higher-scoring handbook chips so it fills a slot only when a role has one spare; the grid shows four."
+    },
+    {
+      "id": "kb-library",
+      "label": "Using the library",
+      "prompt": "How do I use the university library?",
+      "roles": ["student"],
+      "minTrust": 1,
+      "tier": "kb",
+      "namespace": "general",
+      "expectedSource": "STUDENTHANDBOOK",
+      "why": "Verified by --label run 2026-08-06 at maxScore 0.770. Labelled as kb-library in the golden set. Student-only: library access is not a question the other audiences ask first."
+    },
+    {
+      "id": "platform-ingest-documents",
+      "label": "Add a document",
+      "prompt": "How do I add a document to the knowledge base?",
+      "roles": ["staff", "hod"],
+      "minTrust": 4,
+      "tier": "platform",
+      "namespace": "platform-admin",
+      "requiresPlatformAdmin": true,
+      "expectedSource": "Adding documents to the knowledge base",
+      "why": "Directly the subject of admin/ingesting-documents.md. Labelled as platform-ingest-howto. The operator bit is mandatory — platform-admin-hidden-from-non-operator asserts this exact query must abstain without it, so showing the chip to a non-operator would guarantee a refusal."
+    },
+    {
+      "id": "platform-onboarding-access",
+      "label": "Onboard staff",
+      "prompt": "How do I onboard new staff and set their access levels?",
+      "roles": ["staff", "hod"],
+      "minTrust": 4,
+      "tier": "platform",
+      "namespace": "platform-admin",
+      "requiresPlatformAdmin": true,
+      "expectedSource": "Onboarding users and setting access levels",
+      "why": "Labelled as platform-onboarding-access. This is the Rule 1d case: a PLATFORM question about creating accounts and assigning roles, not a university HR policy question — which is why it resolves even though no institutional HR document exists."
+    },
+    {
+      "id": "platform-institution-setup",
+      "label": "Institution setup",
+      "prompt": "How do I set up my institution in Episteme?",
+      "roles": ["staff", "hod"],
+      "minTrust": 4,
+      "tier": "platform",
+      "namespace": "platform-admin",
+      "requiresPlatformAdmin": true,
+      "expectedSource": "Setting up your institution",
+      "why": "Directly the subject of admin/institution-setup.md. Labelled as platform-institution-setup."
+    }
+  ],
+  "pending": {
+    "$comment": [
+      "Candidate chips whose backing source is NOT yet verified. They are NOT",
+      "shipped — this block exists so the gap is measured rather than forgotten,",
+      "mirroring KB_UNLABELLED in the retrieval golden set.",
+      "",
+      "Probe batch 2 (--label, 2026-08-06) resolved most of what was here:",
+      "conduct 0.776, examinations 0.794, services 0.725, health 0.749,",
+      "library 0.770, records office 0.734, discipline 0.699 and PG dates 0.767",
+      "all retrieve. Conduct, examinations, services and library are now shipped;",
+      "the rest are held back for the reasons below, not for lack of a source.",
+      "",
+      "Resolve anything still listed with:",
+      "  EVAL_INSTITUTION_ID=ab282ad9-321f-4c1f-a681-667f32bf0fe1",
+      "  pnpm eval:retrieval --label"
+    ],
+    "candidates": [
+      { "prompt": "What medical and health services are available?", "roles": ["student", "parent"], "blockedOn": "Retrieves (0.749) and is shippable — held back only because the grid shows four chips and the higher-scoring handbook entries already fill a student's row. Promote if one of those is retired." },
+      { "prompt": "What happens if a student breaks the rules?", "roles": ["student", "parent"], "blockedOn": "Retrieves (0.699), but overlaps kb-student-conduct almost entirely. Two chips onto the same handbook section spends a scarce slot twice." },
+      { "prompt": "Which office do I contact about student records?", "roles": ["student"], "blockedOn": "Retrieves (0.734). Deliberately NOT a chip: its value is as the abstention path's grounded escalation — the redirect offered when a records question finds nothing. Promoting it to the welcome grid would invite it as an opening question, which is not what it is for. Guarded as kb-records-office in the golden set." },
+      { "prompt": "What are the key postgraduate dates for the 2026 session?", "roles": ["student", "parent", "staff"], "minTrust": 3, "blockedOn": "Retrieves (0.767) but is doubly narrow: trust 3+ AND postgraduate-only. The catalogue cannot express 'postgraduate' as a filter, so shipping it would show a PG-only chip to every verified undergraduate. Needs a programme/level dimension first." }
+    ],
+    "$rejected": [
+      "Transcript, course registration, registration deadlines, CGPA and fees were probed on 2026-08-02 and retrieved NOTHING. They are not pending — they are unsupported until a document is ingested. Moved to `unsupported` below.",
+      "'Who is the vice chancellor' DOES retrieve (0.694) but is deliberately excluded: the only source is STUDENTHANDBOOK.pdf dated 2022-12-19, so the answer would be a confidently-cited, possibly-former post-holder. Post-holder questions belong to the news/web tier."
+    ]
+  },
+  "unsupported": {
+    "$comment": [
+      "Removed from the shipped set with the reason, so nobody re-adds them from",
+      "intuition. Each was a chip in the previous hardcoded list.",
+      "",
+      "These are not 'not written yet' — they are unanswerable given the current",
+      "corpus, and adding a document is what changes that, not editing this file."
+    ],
+    "entries": [
+      { "was": "Give me a study plan and tips for upcoming exams", "reason": "Out of domain by Rule 3 — generic tutoring, not institutional information. The agent is required to decline it." },
+      { "was": "Scholarships and funding / fee payment / outstanding fees", "reason": "The financial-aid namespace holds zero records, and trust 1-2 cannot reach it even if it did." },
+      { "was": "Check academic progress / results", "reason": "No grades data in the corpus and no tool exposes it. Implies a capability the product does not have." },
+      { "was": "Campus safety, communication channels", "reason": "No source in any namespace." },
+      { "was": "Department overview, staff management, accreditation, budget (all HOD chips)", "reason": "staff-internal holds zero records, and the admissions/academic-policy records exclude the hod role. An HOD can currently retrieve only the student handbook." },
+      { "was": "Claim review workflow, department reporting, compliance report", "reason": "No platform doc and no institutional document covers these." },
+      { "was": "Explore programs", "reason": "The programmes namespace holds zero records. Entry requirements are covered by admission_policy instead — see kb-admission-requirements." },
+      { "was": "Transcript request", "reason": "Probed 2026-08-02 (kb-todo-transcript): retrieved nothing. No records procedure is ingested." },
+      { "was": "Course registration and deadlines", "reason": "Probed 2026-08-02 (kb-todo-registration, kb-todo-late-reg): both retrieved nothing." },
+      { "was": "Exam preparation / how is CGPA calculated", "reason": "Probed 2026-08-02 (kb-todo-cgpa): retrieved nothing. `academic-policy` holds a postgraduate CALENDAR, not grading policy." },
+      { "was": "Who is the vice chancellor", "reason": "Retrieves (0.694) but only from STUDENTHANDBOOK.pdf dated 2022-12-19 — it would name a possibly-former post-holder with full confidence. A chip must not point at a known staleness trap." }
+    ]
+  }
+}
