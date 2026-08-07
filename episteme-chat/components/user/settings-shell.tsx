@@ -1,13 +1,32 @@
 "use client";
 
 // components/user/settings-shell.tsx
+//
+// The settings UI. Editing model:
+//
+//   values   — what the form currently shows
+//   baseline — what the server last confirmed is stored
+//
+// Dirty state is `diffSettings(baseline, values)`, and that same diff is what
+// gets sent. Two consequences worth stating, because the previous version got
+// both wrong:
+//
+//  1. Only genuinely-changed fields are transmitted, so a save cannot clobber a
+//     field the user never touched.
+//  2. `baseline` is replaced with the server's echo after every save, so the
+//     form re-baselines against reality. Previously `initial` was a prop that
+//     never changed, which left "You have unsaved changes" showing forever and
+//     the Save button permanently enabled after a successful save.
+//
+// Clearing a field is a first-class operation end to end — see
+// lib/settings/schema.ts for why that needed a contract rather than a patch.
 
-import { useState, type ComponentType } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { useRouter } from "next/navigation";
+import { useTheme } from "next-themes";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import {
   ArrowLeftIcon,
@@ -16,23 +35,84 @@ import {
   SparklesIcon,
   BriefcaseIcon,
   BookOpenIcon,
+  ShieldCheckIcon,
+  PaletteIcon,
+  CircleUserIcon,
   CheckIcon,
   CheckCircle2Icon,
+  AlertCircleIcon,
+  ClockIcon,
+  XCircleIcon,
   Loader2Icon,
+  SunIcon,
+  MoonIcon,
+  MonitorIcon,
+  XIcon,
+  InfoIcon,
 } from "lucide-react";
-import type { SettingsInitial } from "@/components/user/settings-form";
+import type { SettingsData, SettingsOption } from "@/lib/settings/types";
+import type { SettingsValues, ThemePref } from "@/lib/settings/schema";
+import {
+  SETTINGS_LIMITS,
+  STAFF_TITLE_OPTIONS,
+  settingsPatchSchema,
+  formatSettingsIssue,
+} from "@/lib/settings/schema";
+import { diffSettings } from "@/lib/settings/patch";
 import { LEVEL_OPTIONS } from "@/lib/constants/academic";
 
-const STAFF_TITLE_OPTIONS = [
-  "Lecturer", "Senior Lecturer", "Associate Professor", "Professor",
-  "HOD", "Dean", "Admin Staff", "Lab Technician", "Other",
-];
+// ── Section model ───────────────────────────────────────────────────────────
 
-type SectionId = "profile" | "context" | "ai";
-type NavItem   = { id: SectionId; label: string; Icon: ComponentType<{ className?: string }> };
+type SectionId = "profile" | "context" | "ai" | "appearance" | "account" | "access";
 
-// ── Field wrapper — ensures label always stacks above input ──────────────────
-function Field({ label, optional, children }: { label: string; optional?: boolean; children: React.ReactNode }) {
+type NavItem = {
+  id: SectionId;
+  label: string;
+  Icon: ComponentType<{ className?: string }>;
+  title: string;
+  description: string;
+  /** Value keys owned by this section — drives the per-section unsaved dot. */
+  fields: (keyof SettingsValues)[];
+};
+
+// ── Access model, mirrored from episteme-core's retrieval gate ──────────────
+//
+// Plain-English restatement of TRUST_NAMESPACES in
+// episteme-core/src/mastra/security/retrieval-gate.ts. The number itself comes
+// from the shared `deriveTrustLevel`, so it cannot disagree with what retrieval
+// enforces; only this wording lives here.
+
+const TRUST_TIERS: Record<number, { name: string; blurb: string; scope: string[] }> = {
+  1: {
+    name:  "Public",
+    blurb: "You can ask about anything published openly by the university.",
+    scope: ["Admissions", "Programmes", "General information"],
+  },
+  2: {
+    name:  "Public",
+    blurb: "You can ask about anything published openly by the university.",
+    scope: ["Admissions", "Programmes", "General information"],
+  },
+  3: {
+    name:  "Verified student",
+    blurb: "Your matric number is verified, so academic policy and fee information are included.",
+    scope: ["Admissions", "Programmes", "General information", "Academic policy", "Fees & financial aid"],
+  },
+  4: {
+    name:  "Full access",
+    blurb: "Your staff role grants access to internal documents in addition to everything above.",
+    scope: [
+      "Admissions", "Programmes", "General information",
+      "Academic policy", "Fees & financial aid", "Staff-internal documents",
+    ],
+  },
+};
+
+// ── Small presentational primitives ─────────────────────────────────────────
+
+function Field({
+  label, optional, hint, children,
+}: { label: string; optional?: boolean; hint?: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-sm font-medium leading-none text-foreground">
@@ -40,115 +120,464 @@ function Field({ label, optional, children }: { label: string; optional?: boolea
         {optional && <span className="ml-1 font-normal text-muted-foreground">(optional)</span>}
       </span>
       {children}
+      {hint && <span className="text-xs leading-relaxed text-muted-foreground">{hint}</span>}
     </div>
   );
 }
 
-export function SettingsShell({ initial }: { initial: SettingsInitial }) {
-  const router = useRouter();
+/** A read-only label/value row for information the user cannot change here. */
+function InfoRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 py-3">
+      <span className="text-sm text-muted-foreground">{label}</span>
+      <span className="text-sm font-medium text-foreground text-right">{children}</span>
+    </div>
+  );
+}
 
-  const [firstName,  setFirstName]  = useState(initial.firstName);
-  const [lastName,   setLastName]   = useState(initial.lastName);
-  const [phone,      setPhone]      = useState(initial.phone);
-  const [programme,  setProgramme]  = useState(initial.programme);
-  const [level,      setLevel]      = useState(initial.level);
-  const [department, setDepartment] = useState(initial.department);
-  const [staffTitle, setStaffTitle] = useState(initial.staffTitle);
-  const [verbosity,  setVerbosity]  = useState<"concise" | "detailed">(initial.verbosity);
-  const [progFilter, setProgFilter] = useState("");
-  const [deptFilter, setDeptFilter] = useState("");
+function Badge({
+  tone = "neutral", children,
+}: { tone?: "neutral" | "success" | "warning" | "danger" | "primary"; children: React.ReactNode }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold",
+        tone === "success" && "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+        tone === "warning" && "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+        tone === "danger"  && "bg-destructive/10 text-destructive",
+        tone === "primary" && "bg-primary/10 text-primary",
+        tone === "neutral" && "bg-muted text-muted-foreground",
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+/**
+ * A single-select chip row. Clicking the active chip clears the value.
+ *
+ * A stored value outside `options` is rendered as an extra chip rather than
+ * dropped. Live data has `user_ai_context.level = 'Postgraduate'`, which is not
+ * in LEVEL_OPTIONS — without this, that user's level shows as unset even though
+ * it is set, and the only way to "fix" it is to overwrite a legitimate value.
+ * Showing it keeps the form honest about what is actually stored.
+ */
+function ChipGroup<T extends string>({
+  options, value, onChange, clearable = true,
+}: { options: readonly T[]; value: string; onChange: (v: string) => void; clearable?: boolean }) {
+  const allOptions = useMemo(
+    () => (value && !options.includes(value as T) ? [...options, value as T] : options),
+    [options, value],
+  );
+
+  return (
+    <div className="flex flex-wrap gap-2 pt-0.5">
+      {allOptions.map((option) => {
+        const selected = value === option;
+        return (
+          <button
+            key={option}
+            type="button"
+            aria-pressed={selected}
+            onClick={() => onChange(selected && clearable ? "" : option)}
+            className={cn(
+              "rounded-full border px-4 py-1.5 text-sm transition-colors",
+              selected
+                ? "border-primary/50 bg-primary/10 font-medium text-primary"
+                : "border-border hover:bg-muted/50",
+            )}
+          >
+            {option}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * A filterable list picker over institution records, with a free-text fallback.
+ *
+ * The stored value is the rendered label ("Computer Science (CSC)"), not the
+ * row id — that is the existing storage shape, which the AI reads as free text
+ * from `user_ai_context`. Free text is also why the fallback input has to
+ * exist: a user whose programme is not in the list must still be able to say
+ * what it is.
+ */
+function RecordPicker({
+  options, value, onChange, filterPlaceholder, freePlaceholder,
+}: {
+  options: SettingsOption[];
+  value: string;
+  onChange: (v: string) => void;
+  filterPlaceholder: string;
+  freePlaceholder: string;
+}) {
+  const [filter, setFilter] = useState("");
+
+  const visible = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter((o) => `${o.name} ${o.code}`.toLowerCase().includes(q));
+  }, [options, filter]);
+
+  if (options.length === 0) {
+    return (
+      <Input value={value} onChange={(e) => onChange(e.target.value)} placeholder={freePlaceholder} />
+    );
+  }
+
+  const isCustom = value.length > 0 && !options.some((o) => `${o.name} (${o.code})` === value);
+
+  return (
+    <div className="space-y-2">
+      {options.length > 6 && (
+        <Input placeholder={filterPlaceholder} value={filter} onChange={(e) => setFilter(e.target.value)} />
+      )}
+
+      <div className="max-h-56 divide-y divide-border/40 overflow-y-auto rounded-lg border bg-background">
+        {visible.length === 0 ? (
+          <p className="px-4 py-3 text-sm text-muted-foreground">No matches.</p>
+        ) : (
+          visible.map((option) => {
+            const label    = `${option.name} (${option.code})`;
+            const selected = value === label;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => onChange(selected ? "" : label)}
+                className={cn(
+                  "flex w-full items-center justify-between px-4 py-2.5 text-left text-sm transition-colors",
+                  "first:rounded-t-lg last:rounded-b-lg hover:bg-muted/50",
+                  selected && "bg-primary/5 font-medium text-primary",
+                )}
+              >
+                {label}
+                {selected && <CheckIcon className="size-4 shrink-0 text-primary" />}
+              </button>
+            );
+          })
+        )}
+      </div>
+
+      {/* Free-text entry, shown when nothing is picked or the value is custom. */}
+      {(!value || isCustom) && (
+        <Input value={value} onChange={(e) => onChange(e.target.value)} placeholder={freePlaceholder} />
+      )}
+
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange("")}
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <XIcon className="size-3" /> Clear selection
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A group of large radio cards.
+ *
+ * Built on a real `<fieldset>` + native `<input type="radio">` rather than
+ * buttons carrying `role="radio"`. The ARIA role is only half the contract —
+ * it also obliges the author to implement roving tabindex and arrow-key
+ * navigation, which a `<button role="radio">` does not get for free. Native
+ * inputs bring correct keyboard behaviour, group semantics and screen-reader
+ * announcement ("2 of 3") with no JavaScript, so the accessible version is also
+ * the simpler one. The input is `sr-only`; the card is the visible label.
+ */
+function RadioCardGroup<T extends string>({
+  name, legend, value, options, onChange,
+}: {
+  name: string;
+  legend: string;
+  value: T;
+  options: readonly { value: T; title: string; description: string }[];
+  onChange: (value: T) => void;
+}) {
+  return (
+    <fieldset>
+      <legend className="mb-3 text-sm font-medium">{legend}</legend>
+      <div className="space-y-3">
+        {options.map((option) => {
+          const selected = value === option.value;
+          return (
+            <label
+              key={option.value}
+              className={cn(
+                "flex w-full cursor-pointer items-start gap-4 rounded-xl border px-5 py-4 transition-colors",
+                "focus-within:ring-2 focus-within:ring-primary/40",
+                selected ? "border-primary/40 bg-primary/5" : "border-border hover:bg-muted/40",
+              )}
+            >
+              <input
+                type="radio"
+                name={name}
+                value={option.value}
+                checked={selected}
+                onChange={() => onChange(option.value)}
+                className="sr-only"
+              />
+              <span
+                aria-hidden
+                className={cn(
+                  "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors",
+                  selected ? "border-primary bg-primary" : "border-muted-foreground/40",
+                )}
+              >
+                {selected && <span className="size-1.5 rounded-full bg-primary-foreground" />}
+              </span>
+              <span>
+                <span className={cn("block text-sm font-semibold", selected && "text-primary")}>
+                  {option.title}
+                </span>
+                <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
+                  {option.description}
+                </span>
+              </span>
+            </label>
+          );
+        })}
+      </div>
+    </fieldset>
+  );
+}
+
+// ── Formatting helpers ──────────────────────────────────────────────────────
+
+function formatDate(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+}
+
+function titleCase(value: string): string {
+  return value.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** `as const` so `value` narrows to ThemePref rather than widening to string. */
+const THEME_CARDS = [
+  { value: "light",  label: "Light",  Icon: SunIcon,     hint: "Always use the light theme." },
+  { value: "dark",   label: "Dark",   Icon: MoonIcon,    hint: "Always use the dark theme." },
+  { value: "system", label: "System", Icon: MonitorIcon, hint: "Match your device's appearance setting." },
+] as const satisfies readonly {
+  value: ThemePref;
+  label: string;
+  Icon: ComponentType<{ className?: string }>;
+  hint: string;
+}[];
+
+const PROVIDER_LABELS: Record<string, string> = {
+  google: "Google",
+  email:  "Email & password",
+};
+
+// ── Main component ──────────────────────────────────────────────────────────
+
+export function SettingsShell({ data }: { data: SettingsData }) {
+  const router = useRouter();
+  const { setTheme } = useTheme();
+
+  const [baseline, setBaseline] = useState<SettingsValues>(data.values);
+  const [values,   setValues]   = useState<SettingsValues>(data.values);
 
   const [activeSection, setActiveSection] = useState<SectionId>("profile");
   const [saving,  setSaving]  = useState(false);
-  const [success, setSuccess] = useState(false);
+  const [saved,   setSaved]   = useState(false);
   const [error,   setError]   = useState<string | null>(null);
+  const [signingOutEverywhere, setSigningOutEverywhere] = useState(false);
 
-  const isDirty =
-    firstName  !== initial.firstName  ||
-    lastName   !== initial.lastName   ||
-    phone      !== initial.phone      ||
-    programme  !== initial.programme  ||
-    level      !== initial.level      ||
-    department !== initial.department ||
-    staffTitle !== initial.staffTitle ||
-    verbosity  !== initial.verbosity;
+  const set = useCallback(<K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) => {
+    setValues((v) => ({ ...v, [key]: value }));
+    setSaved(false);
+    setError(null);
+  }, []);
 
-  const contextItem = (): NavItem | null => {
-    if (initial.primaryRole === "student")
-      return { id: "context", label: "Academic context",   Icon: GraduationCapIcon };
-    if (initial.primaryRole === "staff")
-      return { id: "context", label: "Staff context",      Icon: BriefcaseIcon };
-    if (["prospective", "parent", "guardian"].includes(initial.primaryRole))
-      return { id: "context", label: "Programme interest", Icon: BookOpenIcon };
+  // ── Dirty tracking ────────────────────────────────────────────────────
+  const patch      = useMemo(() => diffSettings(baseline, values), [baseline, values]);
+  const dirtyKeys  = useMemo(() => new Set(Object.keys(patch)), [patch]);
+  const isDirty    = dirtyKeys.size > 0;
+
+  // Validate as the user types so a save can't fail on something the form
+  // could have told them about immediately.
+  const validation   = useMemo(() => settingsPatchSchema.safeParse(patch), [patch]);
+  const localError   = validation.success
+    ? null
+    : validation.error.issues.map(formatSettingsIssue)[0] ?? "Some fields need attention.";
+
+  // ── Adopt the stored theme once on mount ──────────────────────────────
+  // The stored value is authoritative across devices; next-themes' localStorage
+  // copy is only authoritative on this one. See use-theme-preference.ts for why
+  // this sync lives here rather than in the chat layout.
+  const themeSynced = useRef(false);
+  useEffect(() => {
+    if (themeSynced.current) return;
+    themeSynced.current = true;
+    setTheme(data.values.theme);
+  }, [setTheme, data.values.theme]);
+
+  // ── Warn before losing unsaved edits on a hard navigation ─────────────
+  useEffect(() => {
+    if (!isDirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [isDirty]);
+
+  const goBack = useCallback(() => {
+    // In-app navigation is ours to guard; `beforeunload` never fires for it.
+    if (isDirty && !window.confirm("You have unsaved changes. Leave without saving?")) return;
+    router.back();
+  }, [isDirty, router]);
+
+  // ── Save ──────────────────────────────────────────────────────────────
+  const handleSave = useCallback(async () => {
+    if (!isDirty || !validation.success || saving) return;
+
+    setSaving(true);
+    setSaved(false);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/profile", {
+        method:  "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify(validation.data),
+      });
+
+      // A 500 can arrive as an HTML error page. The old code called
+      // `res.json()` unguarded, which threw and left `saving` stuck true
+      // forever with nothing shown to the user.
+      const json = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        values?: SettingsValues;
+        error?: string;
+      };
+
+      // Re-baseline against what the server actually stored — on success AND on
+      // partial failure. On failure this leaves the form dirty for exactly the
+      // fields that did not persist, so retrying sends only those.
+      if (json.values) setBaseline(json.values);
+
+      if (!res.ok) {
+        setError(json.error ?? `Couldn't save changes (${res.status}).`);
+        return;
+      }
+
+      if (json.values) {
+        // Adopt server-normalised values (trimming, etc.) so the form shows
+        // precisely what is stored.
+        setValues(json.values);
+        setTheme(json.values.theme);
+      }
+      setSaved(true);
+      // Refresh server components so the sidebar badge picks up a name change.
+      router.refresh();
+    } catch {
+      setError("Couldn't reach the server. Check your connection and try again.");
+    } finally {
+      setSaving(false);
+    }
+  }, [isDirty, validation, saving, router, setTheme]);
+
+  // Clear the success note after a moment, but never while still dirty.
+  useEffect(() => {
+    if (!saved) return;
+    const t = setTimeout(() => setSaved(false), 4000);
+    return () => clearTimeout(t);
+  }, [saved]);
+
+  const signOutEverywhere = useCallback(async () => {
+    if (!window.confirm("Sign out of Episteme on all your devices?")) return;
+    setSigningOutEverywhere(true);
+    const { createSupabaseBrowserClient } = await import("@/lib/supabase/browser");
+    await createSupabaseBrowserClient().auth.signOut({ scope: "global" });
+    router.replace("/sign-in");
+  }, [router]);
+
+  // ── Navigation ────────────────────────────────────────────────────────
+  const { account, verification, wards, trustLevel } = data;
+  const role = account.primaryRole;
+
+  const contextNav = ((): NavItem | null => {
+    if (role === "student")
+      return {
+        id: "context", label: "Academic context", Icon: GraduationCapIcon,
+        title: "Academic context",
+        description: "Used by the AI to give you programme- and year-specific answers.",
+        fields: ["programme", "level"],
+      };
+    if (role === "staff" || role === "hod")
+      return {
+        id: "context", label: "Staff context", Icon: BriefcaseIcon,
+        title: "Staff context",
+        description: "Helps the AI scope answers to your department and position.",
+        fields: ["department", "staffTitle"],
+      };
+    if (["prospective", "parent", "guardian"].includes(role))
+      return {
+        id: "context", label: "Programme interest", Icon: BookOpenIcon,
+        title: "Programme interest",
+        description: "Helps the AI focus on the admission information relevant to you.",
+        fields: ["programme"],
+      };
     return null;
-  };
+  })();
 
   const navItems: NavItem[] = [
-    { id: "profile", label: "Profile",        Icon: UserRoundIcon },
-    ...(contextItem() ? [contextItem()!] : []),
-    { id: "ai",      label: "AI preferences", Icon: SparklesIcon  },
+    {
+      id: "profile", label: "Profile", Icon: UserRoundIcon,
+      title: "Profile",
+      description: "Your name and contact details across the platform.",
+      fields: ["firstName", "lastName", "displayName", "phone"],
+    },
+    ...(contextNav ? [contextNav] : []),
+    {
+      id: "ai", label: "AI preferences", Icon: SparklesIcon,
+      title: "AI preferences",
+      description: "Control the length and shape of Episteme's answers.",
+      fields: ["verbosity", "answerFormat"],
+    },
+    {
+      id: "appearance", label: "Appearance", Icon: PaletteIcon,
+      title: "Appearance",
+      description: "How Episteme looks. Saved to your account, so it follows you to other devices.",
+      fields: ["theme"],
+    },
+    {
+      id: "account", label: "Account", Icon: CircleUserIcon,
+      title: "Account",
+      description: "Your sign-in details and account standing.",
+      fields: [],
+    },
+    {
+      id: "access", label: "Access & verification", Icon: ShieldCheckIcon,
+      title: "Access & verification",
+      description: "What Episteme is allowed to look at when it answers you.",
+      fields: [],
+    },
   ];
 
-  const filteredProgrammes  = progFilter.trim()
-    ? initial.programmes.filter((p) => `${p.name} ${p.code}`.toLowerCase().includes(progFilter.toLowerCase()))
-    : initial.programmes;
+  const meta = navItems.find((n) => n.id === activeSection) ?? navItems[0];
+  const sectionIsDirty = (item: NavItem) => item.fields.some((f) => dirtyKeys.has(f));
 
-  const filteredDepartments = deptFilter.trim()
-    ? initial.departments.filter((d) => `${d.name} ${d.code}`.toLowerCase().includes(deptFilter.toLowerCase()))
-    : initial.departments;
-
-  const handleSave = async () => {
-    if (!isDirty) return;
-    setSaving(true); setSuccess(false); setError(null);
-
-    const res  = await fetch("/api/profile", {
-      method:  "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({
-        firstName:  firstName.trim()  || undefined,
-        lastName:   lastName.trim()   || undefined,
-        phone:      phone.trim()      || undefined,
-        programme:  programme.trim()  || undefined,
-        level:      level             || undefined,
-        department: department.trim() || undefined,
-        staffTitle: staffTitle        || undefined,
-        verbosity,
-      }),
-    });
-    const json = await res.json();
-    setSaving(false);
-    if (!res.ok) { setError(json.error ?? "Something went wrong."); }
-    else         { setSuccess(true); setTimeout(() => setSuccess(false), 3000); }
-  };
-
-  const sectionMeta: Record<SectionId, { title: string; description: string }> = {
-    profile: {
-      title: "Profile",
-      description: "Your display name and contact details across the platform.",
-    },
-    context: {
-      title: contextItem()?.label ?? "Context",
-      description:
-        initial.primaryRole === "student"  ? "Used by the AI to give you year- and programme-specific answers."
-        : initial.primaryRole === "staff"  ? "Helps the AI scope answers to your department and position."
-        : "Helps the AI focus on relevant admission information.",
-    },
-    ai: {
-      title: "AI preferences",
-      description: "Control how Episteme responds to your questions.",
-    },
-  };
-
-  const meta = sectionMeta[activeSection];
+  const tier = TRUST_TIERS[trustLevel] ?? TRUST_TIERS[1];
 
   return (
     <div className="flex h-dvh flex-col bg-background">
 
-      {/* ── Header ────────────────────────────────────────────────────────── */}
+      {/* ── Header ────────────────────────────────────────────────────── */}
       <header className="sticky top-0 z-10 flex h-12 shrink-0 items-center gap-3 border-b bg-background/80 px-4 backdrop-blur-sm">
         <button
           type="button"
-          onClick={() => router.back()}
+          onClick={goBack}
           className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
           <ArrowLeftIcon className="size-4" />
@@ -158,60 +587,64 @@ export function SettingsShell({ initial }: { initial: SettingsInitial }) {
         <span className="text-sm font-semibold tracking-tight">Settings</span>
       </header>
 
-      {/* ── Body ──────────────────────────────────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden">
 
-        {/* Desktop sidebar */}
-        <aside className="hidden md:flex w-52 shrink-0 flex-col border-r py-5 px-3 bg-sidebar">
+        {/* ── Desktop sidebar ─────────────────────────────────────────── */}
+        <aside className="hidden w-56 shrink-0 flex-col border-r bg-sidebar px-3 py-5 md:flex">
           <p className="mb-2 px-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/50">
             Settings
           </p>
-          {navItems.map(({ id, label, Icon }) => (
+          {navItems.map((item) => (
             <button
-              key={id}
+              key={item.id}
               type="button"
-              onClick={() => setActiveSection(id)}
+              onClick={() => setActiveSection(item.id)}
+              aria-current={activeSection === item.id ? "page" : undefined}
               className={cn(
-                "flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors text-left",
-                activeSection === id
+                "flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-colors",
+                activeSection === item.id
                   ? "bg-sidebar-accent text-foreground"
                   : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground",
               )}
             >
-              <Icon className={cn("size-4 shrink-0", activeSection === id ? "text-primary" : "")} />
-              {label}
+              <item.Icon className={cn("size-4 shrink-0", activeSection === item.id && "text-primary")} />
+              <span className="flex-1 truncate">{item.label}</span>
+              {sectionIsDirty(item) && (
+                <span
+                  className="size-1.5 shrink-0 rounded-full bg-primary"
+                  title="Unsaved changes in this section"
+                />
+              )}
             </button>
           ))}
         </aside>
 
-        {/* Mobile tab strip */}
-        <div className="md:hidden absolute top-12 left-0 right-0 z-10 flex overflow-x-auto border-b bg-background scrollbar-none">
-          {navItems.map(({ id, label, Icon }) => (
+        {/* ── Mobile tab strip ────────────────────────────────────────── */}
+        <div className="scrollbar-none absolute left-0 right-0 top-12 z-10 flex overflow-x-auto border-b bg-background md:hidden">
+          {navItems.map((item) => (
             <button
-              key={id}
+              key={item.id}
               type="button"
-              onClick={() => setActiveSection(id)}
+              onClick={() => setActiveSection(item.id)}
               className={cn(
-                "flex shrink-0 items-center gap-2 border-b-2 px-5 py-3 text-sm font-medium whitespace-nowrap transition-colors",
-                activeSection === id
+                "flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-5 py-3 text-sm font-medium transition-colors",
+                activeSection === item.id
                   ? "border-primary text-primary"
                   : "border-transparent text-muted-foreground hover:text-foreground",
               )}
             >
-              <Icon className="size-4" />
-              {label}
+              <item.Icon className="size-4" />
+              {item.label}
+              {sectionIsDirty(item) && <span className="size-1.5 rounded-full bg-primary" />}
             </button>
           ))}
         </div>
 
-        {/* Content + save bar */}
-        <div className="flex flex-1 flex-col overflow-hidden md:pt-0 pt-[49px]">
-
-          {/* Scrollable form area */}
+        {/* ── Content ─────────────────────────────────────────────────── */}
+        <div className="flex flex-1 flex-col overflow-hidden pt-[49px] md:pt-0">
           <div className="flex-1 overflow-y-auto">
-            <div className="px-6 py-8 sm:px-10 lg:px-16 max-w-2xl">
+            <div className="max-w-2xl px-6 py-8 sm:px-10 lg:px-16">
 
-              {/* Section heading */}
               <div className="mb-8">
                 <h1 className="font-serif text-xl font-semibold tracking-tight">{meta.title}</h1>
                 <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">{meta.description}</p>
@@ -222,167 +655,111 @@ export function SettingsShell({ initial }: { initial: SettingsInitial }) {
                 <div className="space-y-5">
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <Field label="First name">
-                      <Input id="firstName" value={firstName} onChange={(e) => setFirstName(e.target.value)} autoComplete="given-name" />
+                      <Input
+                        value={values.firstName}
+                        onChange={(e) => set("firstName", e.target.value)}
+                        maxLength={SETTINGS_LIMITS.firstName}
+                        autoComplete="given-name"
+                      />
                     </Field>
                     <Field label="Last name">
-                      <Input id="lastName" value={lastName} onChange={(e) => setLastName(e.target.value)} autoComplete="family-name" />
+                      <Input
+                        value={values.lastName}
+                        onChange={(e) => set("lastName", e.target.value)}
+                        maxLength={SETTINGS_LIMITS.lastName}
+                        autoComplete="family-name"
+                      />
                     </Field>
                   </div>
-                  <Field label="Phone" optional>
+
+                  <Field
+                    label="Display name"
+                    optional
+                    hint="Shown instead of your full name across Episteme. Leave empty to use your first and last name."
+                  >
                     <Input
-                      id="phone"
+                      value={values.displayName}
+                      onChange={(e) => set("displayName", e.target.value)}
+                      maxLength={SETTINGS_LIMITS.displayName}
+                      placeholder={[values.firstName, values.lastName].filter(Boolean).join(" ") || "Your name"}
+                    />
+                  </Field>
+
+                  <Field label="Phone" optional hint="Used by your institution to reach you about verification.">
+                    <Input
                       type="tel"
-                      value={phone}
-                      onChange={(e) => setPhone(e.target.value)}
+                      value={values.phone}
+                      onChange={(e) => set("phone", e.target.value)}
+                      maxLength={SETTINGS_LIMITS.phone}
                       autoComplete="tel"
                       placeholder="+234 800 000 0000"
                       className="max-w-xs"
                     />
                   </Field>
+
+                  <div className="flex items-start gap-2 rounded-lg border bg-muted/30 px-4 py-3 text-xs leading-relaxed text-muted-foreground">
+                    <InfoIcon className="mt-0.5 size-3.5 shrink-0" />
+                    <span>
+                      Your profile picture comes from {PROVIDER_LABELS[account.provider ?? ""] ?? "your sign-in provider"} and
+                      can&apos;t be changed here yet.
+                    </span>
+                  </div>
                 </div>
               )}
 
               {/* ── Context ── */}
               {activeSection === "context" && (
                 <div className="space-y-6">
-
-                  {/* Student */}
-                  {initial.primaryRole === "student" && (
+                  {role === "student" && (
                     <>
                       <Field label="Programme">
-                        {initial.programmes.length > 0 ? (
-                          <div className="space-y-2">
-                            {initial.programmes.length > 6 && (
-                              <Input
-                                placeholder="Filter programmes…"
-                                value={progFilter}
-                                onChange={(e) => setProgFilter(e.target.value)}
-                              />
-                            )}
-                            <div className="max-h-56 overflow-y-auto rounded-lg border bg-background divide-y divide-border/40">
-                              {filteredProgrammes.map((p) => {
-                                const lbl = `${p.name} (${p.code})`;
-                                const sel = programme === lbl;
-                                return (
-                                  <button
-                                    key={p.id}
-                                    type="button"
-                                    onClick={() => setProgramme(sel ? "" : lbl)}
-                                    className={cn(
-                                      "flex w-full items-center justify-between px-4 py-2.5 text-left text-sm transition-colors",
-                                      "hover:bg-muted/50 first:rounded-t-lg last:rounded-b-lg",
-                                      sel && "bg-primary/5 font-medium text-primary",
-                                    )}
-                                  >
-                                    {lbl}
-                                    {sel && <CheckIcon className="size-4 shrink-0 text-primary" />}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                            {!programme && (
-                              <Input value={programme} onChange={(e) => setProgramme(e.target.value)} placeholder="Or type your programme…" />
-                            )}
-                          </div>
-                        ) : (
-                          <Input value={programme} onChange={(e) => setProgramme(e.target.value)} placeholder="e.g. B.Sc. Computer Science" />
-                        )}
+                        <RecordPicker
+                          options={data.programmes}
+                          value={values.programme}
+                          onChange={(v) => set("programme", v)}
+                          filterPlaceholder="Filter programmes…"
+                          freePlaceholder="e.g. B.Sc. Computer Science"
+                        />
                       </Field>
-
                       <Field label="Current level">
-                        <div className="flex flex-wrap gap-2 pt-0.5">
-                          {LEVEL_OPTIONS.map((l) => (
-                            <button
-                              key={l}
-                              type="button"
-                              onClick={() => setLevel(level === l ? "" : l)}
-                              className={cn(
-                                "rounded-full border px-4 py-1.5 text-sm transition-colors",
-                                level === l
-                                  ? "border-primary/50 bg-primary/10 font-medium text-primary"
-                                  : "border-border hover:bg-muted/50",
-                              )}
-                            >
-                              {l}
-                            </button>
-                          ))}
-                        </div>
+                        <ChipGroup
+                          options={LEVEL_OPTIONS}
+                          value={values.level}
+                          onChange={(v) => set("level", v)}
+                        />
                       </Field>
                     </>
                   )}
 
-                  {/* Staff */}
-                  {initial.primaryRole === "staff" && (
+                  {(role === "staff" || role === "hod") && (
                     <>
                       <Field label="Department">
-                        {initial.departments.length > 0 ? (
-                          <div className="space-y-2">
-                            {initial.departments.length > 6 && (
-                              <Input
-                                placeholder="Filter departments…"
-                                value={deptFilter}
-                                onChange={(e) => setDeptFilter(e.target.value)}
-                              />
-                            )}
-                            <div className="max-h-56 overflow-y-auto rounded-lg border bg-background divide-y divide-border/40">
-                              {filteredDepartments.map((d) => {
-                                const lbl = `${d.name} (${d.code})`;
-                                const sel = department === lbl;
-                                return (
-                                  <button
-                                    key={d.id}
-                                    type="button"
-                                    onClick={() => setDepartment(sel ? "" : lbl)}
-                                    className={cn(
-                                      "flex w-full items-center justify-between px-4 py-2.5 text-left text-sm transition-colors",
-                                      "hover:bg-muted/50 first:rounded-t-lg last:rounded-b-lg",
-                                      sel && "bg-primary/5 font-medium text-primary",
-                                    )}
-                                  >
-                                    {lbl}
-                                    {sel && <CheckIcon className="size-4 shrink-0 text-primary" />}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                            {!department && (
-                              <Input value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="Or type your department…" />
-                            )}
-                          </div>
-                        ) : (
-                          <Input value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="e.g. Computer Science" />
-                        )}
+                        <RecordPicker
+                          options={data.departments}
+                          value={values.department}
+                          onChange={(v) => set("department", v)}
+                          filterPlaceholder="Filter departments…"
+                          freePlaceholder="e.g. Computer Science"
+                        />
                       </Field>
-
                       <Field label="Role / title">
-                        <div className="flex flex-wrap gap-2 pt-0.5">
-                          {STAFF_TITLE_OPTIONS.map((t) => (
-                            <button
-                              key={t}
-                              type="button"
-                              onClick={() => setStaffTitle(staffTitle === t ? "" : t)}
-                              className={cn(
-                                "rounded-full border px-4 py-1.5 text-sm transition-colors",
-                                staffTitle === t
-                                  ? "border-primary/50 bg-primary/10 font-medium text-primary"
-                                  : "border-border hover:bg-muted/50",
-                              )}
-                            >
-                              {t}
-                            </button>
-                          ))}
-                        </div>
+                        <ChipGroup
+                          options={STAFF_TITLE_OPTIONS}
+                          value={values.staffTitle}
+                          onChange={(v) => set("staffTitle", v)}
+                        />
                       </Field>
                     </>
                   )}
 
-                  {/* Prospective / parent */}
-                  {["prospective", "parent", "guardian"].includes(initial.primaryRole) && (
-                    <Field label="Programme of interest">
-                      <Input
-                        value={programme}
-                        onChange={(e) => setProgramme(e.target.value)}
-                        placeholder="e.g. Computer Science, Medicine…"
+                  {["prospective", "parent", "guardian"].includes(role) && (
+                    <Field label="Programme of interest" optional>
+                      <RecordPicker
+                        options={data.programmes}
+                        value={values.programme}
+                        onChange={(v) => set("programme", v)}
+                        filterPlaceholder="Filter programmes…"
+                        freePlaceholder="e.g. Computer Science, Medicine…"
                       />
                     </Field>
                   )}
@@ -391,58 +768,337 @@ export function SettingsShell({ initial }: { initial: SettingsInitial }) {
 
               {/* ── AI preferences ── */}
               {activeSection === "ai" && (
-                <div className="space-y-3">
-                  {(["concise", "detailed"] as const).map((v) => (
-                    <button
-                      key={v}
-                      type="button"
-                      onClick={() => setVerbosity(v)}
-                      className={cn(
-                        "flex w-full items-start gap-4 rounded-xl border px-5 py-4 text-left transition-colors",
-                        verbosity === v ? "border-primary/40 bg-primary/5" : "border-border hover:bg-muted/40",
-                      )}
+                <div className="space-y-8">
+                  <RadioCardGroup
+                    name="verbosity"
+                    legend="Answer length"
+                    value={values.verbosity}
+                    onChange={(v) => set("verbosity", v)}
+                    options={[
+                      {
+                        value: "concise",
+                        title: "Concise",
+                        description: "Short, direct answers — best for quick lookups.",
+                      },
+                      {
+                        value: "detailed",
+                        title: "Detailed",
+                        description: "Thorough explanations with the surrounding context and caveats.",
+                      },
+                    ]}
+                  />
+
+                  <RadioCardGroup
+                    name="answerFormat"
+                    legend="Answer format"
+                    value={values.answerFormat}
+                    onChange={(v) => set("answerFormat", v)}
+                    options={[
+                      {
+                        value: "prose",
+                        title: "Prose",
+                        description: "Flowing paragraphs. Reads naturally for policy and explanation.",
+                      },
+                      {
+                        value: "steps",
+                        title: "Steps",
+                        description:
+                          "Numbered steps wherever the answer is a procedure — applications, payments, registration.",
+                      },
+                    ]}
+                  />
+
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    These affect how answers are written, never which sources Episteme is allowed to read.
+                    Source access is governed by your role and verification — see Access &amp; verification.
+                  </p>
+                </div>
+              )}
+
+              {/* ── Appearance ── */}
+              {activeSection === "appearance" && (
+                <fieldset>
+                  <legend className="sr-only">Theme</legend>
+                  <div className="space-y-3">
+                    {THEME_CARDS.map(({ value, label, Icon, hint }) => {
+                      const selected = values.theme === value;
+                      return (
+                        <label
+                          key={value}
+                          className={cn(
+                            "flex w-full cursor-pointer items-center gap-4 rounded-xl border px-5 py-4 transition-colors",
+                            "focus-within:ring-2 focus-within:ring-primary/40",
+                            selected ? "border-primary/40 bg-primary/5" : "border-border hover:bg-muted/40",
+                          )}
+                        >
+                          <input
+                            type="radio"
+                            name="theme"
+                            value={value}
+                            checked={selected}
+                            onChange={() => {
+                              set("theme", value);
+                              setTheme(value); // live preview; persisted on save
+                            }}
+                            className="sr-only"
+                          />
+                          <Icon className={cn("size-5 shrink-0", selected && "text-primary")} />
+                          <span className="flex-1">
+                            <span className={cn("block text-sm font-semibold", selected && "text-primary")}>
+                              {label}
+                            </span>
+                            <span className="mt-0.5 block text-xs text-muted-foreground">{hint}</span>
+                          </span>
+                          {selected && <CheckIcon className="size-4 shrink-0 text-primary" />}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </fieldset>
+              )}
+
+              {/* ── Account ── */}
+              {activeSection === "account" && (
+                <div className="space-y-8">
+                  <div className="divide-y divide-border/60 rounded-xl border px-5">
+                    <InfoRow label="Email">
+                      <span className="flex flex-wrap items-center justify-end gap-2">
+                        <span className="break-all">{account.email}</span>
+                        {account.emailVerified
+                          ? <Badge tone="success"><CheckCircle2Icon className="size-3" />Verified</Badge>
+                          : <Badge tone="warning"><AlertCircleIcon className="size-3" />Unverified</Badge>}
+                      </span>
+                    </InfoRow>
+                    <InfoRow label="Sign-in method">
+                      {PROVIDER_LABELS[account.provider ?? ""] ?? titleCase(account.provider ?? "unknown")}
+                    </InfoRow>
+                    <InfoRow label="Account status">
+                      <Badge tone={account.status === "active" ? "success" : "warning"}>
+                        {titleCase(account.status)}
+                      </Badge>
+                    </InfoRow>
+                    <InfoRow label="Role">
+                      <span className="flex flex-wrap justify-end gap-1.5">
+                        <Badge tone="primary">{titleCase(data.effectiveRole)}</Badge>
+                        {account.isSuperadmin && <Badge tone="danger">Superadmin</Badge>}
+                        {account.roles
+                          .filter((r) => r !== data.effectiveRole)
+                          .map((r) => <Badge key={r}>{titleCase(r)}</Badge>)}
+                      </span>
+                    </InfoRow>
+                    {account.institutionName && (
+                      <InfoRow label="Institution">{account.institutionName}</InfoRow>
+                    )}
+                    <InfoRow label="Member since">{formatDate(account.createdAt)}</InfoRow>
+                    <InfoRow label="Last sign-in">{formatDate(account.lastLoginAt)}</InfoRow>
+                  </div>
+
+                  <div>
+                    <p className="text-sm font-medium">Security</p>
+                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                      Ends your Episteme session on every device, including this one. Use this if you signed in
+                      somewhere you no longer trust.
+                    </p>
+                    <Button
+                      variant="outline"
+                      className="mt-3"
+                      onClick={signOutEverywhere}
+                      disabled={signingOutEverywhere}
                     >
-                      <span className={cn(
-                        "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors",
-                        verbosity === v ? "border-primary bg-primary" : "border-muted-foreground/40",
-                      )}>
-                        {verbosity === v && <span className="size-1.5 rounded-full bg-white" />}
-                      </span>
-                      <span>
-                        <span className={cn("block text-sm font-semibold capitalize", verbosity === v ? "text-primary" : "")}>
-                          {v}
-                        </span>
-                        <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
-                          {v === "concise"
-                            ? "Short, direct answers — best for quick lookups."
-                            : "Thorough explanations — best when you need full context."}
-                        </span>
-                      </span>
-                    </button>
-                  ))}
+                      {signingOutEverywhere ? (
+                        <><Loader2Icon className="mr-2 size-4 animate-spin" />Signing out…</>
+                      ) : (
+                        "Sign out everywhere"
+                      )}
+                    </Button>
+                  </div>
+
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    Your email address and role are managed by your institution and can&apos;t be edited here.
+                    Contact your institution administrator if either is wrong.
+                  </p>
+                </div>
+              )}
+
+              {/* ── Access & verification ── */}
+              {activeSection === "access" && (
+                <div className="space-y-8">
+
+                  {/* Trust tier */}
+                  <div className="rounded-xl border p-5">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-semibold">{tier.name}</span>
+                      <Badge tone="primary">Level {trustLevel} of 4</Badge>
+                    </div>
+                    <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{tier.blurb}</p>
+
+                    <div className="mt-4 flex gap-1" aria-hidden>
+                      {[1, 2, 3, 4].map((n) => (
+                        <span
+                          key={n}
+                          className={cn(
+                            "h-1.5 flex-1 rounded-full",
+                            n <= trustLevel ? "bg-primary" : "bg-muted",
+                          )}
+                        />
+                      ))}
+                    </div>
+
+                    <p className="mt-4 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/60">
+                      Episteme can search
+                    </p>
+                    <ul className="mt-2 space-y-1.5">
+                      {tier.scope.map((item) => (
+                        <li key={item} className="flex items-center gap-2 text-sm">
+                          <CheckIcon className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                          {item}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  {/* Student verification */}
+                  {verification && (
+                    <div>
+                      <p className="text-sm font-medium">Student verification</p>
+                      <div className="mt-3 divide-y divide-border/60 rounded-xl border px-5">
+                        <InfoRow label="Matric number">
+                          <span className="font-mono">{verification.matricNumber}</span>
+                        </InfoRow>
+                        <InfoRow label="Status">
+                          {verification.status === "admin_verified" ? (
+                            <Badge tone="success"><CheckCircle2Icon className="size-3" />Verified</Badge>
+                          ) : verification.status === "pending" ? (
+                            <Badge tone="warning"><ClockIcon className="size-3" />Awaiting review</Badge>
+                          ) : (
+                            <Badge tone="danger"><XCircleIcon className="size-3" />Rejected</Badge>
+                          )}
+                        </InfoRow>
+                        {verification.verifiedAt && (
+                          <InfoRow label="Verified on">{formatDate(verification.verifiedAt)}</InfoRow>
+                        )}
+                        {verification.method && (
+                          <InfoRow label="Method">{titleCase(verification.method)}</InfoRow>
+                        )}
+                      </div>
+
+                      {verification.status === "rejected" && (
+                        <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3">
+                          {verification.rejectionReason && (
+                            <p className="text-xs italic leading-relaxed text-muted-foreground">
+                              {verification.rejectionReason}
+                            </p>
+                          )}
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="mt-2"
+                            onClick={() => router.push("/onboarding")}
+                          >
+                            Re-submit matric number
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {!verification && ["student", "prospective"].includes(role) && (
+                    <div className="rounded-xl border border-dashed p-5">
+                      <p className="text-sm font-medium">Not verified yet</p>
+                      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                        Verify your matric number to unlock academic policy and fee information.
+                      </p>
+                      <Button size="sm" variant="outline" className="mt-3" onClick={() => router.push("/onboarding")}>
+                        Verify matric number
+                      </Button>
+                    </div>
+                  )}
+
+                  {/* Linked wards */}
+                  {wards.length > 0 && (
+                    <div>
+                      <p className="text-sm font-medium">Linked students</p>
+                      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                        What Episteme may discuss about each ward. These permissions are set by your institution.
+                      </p>
+                      <div className="mt-3 space-y-3">
+                        {wards.map((ward, i) => (
+                          <div key={`${ward.matric ?? ward.name ?? i}`} className="rounded-xl border p-4">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="text-sm font-medium">{ward.name ?? "Pending student"}</span>
+                              <Badge tone={ward.status === "verified" ? "success" : "warning"}>
+                                {titleCase(ward.status)}
+                              </Badge>
+                            </div>
+                            <p className="mt-0.5 text-xs text-muted-foreground">
+                              {titleCase(ward.relationship)}
+                              {ward.matric && <> · <span className="font-mono">{ward.matric}</span></>}
+                            </p>
+                            <div className="mt-3 flex flex-wrap gap-1.5">
+                              {([
+                                ["Academic records", ward.canViewAcademic],
+                                ["Fees",             ward.canViewFees],
+                                ["Attendance",       ward.canViewAttendance],
+                              ] as [string, boolean][]).map(([label, allowed]) => (
+                                <Badge key={label} tone={allowed ? "success" : "neutral"}>
+                                  {allowed ? <CheckIcon className="size-3" /> : <XIcon className="size-3" />}
+                                  {label}
+                                </Badge>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    Access is enforced when Episteme searches, not by hiding answers afterwards. Changing your
+                    programme or level above adjusts what it looks for — never what you&apos;re allowed to see.
+                  </p>
                 </div>
               )}
 
             </div>
           </div>
 
-          {/* ── Save bar ── */}
+          {/* ── Save bar ─────────────────────────────────────────────── */}
           <div className="shrink-0 border-t bg-background/80 backdrop-blur-sm">
-            <div className="flex items-center justify-between gap-4 px-6 py-3 sm:px-10 lg:px-16 max-w-2xl">
-              <div className="text-sm min-h-[1.25rem]">
-                {error        && <span className="text-destructive">{error}</span>}
-                {!error && success && (
+            <div className="flex max-w-2xl items-center justify-between gap-4 px-6 py-3 sm:px-10 lg:px-16">
+              <div className="min-h-[1.25rem] text-sm">
+                {(error ?? localError) ? (
+                  <span className="flex items-start gap-1.5 text-destructive">
+                    <AlertCircleIcon className="mt-0.5 size-4 shrink-0" />
+                    <span className="text-[13px] leading-snug">{error ?? localError}</span>
+                  </span>
+                ) : saved ? (
                   <span className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
                     <CheckCircle2Icon className="size-4" /> Changes saved
                   </span>
-                )}
-                {!error && !success && isDirty && (
-                  <span className="text-muted-foreground text-[13px]">You have unsaved changes.</span>
-                )}
+                ) : isDirty ? (
+                  <span className="text-[13px] text-muted-foreground">
+                    {dirtyKeys.size} unsaved {dirtyKeys.size === 1 ? "change" : "changes"}.
+                  </span>
+                ) : null}
               </div>
-              <Button onClick={handleSave} disabled={saving || !isDirty} className="min-w-[120px] shrink-0">
-                {saving ? <><Loader2Icon className="mr-2 size-4 animate-spin" />Saving…</> : "Save changes"}
-              </Button>
+
+              <div className="flex shrink-0 items-center gap-2">
+                {isDirty && !saving && (
+                  <Button
+                    variant="ghost"
+                    onClick={() => { setValues(baseline); setTheme(baseline.theme); setError(null); }}
+                  >
+                    Discard
+                  </Button>
+                )}
+                <Button
+                  onClick={handleSave}
+                  disabled={saving || !isDirty || Boolean(localError)}
+                  className="min-w-[120px]"
+                >
+                  {saving ? <><Loader2Icon className="mr-2 size-4 animate-spin" />Saving…</> : "Save changes"}
+                </Button>
+              </div>
             </div>
           </div>
 

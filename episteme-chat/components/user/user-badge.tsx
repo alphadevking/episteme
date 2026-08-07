@@ -10,7 +10,7 @@ import {
   MonitorIcon,
   SettingsIcon,
 } from "lucide-react";
-import { useTheme } from "next-themes";
+import { useThemePreference } from "@/lib/hooks/use-theme-preference";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { useRouter } from "next/navigation";
@@ -20,7 +20,9 @@ import { cn } from "@/lib/utils";
 
 export function UserBadge({ compact = false }: { compact?: boolean }) {
   const { user, loading, supabase } = useUser();
-  const { theme, setTheme } = useTheme();
+  // Persists the choice to the account as well as to localStorage, so this
+  // switcher and the Appearance section in Settings agree on what is stored.
+  const { theme, setThemePreference } = useThemePreference();
   const [signingOut, setSigningOut] = useState(false);
   const router = useRouter();
 
@@ -50,11 +52,12 @@ export function UserBadge({ compact = false }: { compact?: boolean }) {
         ? user.primary_role.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
         : null;
 
+  // `as const` so `value` narrows to ThemePref rather than widening to string.
   const themeOptions = [
-    { value: "light",  label: "Light",  Icon: SunIcon },
-    { value: "dark",   label: "Dark",   Icon: MoonIcon },
-    { value: "system", label: "Auto", Icon: MonitorIcon },
-  ];
+    { value: "light",  label: "Light", Icon: SunIcon },
+    { value: "dark",   label: "Dark",  Icon: MoonIcon },
+    { value: "system", label: "Auto",  Icon: MonitorIcon },
+  ] as const;
 
   // Skeleton while user data is in-flight — prevents footer height jump.
   if (loading) {
@@ -167,7 +170,7 @@ export function UserBadge({ compact = false }: { compact?: boolean }) {
               <button
                 key={value}
                 type="button"
-                onClick={() => setTheme(value)}
+                onClick={() => setThemePreference(value)}
                 className={cn(
                   "flex flex-1 flex-col items-center gap-1 rounded-lg px-2 py-2 text-[11px] font-medium transition-colors",
                   theme === value

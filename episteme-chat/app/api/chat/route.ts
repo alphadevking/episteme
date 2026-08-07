@@ -227,9 +227,18 @@ export async function POST(req: Request) {
 
     if (aiCtx) {
       const prefs      = (aiCtx.preferences as Record<string, string>) ?? {};
-      const verbosity  = prefs.verbosity  ?? "concise";
       const department = prefs.department ?? null;
       const staffTitle = prefs.staffTitle ?? null;
+
+      // Style preferences are emitted on EVERY turn, including at their default
+      // value. Previously only `verbosity=detailed` was sent, so "concise" was
+      // signalled by the absence of a token — and the agent had no rule reading
+      // either way, which made the setting a control that changed nothing.
+      // `## Rule 5 — Response style` in episteme-core now branches on these two
+      // tokens, so they must always be present and always be one of the known
+      // values. Anything unrecognised in storage degrades to the default here.
+      const verbosity    = prefs.verbosity    === "detailed" ? "detailed" : "concise";
+      const answerFormat = prefs.answerFormat === "steps"    ? "steps"    : "prose";
 
       system = buildSystem([
         `role=${role}`,
@@ -239,12 +248,15 @@ export async function POST(req: Request) {
         department        ? `dept=${department}`               : null,
         staffTitle        ? `title=${staffTitle}`              : null,
         parentCtx,
-        verbosity === "detailed" ? "verbosity=detailed" : null,
+        `verbosity=${verbosity}`,
+        `format=${answerFormat}`,
       ]);
     } else {
       system = buildSystem([
         `role=${role}`,
         parentCtx,
+        "verbosity=concise",
+        "format=prose",
       ]);
     }
   } catch {

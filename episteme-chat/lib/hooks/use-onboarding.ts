@@ -276,31 +276,48 @@ export function useOnboarding({
             });
         }
 
-        // 6. Write AI context — non-fatal. Only NON-locked personalization
-        // columns are written here. The locked columns (role, trust_level,
-        // verified) are owned by fn_onboard_self (role) and the verification
-        // flow (trust_level/verified) — never client-set. fn_onboard_self has
-        // already inserted this row with `role`, so this is an UPDATE.
-        supabase
-          .from("user_ai_context")
-          .upsert(
-            {
-              user_id: userId,
-              institution: merged.institutionName ?? null,
-              programme: merged.programmeInterest ?? merged.programmeName ?? null,
-              level: merged.level ?? null,
-              preferences: {
-                verbosity: merged.verbosity ?? "concise",
-                staffTitle: merged.staffTitle ?? null,
-                department: merged.department ?? null,
-              },
-              topics_seen: [],
-              matric_number: merged.studentId ?? null,
-            },
-            { onConflict: "user_id" },
-          )
+        // 6. Write AI context personalization.
+        //
+        // Through fn_update_my_ai_context (SECURITY DEFINER), NOT a direct
+        // upsert. `user_ai_context` is SELECT-only for `authenticated` since
+        // contract_column_lockdown, so the direct `.upsert()` this replaced
+        // would fail with "permission denied for table user_ai_context" — and
+        // because the failure was only `console.warn`ed, onboarding would have
+        // reported success while silently discarding every preference the user
+        // had just chosen.
+        //
+        // Two columns are deliberately NOT sent:
+        //   topics_seen   — the old write set `[]`, which is the column default,
+        //                   so it was always a no-op.
+        //   matric_number — owned by fn_self_report_student, which also sets the
+        //                   matching trust_level. Writing it here would let the
+        //                   two disagree.
+        //
+        // Still non-fatal: the user is onboarded and can set all of this in
+        // Settings. But it now logs as an error, because a silent warn is what
+        // let this hide in the first place.
+        const aiContextPatch: Record<string, unknown> = {
+          institution: merged.institutionName ?? null,
+          programme:   merged.programmeInterest ?? merged.programmeName ?? null,
+          level:       merged.level ?? null,
+          preferences: {
+            verbosity:  merged.verbosity ?? "concise",
+            staffTitle: merged.staffTitle ?? null,
+            department: merged.department ?? null,
+          },
+        };
+
+        void (
+          supabase as unknown as {
+            rpc(
+              fn: "fn_update_my_ai_context",
+              args: { p_patch: Record<string, unknown> },
+            ): Promise<{ error: { message: string } | null }>;
+          }
+        )
+          .rpc("fn_update_my_ai_context", { p_patch: aiContextPatch })
           .then(({ error: e }) => {
-            if (e) console.warn("[onboarding] user_ai_context write failed:", e.message);
+            if (e) console.error("[onboarding] user_ai_context write failed:", e.message);
           });
 
         router.push("/chat");

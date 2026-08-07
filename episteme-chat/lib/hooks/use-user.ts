@@ -38,10 +38,15 @@ export function useUser() {
         return;
       }
 
-      // Fetch user profile from public.users table to get roles
+      // Fetch the public.users row for roles AND for the name/avatar the badge
+      // renders. These columns must stay in step with `PROFILE_COLUMNS` in
+      // lib/supabase/server-auth.ts: `buildUserInfo` now prefers the profile
+      // row over OAuth metadata, so a column present on the server seed but
+      // missing here would make the client disagree with its own seed on
+      // refetch — the exact hydration divergence that file warns about.
       const { data: profile } = await supabase
         .from("users")
-        .select("primary_role, roles, institution_id")
+        .select("display_name, first_name, last_name, avatar_url, primary_role, roles, institution_id")
         .eq("auth_id", u.id)
         .maybeSingle();
 

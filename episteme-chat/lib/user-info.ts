@@ -25,6 +25,10 @@ type AuthUserLike = {
 
 /** The subset of a `public.users` row this app reads. */
 type ProfileLike = {
+  display_name?:   string | null;
+  first_name?:     string | null;
+  last_name?:      string | null;
+  avatar_url?:     string | null;
   primary_role?:   string | null;
   roles?:          string[] | null;
   institution_id?: string | null;
@@ -35,6 +39,30 @@ function metaString(meta: Record<string, unknown> | null | undefined, key: strin
   return typeof v === "string" && v.length > 0 ? v : null;
 }
 
+/** Trims to null so a whitespace-only column can't win the precedence chain. */
+function clean(v: string | null | undefined): string | null {
+  const t = v?.trim();
+  return t ? t : null;
+}
+
+/**
+ * The name to show, in precedence order:
+ *   display_name → "first last" → OAuth metadata → null (caller falls back to email)
+ *
+ * The profile row comes FIRST deliberately. Before this, the name was read only
+ * from `user_metadata.full_name`, which the settings page cannot write — so
+ * editing your name saved correctly to `users` and then changed nothing
+ * anywhere the user could see. The provider's copy is now the fallback for
+ * accounts that have never set a name, not the authority.
+ */
+function profileName(profile: ProfileLike): string | null {
+  const display = clean(profile?.display_name);
+  if (display) return display;
+
+  const parts = [clean(profile?.first_name), clean(profile?.last_name)].filter(Boolean);
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
 export function buildUserInfo(user: AuthUserLike | null | undefined, profile: ProfileLike): UserInfo | null {
   if (!user) return null;
 
@@ -43,8 +71,16 @@ export function buildUserInfo(user: AuthUserLike | null | undefined, profile: Pr
   return {
     id:             user.id,
     email:          user.email ?? null,
-    fullName:       metaString(meta, "full_name") ?? metaString(meta, "name") ?? null,
-    avatarUrl:      metaString(meta, "avatar_url") ?? metaString(meta, "picture") ?? null,
+    fullName:
+      profileName(profile) ??
+      metaString(meta, "full_name") ??
+      metaString(meta, "name") ??
+      null,
+    avatarUrl:
+      clean(profile?.avatar_url) ??
+      metaString(meta, "avatar_url") ??
+      metaString(meta, "picture") ??
+      null,
     primary_role:   profile?.primary_role,
     roles:          profile?.roles ?? [],
     institution_id: profile?.institution_id,
