@@ -18,6 +18,7 @@
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 import { settingsPatchSchema, formatSettingsIssue } from "@/lib/settings/schema";
+import type { Json } from "@/lib/types/database";
 import { splitSettingsPatch, mergePreferences, readSettingsValues } from "@/lib/settings/patch";
 
 const USER_READ_COLUMNS = "first_name, last_name, display_name, phone" as const;
@@ -98,12 +99,7 @@ export async function PATCH(req: Request) {
   // else — email, roles, status, institution_id and is_superadmin are not
   // nameable through it.
   if (Object.keys(plan.users).length > 0) {
-    const { error } = await (
-      supabase as unknown as {
-        rpc(fn: "fn_update_my_profile", args: { p_patch: Record<string, string | null> }):
-          Promise<{ error: { message: string } | null }>;
-      }
-    ).rpc("fn_update_my_profile", { p_patch: plan.users });
+    const { error } = await supabase.rpc("fn_update_my_profile", { p_patch: plan.users });
 
     if (error) {
       console.error("[profile] users update failed:", error.message);
@@ -128,9 +124,8 @@ export async function PATCH(req: Request) {
     // lockdown closed. The RPC restores write access to the personalization
     // columns only, and cannot name the privileged ones.
     //
-    // Requires fn_update_my_ai_context to exist — see the SQL handed over with
-    // this change. SELECT is still granted, so the read below is unaffected.
-    const patch: Record<string, unknown> = { ...plan.context };
+    // SELECT is still granted, so the read below is unaffected.
+    const patch: Record<string, Json> = { ...plan.context };
 
     if (touchesPrefs) {
       // Read-modify-write so preference keys this form doesn't own survive.
@@ -143,15 +138,10 @@ export async function PATCH(req: Request) {
       patch.preferences = mergePreferences(
         (current?.preferences ?? {}) as Record<string, unknown>,
         plan,
-      );
+      ) as Json;
     }
 
-    const { error } = await (
-      supabase as unknown as {
-        rpc(fn: "fn_update_my_ai_context", args: { p_patch: Record<string, unknown> }):
-          Promise<{ error: { message: string } | null }>;
-      }
-    ).rpc("fn_update_my_ai_context", { p_patch: patch });
+    const { error } = await supabase.rpc("fn_update_my_ai_context", { p_patch: patch });
 
     if (error) {
       console.error("[profile] user_ai_context update failed:", error.message);

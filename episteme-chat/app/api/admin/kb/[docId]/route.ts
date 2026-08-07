@@ -11,6 +11,7 @@
 //   PATCH (scope) → no kb_document_sources fields affected; audit log only.
 
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import type { Json } from "@/lib/types/database";
 import { assertKbAdmin, kbAdminHeaders, mastraBaseUrl } from "@/lib/admin/kb-auth";
 import { revalidatePath } from "next/cache";
 
@@ -105,7 +106,7 @@ export async function PATCH(req: Request, { params }: Params) {
       await supabase.rpc("fn_write_audit_log_for_kb", {
         p_action:        "kb_document_scope_updated",
         p_resource_type: "kb_document",
-        p_new_value:     { doc_id: docId, roles, levels, programme, category, contentType, updatedAt },
+        p_new_value:     { doc_id: docId, roles, levels, programme, category, contentType, updatedAt } as Json,
       });
 
       revalidatePath(KB_ADMIN_PATH);

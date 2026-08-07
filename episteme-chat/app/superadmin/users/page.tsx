@@ -1,6 +1,7 @@
 // app/superadmin/users/page.tsx
 // Platform-wide user search across all institutions.
 import { createSupabaseServerClientReadOnly } from "@/lib/supabase/server";
+import { asEnum } from "@/lib/types/enums";
 import { PageHeader } from "@/components/admin/page-header";
 import { DataTable } from "@/components/admin/data-table";
 import { StatusBadge } from "@/components/admin/status-badge";
@@ -35,8 +36,13 @@ export default async function SuperadminUsersPage({ searchParams }: SearchParams
     if (q?.trim()) {
         query = query.or(`email.ilike.%${q.trim()}%,first_name.ilike.%${q.trim()}%,last_name.ilike.%${q.trim()}%`);
     }
-    if (role) query = query.eq("primary_role", role);
-    if (status) query = query.eq("status", status);
+    // Narrowed against the generated enum values; an unrecognised filter is
+    // dropped rather than sent to PostgREST, which rejects the whole query.
+    const roleFilter   = asEnum("user_role", role);
+    const statusFilter = asEnum("account_status", status);
+
+    if (roleFilter)   query = query.eq("primary_role", roleFilter);
+    if (statusFilter) query = query.eq("status", statusFilter);
 
     const { data: users, count } = await query;
 

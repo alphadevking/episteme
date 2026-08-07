@@ -48,8 +48,13 @@ import {
   MoonIcon,
   MonitorIcon,
   XIcon,
-  InfoIcon,
+  ShieldAlertIcon,
+  DownloadIcon,
+  UploadIcon,
+  Trash2Icon,
 } from "lucide-react";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { AVATAR_ACCEPT, AVATAR_MAX_BYTES, DELETE_CONFIRMATION } from "@/lib/account/constants";
 import type { SettingsData, SettingsOption } from "@/lib/settings/types";
 import type { SettingsValues, ThemePref } from "@/lib/settings/schema";
 import {
@@ -63,7 +68,7 @@ import { LEVEL_OPTIONS } from "@/lib/constants/academic";
 
 // ── Section model ───────────────────────────────────────────────────────────
 
-type SectionId = "profile" | "context" | "ai" | "appearance" | "account" | "access";
+type SectionId = "profile" | "context" | "ai" | "appearance" | "account" | "access" | "privacy";
 
 type NavItem = {
   id: SectionId;
@@ -394,6 +399,20 @@ export function SettingsShell({ data }: { data: SettingsData }) {
   const [error,   setError]   = useState<string | null>(null);
   const [signingOutEverywhere, setSigningOutEverywhere] = useState(false);
 
+  // Avatar and deletion sit outside the `values`/`baseline` diff model: they are
+  // immediate actions against their own endpoints, not fields staged for a save.
+  const [avatarUrl,     setAvatarUrl]     = useState(data.account.avatarUrl);
+  const [avatarBusy,    setAvatarBusy]    = useState(false);
+  const [avatarError,   setAvatarError]   = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [exporting,     setExporting]     = useState(false);
+  const [deleteOpen,    setDeleteOpen]    = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [deleteReason,  setDeleteReason]  = useState("");
+  const [deleting,      setDeleting]      = useState(false);
+  const [deleteError,   setDeleteError]   = useState<string | null>(null);
+
   const set = useCallback(<K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) => {
     setValues((v) => ({ ...v, [key]: value }));
     setSaved(false);
@@ -494,6 +513,112 @@ export function SettingsShell({ data }: { data: SettingsData }) {
     return () => clearTimeout(t);
   }, [saved]);
 
+  // ── Avatar ────────────────────────────────────────────────────────────
+  const uploadAvatar = useCallback(async (file: File) => {
+    setAvatarError(null);
+
+    // Checked again on the server (and by the bucket), but failing here saves
+    // the user a 2 MB round trip to be told no.
+    if (file.size > AVATAR_MAX_BYTES) {
+      setAvatarError("Images must be 2 MB or smaller.");
+      return;
+    }
+
+    setAvatarBusy(true);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const res  = await fetch("/api/account/avatar", { method: "POST", body });
+      const json = (await res.json().catch(() => ({}))) as { avatarUrl?: string; error?: string };
+
+      if (!res.ok) {
+        setAvatarError(json.error ?? `Upload failed (${res.status}).`);
+        return;
+      }
+      setAvatarUrl(json.avatarUrl ?? null);
+      router.refresh();
+    } catch {
+      setAvatarError("Couldn't reach the server. Check your connection.");
+    } finally {
+      setAvatarBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }, [router]);
+
+  const removeAvatar = useCallback(async () => {
+    setAvatarError(null);
+    setAvatarBusy(true);
+    try {
+      const res = await fetch("/api/account/avatar", { method: "DELETE" });
+      if (!res.ok) {
+        const json = (await res.json().catch(() => ({}))) as { error?: string };
+        setAvatarError(json.error ?? `Couldn't remove the image (${res.status}).`);
+        return;
+      }
+      setAvatarUrl(null);
+      router.refresh();
+    } catch {
+      setAvatarError("Couldn't reach the server. Check your connection.");
+    } finally {
+      setAvatarBusy(false);
+    }
+  }, [router]);
+
+  // ── Data export ───────────────────────────────────────────────────────
+  const exportData = useCallback(async () => {
+    setExporting(true);
+    try {
+      const res = await fetch("/api/account/export");
+      if (!res.ok) return;
+
+      // Streamed to a blob and clicked rather than navigated to, so the
+      // Content-Disposition download can't be mistaken for a page navigation
+      // (which would drop the user out of the settings screen on some browsers).
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href     = url;
+      a.download = `episteme-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
+  }, []);
+
+  // ── Account deletion ──────────────────────────────────────────────────
+  const deleteAccount = useCallback(async () => {
+    if (deleteConfirm.trim() !== DELETE_CONFIRMATION) return;
+
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const res = await fetch("/api/account/delete", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ confirm: deleteConfirm.trim(), reason: deleteReason.trim() || null }),
+      });
+      const json = (await res.json().catch(() => ({}))) as { error?: string };
+
+      if (!res.ok) {
+        // 409 carries the function's own refusal text (superadmin, or last
+        // remaining admin) — it is written for the user, so show it verbatim.
+        setDeleteError(json.error ?? `Couldn't delete the account (${res.status}).`);
+        return;
+      }
+
+      const { createSupabaseBrowserClient } = await import("@/lib/supabase/browser");
+      await createSupabaseBrowserClient().auth.signOut({ scope: "global" });
+      router.replace("/sign-in");
+    } catch {
+      setDeleteError("Couldn't reach the server. Check your connection.");
+    } finally {
+      setDeleting(false);
+    }
+  }, [deleteConfirm, deleteReason, router]);
+
   const signOutEverywhere = useCallback(async () => {
     if (!window.confirm("Sign out of Episteme on all your devices?")) return;
     setSigningOutEverywhere(true);
@@ -561,6 +686,12 @@ export function SettingsShell({ data }: { data: SettingsData }) {
       id: "access", label: "Access & verification", Icon: ShieldCheckIcon,
       title: "Access & verification",
       description: "What Episteme is allowed to look at when it answers you.",
+      fields: [],
+    },
+    {
+      id: "privacy", label: "Data & privacy", Icon: ShieldAlertIcon,
+      title: "Data & privacy",
+      description: "Take a copy of your data, or close your account.",
       fields: [],
     },
   ];
@@ -653,6 +784,59 @@ export function SettingsShell({ data }: { data: SettingsData }) {
               {/* ── Profile ── */}
               {activeSection === "profile" && (
                 <div className="space-y-5">
+
+                  {/* ── Avatar ── */}
+                  <div className="flex flex-wrap items-center gap-5">
+                    <Avatar className="size-20 shrink-0 border">
+                      {avatarUrl ? <AvatarImage src={avatarUrl} alt="" /> : null}
+                      <AvatarFallback className="bg-primary/15 text-xl font-semibold text-primary">
+                        {(values.displayName || values.firstName || account.email || "?")
+                          .charAt(0)
+                          .toUpperCase()}
+                      </AvatarFallback>
+                    </Avatar>
+
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={avatarBusy}
+                          onClick={() => fileInputRef.current?.click()}
+                        >
+                          {avatarBusy
+                            ? <><Loader2Icon className="mr-2 size-4 animate-spin" />Working…</>
+                            : <><UploadIcon className="mr-2 size-4" />Upload photo</>}
+                        </Button>
+                        {avatarUrl && (
+                          <Button variant="ghost" size="sm" disabled={avatarBusy} onClick={removeAvatar}>
+                            Remove
+                          </Button>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground">PNG, JPEG or WebP. Up to 2 MB.</p>
+                      {avatarError && (
+                        <p className="flex items-start gap-1.5 text-xs text-destructive">
+                          <AlertCircleIcon className="mt-0.5 size-3.5 shrink-0" />
+                          {avatarError}
+                        </p>
+                      )}
+                    </div>
+
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept={AVATAR_ACCEPT}
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) void uploadAvatar(file);
+                      }}
+                    />
+                  </div>
+
+                  <Separator />
+
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <Field label="First name">
                       <Input
@@ -697,13 +881,6 @@ export function SettingsShell({ data }: { data: SettingsData }) {
                     />
                   </Field>
 
-                  <div className="flex items-start gap-2 rounded-lg border bg-muted/30 px-4 py-3 text-xs leading-relaxed text-muted-foreground">
-                    <InfoIcon className="mt-0.5 size-3.5 shrink-0" />
-                    <span>
-                      Your profile picture comes from {PROVIDER_LABELS[account.provider ?? ""] ?? "your sign-in provider"} and
-                      can&apos;t be changed here yet.
-                    </span>
-                  </div>
                 </div>
               )}
 
@@ -1056,6 +1233,107 @@ export function SettingsShell({ data }: { data: SettingsData }) {
                     Access is enforced when Episteme searches, not by hiding answers afterwards. Changing your
                     programme or level above adjusts what it looks for — never what you&apos;re allowed to see.
                   </p>
+                </div>
+              )}
+
+              {/* ── Data & privacy ── */}
+              {activeSection === "privacy" && (
+                <div className="space-y-8">
+
+                  {/* Export */}
+                  <div className="rounded-xl border p-5">
+                    <p className="text-sm font-medium">Export your data</p>
+                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                      Downloads a JSON file containing your profile, preferences, verification records, chat
+                      threads and messages. It does not include records about you written by administrators.
+                    </p>
+                    <Button variant="outline" size="sm" className="mt-3" onClick={exportData} disabled={exporting}>
+                      {exporting
+                        ? <><Loader2Icon className="mr-2 size-4 animate-spin" />Preparing…</>
+                        : <><DownloadIcon className="mr-2 size-4" />Download my data</>}
+                    </Button>
+                  </div>
+
+                  {/* Danger zone */}
+                  <div className="rounded-xl border border-destructive/30 bg-destructive/[0.03] p-5">
+                    <p className="flex items-center gap-2 text-sm font-medium text-destructive">
+                      <ShieldAlertIcon className="size-4" /> Close your account
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                      Your account is deactivated immediately and you&apos;re signed out everywhere. Your data is
+                      retained so your institution can restore the account if this was a mistake — contact your
+                      administrator to undo it.
+                    </p>
+
+                    {!deleteOpen ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mt-3 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        onClick={() => { setDeleteOpen(true); setDeleteError(null); }}
+                      >
+                        <Trash2Icon className="mr-2 size-4" />
+                        Close account
+                      </Button>
+                    ) : (
+                      <div className="mt-4 space-y-3">
+                        <Field label="Why are you leaving?" optional>
+                          <Input
+                            value={deleteReason}
+                            onChange={(e) => setDeleteReason(e.target.value)}
+                            maxLength={500}
+                            placeholder="Optional — helps your institution improve Episteme"
+                          />
+                        </Field>
+
+                        <Field
+                          label={`Type ${DELETE_CONFIRMATION} to confirm`}
+                          hint="This exact phrase is required, and is checked again on the server."
+                        >
+                          <Input
+                            value={deleteConfirm}
+                            onChange={(e) => setDeleteConfirm(e.target.value)}
+                            autoComplete="off"
+                            spellCheck={false}
+                            placeholder={DELETE_CONFIRMATION}
+                          />
+                        </Field>
+
+                        {deleteError && (
+                          <p className="flex items-start gap-1.5 text-xs text-destructive">
+                            <AlertCircleIcon className="mt-0.5 size-3.5 shrink-0" />
+                            {deleteError}
+                          </p>
+                        )}
+
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            size="sm"
+                            className="bg-destructive text-white hover:bg-destructive/90"
+                            disabled={deleting || deleteConfirm.trim() !== DELETE_CONFIRMATION}
+                            onClick={deleteAccount}
+                          >
+                            {deleting
+                              ? <><Loader2Icon className="mr-2 size-4 animate-spin" />Closing…</>
+                              : "Permanently close my account"}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={deleting}
+                            onClick={() => {
+                              setDeleteOpen(false);
+                              setDeleteConfirm("");
+                              setDeleteReason("");
+                              setDeleteError(null);
+                            }}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 

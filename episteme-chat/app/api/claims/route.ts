@@ -4,6 +4,7 @@
 // resolves the caller, auto-routes academic claims to the HOD when possible,
 // and writes a full audit log row atomically.
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import type { Json } from "@/lib/types/database";
 
 const VALID_TYPES = ["transcript", "degree", "enrollment", "good_standing", "attestation"] as const;
 type ClaimType = (typeof VALID_TYPES)[number];
@@ -28,10 +29,12 @@ export async function POST(req: Request) {
 
   const { data, error } = await supabase.rpc("fn_submit_verification_claim", {
     p_claim_type:   claim_type as ClaimType,
-    p_details:      (typeof details === "object" && details !== null) ? details : {},
-    p_requirements: {},
+    p_details:      ((typeof details === "object" && details !== null) ? details : {}) as Json,
+    p_requirements: {} as Json,
     p_is_urgent:    Boolean(is_urgent),
-    p_deadline:     typeof deadline === "string" && deadline ? deadline : null,
+    // null is meaningful (no deadline). Typegen renders the nullable param as
+    // optional; omitting the key would change overload resolution.
+    p_deadline:     (typeof deadline === "string" && deadline ? deadline : null) as unknown as string | undefined,
   });
 
   if (error) {

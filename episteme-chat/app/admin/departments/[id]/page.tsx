@@ -60,7 +60,7 @@ export default async function DepartmentDetailPage({ params }: Params) {
           table="departments"
           title="Department"
           fields={FIELDS}
-          defaults={{ institution_id: me?.institution_id }}
+          defaults={{ institution_id: me?.institution_id ?? undefined }}
           rowId={dept.id}
           initial={{
             name:       dept.name,

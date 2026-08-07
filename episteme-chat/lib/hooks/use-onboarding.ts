@@ -199,25 +199,18 @@ export function useOnboarding({
         // — this call depends on that migration having been applied; the
         // direct `.from("users").update(...)` this replaced worked only
         // because those columns were (over-)grantable to `authenticated`.
-        const { error: userErr } = await (
-          supabase as unknown as {
-            rpc(
-              fn: "fn_onboard_self",
-              args: {
-                p_role: string;
-                p_institution_id: string;
-                p_first_name: string;
-                p_last_name: string | null;
-                p_phone: string | null;
-              },
-            ): Promise<{ error: { message: string } | null }>;
-          }
-        ).rpc("fn_onboard_self", {
+        // The two nullable params need a cast, and it is load-bearing:
+        // Supabase typegen renders a nullable `text` argument as OPTIONAL
+        // (`p_last_name?: string`), which is not the same thing. fn_onboard_self
+        // declares no SQL DEFAULTs, so omitting the key makes PostgREST unable
+        // to resolve the overload and it returns PGRST202. Passing null is the
+        // runtime-correct call; `?? undefined` would break onboarding outright.
+        const { error: userErr } = await supabase.rpc("fn_onboard_self", {
           p_role: merged.role,
           p_institution_id: merged.institutionId,
           p_first_name: merged.firstName,
-          p_last_name: merged.lastName ?? null,
-          p_phone: merged.phone ?? null,
+          p_last_name: (merged.lastName ?? null) as unknown as string | undefined,
+          p_phone: (merged.phone ?? null) as unknown as string | undefined,
         });
 
         if (userErr) throw new Error(userErr.message);
@@ -296,7 +289,9 @@ export function useOnboarding({
         // Still non-fatal: the user is onboarded and can set all of this in
         // Settings. But it now logs as an error, because a silent warn is what
         // let this hide in the first place.
-        const aiContextPatch: Record<string, unknown> = {
+        // Inferred rather than annotated `Record<string, unknown>`, so it stays
+        // structurally assignable to the generated `Json` arg type.
+        const aiContextPatch = {
           institution: merged.institutionName ?? null,
           programme:   merged.programmeInterest ?? merged.programmeName ?? null,
           level:       merged.level ?? null,
@@ -307,14 +302,7 @@ export function useOnboarding({
           },
         };
 
-        void (
-          supabase as unknown as {
-            rpc(
-              fn: "fn_update_my_ai_context",
-              args: { p_patch: Record<string, unknown> },
-            ): Promise<{ error: { message: string } | null }>;
-          }
-        )
+        void supabase
           .rpc("fn_update_my_ai_context", { p_patch: aiContextPatch })
           .then(({ error: e }) => {
             if (e) console.error("[onboarding] user_ai_context write failed:", e.message);

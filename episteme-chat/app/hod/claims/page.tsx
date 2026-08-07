@@ -2,6 +2,7 @@
 // HOD claims queue — scoped to assigned_to = HOD via RLS (hod_select_dept_claims).
 // Supports ?status= and ?urgent= URL filters.
 import { getHodAssertion, getServerSupabase } from "@/lib/supabase/server-auth";
+import { asEnum } from "@/lib/types/enums";
 import { redirect } from "next/navigation";
 import { StatusBadge } from "@/components/admin/status-badge";
 import { FilterBar } from "@/components/admin/filter-bar";
@@ -48,8 +49,12 @@ export default async function HodClaimsPage({ searchParams }: Props) {
     .order("is_urgent", { ascending: false })
     .order("created_at", { ascending: true });
 
-  if (status) query = query.eq("status", status);
-  if (urgent) query = query.eq("is_urgent", true);
+  // Narrowed against the generated enum values; an unrecognised filter is
+  // dropped rather than sent to PostgREST, which rejects the whole query.
+  const statusFilter = asEnum("claim_status", status);
+
+  if (statusFilter) query = query.eq("status", statusFilter);
+  if (urgent)       query = query.eq("is_urgent", true);
 
   const { data: claims } = await query;
   const rows2 = ((claims ?? []) as unknown as ClaimRow[]);

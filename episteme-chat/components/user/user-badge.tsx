@@ -38,9 +38,7 @@ export function UserBadge({ compact = false }: { compact?: boolean }) {
     // thread titles can survive into the next session in this tab.
     clearSnapshot();
     // Constrained, non-forgeable auth logger (actor derived server-side).
-    void (supabase as unknown as {
-      rpc(fn: "fn_log_auth_event", args: { p_action: string }): Promise<unknown>;
-    }).rpc("fn_log_auth_event", { p_action: "user_sign_out" });
+    void supabase.rpc("fn_log_auth_event", { p_action: "user_sign_out" });
     await supabase.auth.signOut();
     router.replace("/sign-in");
   };

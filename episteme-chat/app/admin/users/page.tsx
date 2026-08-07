@@ -4,26 +4,29 @@ import { DataTable } from "@/components/admin/data-table";
 import { StatusBadge } from "@/components/admin/status-badge";
 import { FilterBar } from "@/components/admin/filter-bar";
 import { requireAdminAccess } from "@/lib/admin-guard";
+import { asEnum, enumValues } from "@/lib/types/enums";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 
 type Props = { searchParams: Promise<{ institution?: string; q?: string; status?: string; role?: string }> };
 type UserRow = { id: string; email: string; first_name: string | null; last_name: string | null; primary_role: string; status: string; created_at: string };
 
-const STATUS_OPTIONS = [
-  { value: "active",   label: "Active"   },
-  { value: "inactive", label: "Inactive" },
-  { value: "pending",  label: "Pending"  },
-];
+const titleCase = (v: string) => v.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
-const ROLE_OPTIONS = [
-  { value: "admin",       label: "Admin"       },
-  { value: "hod",         label: "HOD"         },
-  { value: "staff",       label: "Staff"       },
-  { value: "student",     label: "Student"     },
-  { value: "parent",      label: "Parent"      },
-  { value: "prospective", label: "Prospective" },
-];
+// Derived from the generated enums rather than hand-written. The hand-written
+// list had "inactive" and "pending", neither of which is an account_status —
+// selecting either could never match a user, and now that filters are narrowed
+// they would simply be dropped. Deriving them keeps the UI and the database
+// from disagreeing again.
+const STATUS_OPTIONS = enumValues("account_status").map((value) => ({
+  value,
+  label: titleCase(value),
+}));
+
+// Superadmins are deliberately excluded from institution-scoped admin views.
+const ROLE_OPTIONS = enumValues("user_role")
+  .filter((value) => value !== "superadmin")
+  .map((value) => ({ value, label: value === "hod" ? "HOD" : titleCase(value) }));
 
 export default async function UsersPage({ searchParams }: Props) {
     const { institution: institutionParam, q, status, role } = await searchParams;
@@ -36,9 +39,14 @@ export default async function UsersPage({ searchParams }: Props) {
         .is("deleted_at", null)
         .order("created_at", { ascending: false });
 
-    if (q)      query = query.or(`first_name.ilike.%${q}%,last_name.ilike.%${q}%,email.ilike.%${q}%`);
-    if (status) query = query.eq("status", status);
-    if (role)   query = query.eq("primary_role", role);
+    // Narrowed against the generated enum values; an unrecognised filter is
+    // dropped rather than sent to PostgREST, which rejects the whole query.
+    const statusFilter = asEnum("account_status", status);
+    const roleFilter   = asEnum("user_role", role);
+
+    if (q)            query = query.or(`first_name.ilike.%${q}%,last_name.ilike.%${q}%,email.ilike.%${q}%`);
+    if (statusFilter) query = query.eq("status", statusFilter);
+    if (roleFilter)   query = query.eq("primary_role", roleFilter);
 
     const { data: users } = await query;
 

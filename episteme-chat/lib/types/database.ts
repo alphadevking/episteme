@@ -297,6 +297,41 @@ export type Database = {
           },
         ]
       }
+      claim_sla_rules: {
+        Row: {
+          claim_type: Database["public"]["Enums"]["claim_type"]
+          created_at: string
+          hod_sla_hours: number
+          id: string
+          institution_id: string
+          updated_at: string
+        }
+        Insert: {
+          claim_type: Database["public"]["Enums"]["claim_type"]
+          created_at?: string
+          hod_sla_hours?: number
+          id?: string
+          institution_id: string
+          updated_at?: string
+        }
+        Update: {
+          claim_type?: Database["public"]["Enums"]["claim_type"]
+          created_at?: string
+          hod_sla_hours?: number
+          id?: string
+          institution_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "claim_sla_rules_institution_id_fkey"
+            columns: ["institution_id"]
+            isOneToOne: false
+            referencedRelation: "institutions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       courses: {
         Row: {
           course_code: string
@@ -524,6 +559,67 @@ export type Database = {
           updated_at?: string
         }
         Relationships: []
+      }
+      invite_tokens: {
+        Row: {
+          created_at: string
+          department_id: string | null
+          email: string
+          expires_at: string
+          id: string
+          institution_id: string
+          invited_by: string
+          redeemed_at: string | null
+          role: Database["public"]["Enums"]["user_role"]
+          token_hash: string
+        }
+        Insert: {
+          created_at?: string
+          department_id?: string | null
+          email: string
+          expires_at?: string
+          id?: string
+          institution_id: string
+          invited_by: string
+          redeemed_at?: string | null
+          role: Database["public"]["Enums"]["user_role"]
+          token_hash: string
+        }
+        Update: {
+          created_at?: string
+          department_id?: string | null
+          email?: string
+          expires_at?: string
+          id?: string
+          institution_id?: string
+          invited_by?: string
+          redeemed_at?: string | null
+          role?: Database["public"]["Enums"]["user_role"]
+          token_hash?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "invite_tokens_department_id_fkey"
+            columns: ["department_id"]
+            isOneToOne: false
+            referencedRelation: "departments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "invite_tokens_institution_id_fkey"
+            columns: ["institution_id"]
+            isOneToOne: false
+            referencedRelation: "institutions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "invite_tokens_invited_by_fkey"
+            columns: ["invited_by"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       kb_document_sources: {
         Row: {
@@ -1049,6 +1145,7 @@ export type Database = {
           attempt_count: number
           claimed_programme_id: string | null
           created_at: string
+          department_id: string | null
           id: string
           idp_provider: string | null
           idp_sub: string | null
@@ -1069,6 +1166,7 @@ export type Database = {
           attempt_count?: number
           claimed_programme_id?: string | null
           created_at?: string
+          department_id?: string | null
           id?: string
           idp_provider?: string | null
           idp_sub?: string | null
@@ -1089,6 +1187,7 @@ export type Database = {
           attempt_count?: number
           claimed_programme_id?: string | null
           created_at?: string
+          department_id?: string | null
           id?: string
           idp_provider?: string | null
           idp_sub?: string | null
@@ -1111,6 +1210,13 @@ export type Database = {
             columns: ["claimed_programme_id"]
             isOneToOne: false
             referencedRelation: "programs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "user_student_links_department_id_fkey"
+            columns: ["department_id"]
+            isOneToOne: false
+            referencedRelation: "departments"
             referencedColumns: ["id"]
           },
           {
@@ -1215,11 +1321,14 @@ export type Database = {
           assigned_at: string | null
           assigned_by: string | null
           assigned_to: string | null
+          auto_routed: boolean
           claim_type: Database["public"]["Enums"]["claim_type"]
           created_at: string
           deadline: string | null
           department_id: string | null
           details: Json
+          escalated_at: string | null
+          escalated_to: string | null
           id: string
           institution_id: string
           is_urgent: boolean
@@ -1236,11 +1345,14 @@ export type Database = {
           assigned_at?: string | null
           assigned_by?: string | null
           assigned_to?: string | null
+          auto_routed?: boolean
           claim_type: Database["public"]["Enums"]["claim_type"]
           created_at?: string
           deadline?: string | null
           department_id?: string | null
           details?: Json
+          escalated_at?: string | null
+          escalated_to?: string | null
           id?: string
           institution_id: string
           is_urgent?: boolean
@@ -1257,11 +1369,14 @@ export type Database = {
           assigned_at?: string | null
           assigned_by?: string | null
           assigned_to?: string | null
+          auto_routed?: boolean
           claim_type?: Database["public"]["Enums"]["claim_type"]
           created_at?: string
           deadline?: string | null
           department_id?: string | null
           details?: Json
+          escalated_at?: string | null
+          escalated_to?: string | null
           id?: string
           institution_id?: string
           is_urgent?: boolean
@@ -1297,6 +1412,13 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
+            foreignKeyName: "verification_claims_escalated_to_fkey"
+            columns: ["escalated_to"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
             foreignKeyName: "verification_claims_institution_id_fkey"
             columns: ["institution_id"]
             isOneToOne: false
@@ -1326,10 +1448,6 @@ export type Database = {
     Functions: {
       current_admin_institution_id: { Args: never; Returns: string }
       current_user_public_id: { Args: never; Returns: string }
-      fn_readonly_list_active_faculties: {
-        Args: { p_institution_id: string }
-        Returns: { id: string; name: string }[]
-      }
       fn_admin_assign_claim: {
         Args: {
           p_claim_id: string
@@ -1340,6 +1458,14 @@ export type Database = {
       }
       fn_admin_reopen_claim: {
         Args: { p_claim_id: string; p_notes?: string }
+        Returns: undefined
+      }
+      fn_admin_set_user_role: {
+        Args: { p_role: string; p_target_user_id: string }
+        Returns: undefined
+      }
+      fn_admin_set_user_status: {
+        Args: { p_status: string; p_target_user_id: string }
         Returns: undefined
       }
       fn_admin_verify_student: {
@@ -1354,11 +1480,23 @@ export type Database = {
           user_id: string
         }[]
       }
+      fn_assert_active_hod: {
+        Args: never
+        Returns: {
+          department_id: string
+          department_name: string
+          faculty_id: string
+          institution_id: string
+          user_id: string
+        }[]
+      }
       fn_create_chat_thread: { Args: { p_title?: string }; Returns: string }
       fn_delete_chat_thread: {
         Args: { p_thread_id: string }
         Returns: undefined
       }
+      fn_delete_my_account: { Args: { p_reason?: string }; Returns: undefined }
+      fn_escalate_stale_claims: { Args: never; Returns: number }
       fn_expire_parent_claims: { Args: never; Returns: undefined }
       fn_get_auth_institution_id: { Args: never; Returns: string }
       fn_get_chat_messages: {
@@ -1444,8 +1582,19 @@ export type Database = {
           updated_at: string
         }[]
       }
+      fn_log_auth_event: { Args: { p_action: string }; Returns: undefined }
       fn_mark_notification_read: {
         Args: { p_notification_id: string }
+        Returns: undefined
+      }
+      fn_onboard_self: {
+        Args: {
+          p_first_name: string
+          p_institution_id: string
+          p_last_name?: string
+          p_phone?: string
+          p_role: string
+        }
         Returns: undefined
       }
       fn_provision_admin: {
@@ -1453,6 +1602,14 @@ export type Database = {
         Returns: undefined
       }
       fn_provision_superadmin: { Args: { p_email: string }; Returns: undefined }
+      fn_readonly_list_active_faculties: {
+        Args: { p_institution_id: string }
+        Returns: {
+          id: string
+          name: string
+        }[]
+      }
+      fn_redeem_invite_token: { Args: { p_token: string }; Returns: Json }
       fn_resolve_pending_parent_claims: {
         Args: { p_matric: string; p_user_id: string }
         Returns: undefined
@@ -1470,6 +1627,11 @@ export type Database = {
           name: string
         }[]
       }
+      fn_self_report_student: {
+        Args: { p_institution_id: string; p_matric_number: string }
+        Returns: undefined
+      }
+      fn_set_my_avatar: { Args: { p_url: string }; Returns: undefined }
       fn_submit_message_feedback: {
         Args: {
           p_helpful: boolean
@@ -1477,6 +1639,16 @@ export type Database = {
           p_thread_id: string
         }
         Returns: undefined
+      }
+      fn_submit_verification_claim: {
+        Args: {
+          p_claim_type: Database["public"]["Enums"]["claim_type"]
+          p_deadline?: string
+          p_details?: Json
+          p_is_urgent?: boolean
+          p_requirements?: Json
+        }
+        Returns: Json
       }
       fn_superadmin_override_claim: {
         Args: {
@@ -1491,6 +1663,8 @@ export type Database = {
         Args: { p_archived?: boolean; p_thread_id: string; p_title?: string }
         Returns: undefined
       }
+      fn_update_my_ai_context: { Args: { p_patch: Json }; Returns: undefined }
+      fn_update_my_profile: { Args: { p_patch: Json }; Returns: undefined }
       fn_upsert_chat_messages: {
         Args: { p_messages: Json; p_thread_id: string }
         Returns: undefined
@@ -1498,6 +1672,10 @@ export type Database = {
       fn_validate_institution_scope: {
         Args: { p_institution_id: string }
         Returns: boolean
+      }
+      fn_validate_patch_text: {
+        Args: { p_key: string; p_max: number; p_patch: Json }
+        Returns: string
       }
       fn_write_audit_log: {
         Args: {

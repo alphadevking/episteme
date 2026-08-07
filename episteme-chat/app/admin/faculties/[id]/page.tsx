@@ -70,7 +70,7 @@ export default async function FacultyDetailPage({ params }: Params) {
           table="faculties"
           title="Faculty"
           fields={FIELDS}
-          defaults={{ institution_id: me?.institution_id }}
+          defaults={{ institution_id: me?.institution_id ?? undefined }}
           rowId={faculty.id}
           initial={{
             name:       faculty.name,

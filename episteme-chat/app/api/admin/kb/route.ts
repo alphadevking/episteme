@@ -17,6 +17,7 @@
 //   Supabase is the source of truth for the admin dashboard; LibSQL is Mastra-internal.
 
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import type { Json } from "@/lib/types/database";
 import { assertKbAdmin, kbAdminHeaders, mastraBaseUrl } from "@/lib/admin/kb-auth";
 import { shouldRecordIngest, type IngestDonePayload } from "@/lib/admin/kb-sync";
 import { revalidatePath } from "next/cache";
@@ -136,17 +137,38 @@ export async function POST(req: Request) {
               const payload = JSON.parse(dataMatch[1]) as IngestDonePayload;
               if (shouldRecordIngest({ requestedDryRun: isDryRun, payload, docId, institutionId })) {
                 // Fire-and-forget — stream is already flowing, don't block it.
-                Promise.all([
-                  supabase.from("kb_document_sources").upsert(
-                    { doc_id: docId, institution_id: institutionId, source_url: sourceUrl, updated_at: new Date().toISOString() },
-                    { onConflict: "doc_id" },
-                  ),
+                const writes: PromiseLike<unknown>[] = [
                   supabase.rpc("fn_write_audit_log_for_kb", {
                     p_action:        "kb_document_created",
                     p_resource_type: "kb_document",
-                    p_new_value:     { doc_id: docId ?? null, source: source ?? null },
+                    p_new_value:     { doc_id: docId ?? null, source: source ?? null } as Json,
                   }),
-                ]).catch((err) => console.error("[admin/kb] Supabase sync failed:", err));
+                ];
+
+                // shouldRecordIngest already rejects a missing docId or
+                // institutionId, but TS can't see through a boolean predicate
+                // over a destructured literal — and it never checked sourceUrl,
+                // which is NOT NULL on kb_document_sources. An ingest with no
+                // resolvable source URL was therefore attempting a null write
+                // that the fire-and-forget catch below swallowed silently.
+                // Skip the row instead; the audit log still records the ingest.
+                if (docId && institutionId && sourceUrl) {
+                  writes.push(
+                    supabase.from("kb_document_sources").upsert(
+                      {
+                        doc_id:         docId,
+                        institution_id: institutionId,
+                        source_url:     sourceUrl,
+                        updated_at:     new Date().toISOString(),
+                      },
+                      { onConflict: "doc_id" },
+                    ),
+                  );
+                } else {
+                  console.warn("[admin/kb] no source URL for", docId, "— skipping kb_document_sources row");
+                }
+
+                Promise.all(writes).catch((err) => console.error("[admin/kb] Supabase sync failed:", err));
 
                 // Invalidate the KB admin list so the newly ingested doc shows
                 // without a full page reload.

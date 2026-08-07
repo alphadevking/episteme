@@ -58,14 +58,14 @@ export default async function ProgramDetailPage({ params }: Params) {
           table="programs"
           title="Program"
           fields={FIELDS}
-          defaults={{ institution_id: me?.institution_id }}
+          defaults={{ institution_id: me?.institution_id ?? undefined }}
           rowId={program.id}
           initial={{
             name:           program.name,
             code:           program.code,
             degree_type:    program.degree_type,
             department_id:  program.department_id,
-            duration_years: program.duration_years ?? "",
+            duration_years: program.duration_years,
             is_active:      program.is_active,
           }}
         />

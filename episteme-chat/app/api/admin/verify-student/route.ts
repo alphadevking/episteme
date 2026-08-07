@@ -69,7 +69,10 @@ export async function PATCH(req: Request) {
   const { error } = await supabase.rpc("fn_admin_verify_student", {
     p_link_id: linkId,
     p_action:  action,
-    p_reason:  reason?.trim() ?? null,
+    // null is meaningful (approval with no reason). Typegen renders the
+    // nullable text param as optional; omitting the key would change which
+    // overload PostgREST resolves, so pass null explicitly.
+    p_reason:  (reason?.trim() ?? null) as unknown as string | undefined,
   });
 
   if (error) {

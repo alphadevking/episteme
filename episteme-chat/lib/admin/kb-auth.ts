@@ -51,8 +51,15 @@ export async function assertKbAdmin(
     ? (requestedInstitutionId ?? profile.institution_id ?? null)
     : (profile.institution_id ?? null);
 
+  // null is a meaningful argument here — a superadmin with no institution of
+  // their own. Supabase typegen renders the nullable uuid param as a required
+  // `string`, so the cast is needed to express what the function already
+  // accepts; omitting the key instead would change which overload PostgREST
+  // resolves. See the same note in lib/hooks/use-onboarding.ts.
   const { data: scopeValid } = await supabase
-    .rpc("fn_validate_institution_scope", { p_institution_id: institutionId });
+    .rpc("fn_validate_institution_scope", {
+      p_institution_id: institutionId as unknown as string,
+    });
 
   if (!scopeValid) {
     return {

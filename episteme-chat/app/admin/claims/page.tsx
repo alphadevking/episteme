@@ -4,6 +4,7 @@ import { DataTable } from "@/components/admin/data-table";
 import { StatusBadge } from "@/components/admin/status-badge";
 import { FilterBar } from "@/components/admin/filter-bar";
 import { requireAdminAccess } from "@/lib/admin-guard";
+import { asEnum } from "@/lib/types/enums";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 
@@ -47,8 +48,14 @@ export default async function ClaimsPage({ searchParams }: Props) {
     .order("is_urgent", { ascending: false })
     .order("created_at", { ascending: false });
 
-  if (statusFilter)               query = query.eq("status", statusFilter);
-  if (typeFilter)                 query = query.eq("claim_type", typeFilter);
+  // Narrowed against the generated enum values — an unrecognised query param is
+  // dropped rather than passed to PostgREST, which would reject the whole query
+  // with 22P02 and render an empty list with no explanation.
+  const status = asEnum("claim_status", statusFilter);
+  const type   = asEnum("claim_type",   typeFilter);
+
+  if (status)                     query = query.eq("status", status);
+  if (type)                       query = query.eq("claim_type", type);
   if (urgentFilter === "true")    query = query.eq("is_urgent", true);
   if (urgentFilter === "false")   query = query.eq("is_urgent", false);
 
