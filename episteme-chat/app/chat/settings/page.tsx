@@ -12,7 +12,7 @@ import type { SettingsData, SettingsOption, SettingsWard } from "@/lib/settings/
 import { readSettingsValues } from "@/lib/settings/patch";
 import { getAuthContext, getServerSupabase } from "@/lib/supabase/server-auth";
 import { deriveTrustLevel, resolveEffectiveRole } from "@/lib/session-derivation";
-import { getProviderAvatarUrl } from "@/lib/user-info";
+import { getProviderAvatarUrl, isUploadedAvatarUrl } from "@/lib/user-info";
 
 export default async function SettingsPage() {
   // Request-cached — reuses the chat layout's auth call and profile row.
@@ -113,7 +113,14 @@ export default async function SettingsPage() {
 
     account: {
       email:           profile.email,
-      emailVerified:   Boolean(accountMeta?.email_verified_at),
+      // Read from the AUTH record, not `users.email_verified_at`.
+      //
+      // That mirror column is never written by anything — no app code and no
+      // trigger populates it — so trusting it told every Google user their
+      // verified email was "Unverified". A false security statement is worse
+      // than no statement. `auth.users.email_confirmed_at` is the value Supabase
+      // actually maintains, and OAuth sign-ins arrive with it already set.
+      emailVerified:   Boolean(user.email_confirmed_at ?? accountMeta?.email_verified_at),
       provider:        (user.app_metadata?.provider as string | undefined) ?? null,
       status:          profile.status,
       primaryRole,
@@ -125,10 +132,20 @@ export default async function SettingsPage() {
       // this" (not ours to delete). resolveAvatarUrl encodes the precedence
       // between them and is shared with the sidebar badge so the two surfaces
       // cannot disagree about which photo is current.
-      uploadedAvatarUrl: profile.avatar_url,
+      // Only a Storage URL counts as "uploaded" — `handle_new_user` seeds
+      // avatar_url with the provider's photo, so a null check here would offer
+      // every Google user a Remove button that does nothing.
+      uploadedAvatarUrl: isUploadedAvatarUrl(profile.avatar_url) ? profile.avatar_url : null,
       providerAvatarUrl: getProviderAvatarUrl(user),
       createdAt:       accountMeta?.created_at ?? null,
-      lastLoginAt:     accountMeta?.last_login_at ?? null,
+      // Likewise from the auth record. `users.last_login_at` has no writer, so
+      // it reads "Never" for everyone, including users who are signed in as they
+      // read it. Supabase maintains `last_sign_in_at` itself.
+      //
+      // This only fixes the user's OWN view. The admin user-detail page shows
+      // last login for OTHER users, where the auth record is not reachable — that
+      // one stays broken until the mirror column gets a writer server-side.
+      lastLoginAt:     user.last_sign_in_at ?? accountMeta?.last_login_at ?? null,
     },
 
     verification: studentLink

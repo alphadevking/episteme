@@ -85,6 +85,27 @@ export function resolveAvatarUrl(
 }
 
 /**
+ * Does `users.avatar_url` hold a photo the user actually uploaded?
+ *
+ * It cannot be answered with a null check. The `handle_new_user` trigger seeds
+ * that column with the OAuth provider's photo on signup, so it is non-null for
+ * every Google user who has never uploaded anything. Treating non-null as
+ * "uploaded" put a Remove button in front of all of them — and pressing it
+ * cleared the column, fell back to the same URL from auth metadata, and changed
+ * nothing on screen.
+ *
+ * An upload always lives in this project's `avatars` bucket: `fn_set_my_avatar`
+ * rejects anything that does not match this exact prefix, so a Storage URL here
+ * is proof of an upload. Keep this pattern in step with that function.
+ */
+const UPLOADED_AVATAR_RE =
+  /^https:\/\/[a-z0-9]+\.supabase\.co\/storage\/v1\/object\/public\/avatars\//;
+
+export function isUploadedAvatarUrl(url: string | null | undefined): boolean {
+  return typeof url === "string" && UPLOADED_AVATAR_RE.test(url.trim());
+}
+
+/**
  * The photo supplied by the OAuth provider, or null.
  *
  * Separate from `resolveAvatarUrl` because the settings page needs the two
