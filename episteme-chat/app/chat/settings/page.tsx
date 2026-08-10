@@ -12,6 +12,7 @@ import type { SettingsData, SettingsOption, SettingsWard } from "@/lib/settings/
 import { readSettingsValues } from "@/lib/settings/patch";
 import { getAuthContext, getServerSupabase } from "@/lib/supabase/server-auth";
 import { deriveTrustLevel, resolveEffectiveRole } from "@/lib/session-derivation";
+import { getProviderAvatarUrl } from "@/lib/user-info";
 
 export default async function SettingsPage() {
   // Request-cached — reuses the chat layout's auth call and profile row.
@@ -119,7 +120,13 @@ export default async function SettingsPage() {
       roles,
       isSuperadmin:    profile.is_superadmin,
       institutionName: institution?.name ?? null,
-      avatarUrl:       profile.avatar_url,
+      // Kept as two values, not one resolved string: the UI has to distinguish
+      // "you uploaded this" (removable) from "your sign-in provider supplied
+      // this" (not ours to delete). resolveAvatarUrl encodes the precedence
+      // between them and is shared with the sidebar badge so the two surfaces
+      // cannot disagree about which photo is current.
+      uploadedAvatarUrl: profile.avatar_url,
+      providerAvatarUrl: getProviderAvatarUrl(user),
       createdAt:       accountMeta?.created_at ?? null,
       lastLoginAt:     accountMeta?.last_login_at ?? null,
     },

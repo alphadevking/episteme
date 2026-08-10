@@ -401,12 +401,17 @@ export function SettingsShell({ data }: { data: SettingsData }) {
 
   // Avatar and deletion sit outside the `values`/`baseline` diff model: they are
   // immediate actions against their own endpoints, not fields staged for a save.
-  const [avatarUrl,     setAvatarUrl]     = useState(data.account.avatarUrl);
+  // Only the UPLOADED avatar is state — the provider's photo is fixed for the
+  // session. Keeping them separate means removing an upload falls back to the
+  // provider photo automatically, rather than blanking to initials.
+  const [uploadedAvatarUrl, setUploadedAvatarUrl] = useState(data.account.uploadedAvatarUrl);
+  const avatarUrl = uploadedAvatarUrl ?? data.account.providerAvatarUrl;
   const [avatarBusy,    setAvatarBusy]    = useState(false);
   const [avatarError,   setAvatarError]   = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [exporting,     setExporting]     = useState(false);
+  const [exportError,   setExportError]   = useState<string | null>(null);
   const [deleteOpen,    setDeleteOpen]    = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [deleteReason,  setDeleteReason]  = useState("");
@@ -535,7 +540,7 @@ export function SettingsShell({ data }: { data: SettingsData }) {
         setAvatarError(json.error ?? `Upload failed (${res.status}).`);
         return;
       }
-      setAvatarUrl(json.avatarUrl ?? null);
+      setUploadedAvatarUrl(json.avatarUrl ?? null);
       router.refresh();
     } catch {
       setAvatarError("Couldn't reach the server. Check your connection.");
@@ -555,7 +560,7 @@ export function SettingsShell({ data }: { data: SettingsData }) {
         setAvatarError(json.error ?? `Couldn't remove the image (${res.status}).`);
         return;
       }
-      setAvatarUrl(null);
+      setUploadedAvatarUrl(null);
       router.refresh();
     } catch {
       setAvatarError("Couldn't reach the server. Check your connection.");
@@ -567,9 +572,18 @@ export function SettingsShell({ data }: { data: SettingsData }) {
   // ── Data export ───────────────────────────────────────────────────────
   const exportData = useCallback(async () => {
     setExporting(true);
+    setExportError(null);
     try {
       const res = await fetch("/api/account/export");
-      if (!res.ok) return;
+
+      // A failure has to be visible. Returning silently here just stopped the
+      // spinner with no download and no message, which is indistinguishable
+      // from a browser that blocked the save — the user retries forever.
+      if (!res.ok) {
+        const json = (await res.json().catch(() => ({}))) as { error?: string };
+        setExportError(json.error ?? `Couldn't prepare the export (${res.status}).`);
+        return;
+      }
 
       // Streamed to a blob and clicked rather than navigated to, so the
       // Content-Disposition download can't be mistaken for a page navigation
@@ -583,6 +597,8 @@ export function SettingsShell({ data }: { data: SettingsData }) {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
+    } catch {
+      setExportError("Couldn't reach the server. Check your connection and try again.");
     } finally {
       setExporting(false);
     }
@@ -808,13 +824,22 @@ export function SettingsShell({ data }: { data: SettingsData }) {
                             ? <><Loader2Icon className="mr-2 size-4 animate-spin" />Working…</>
                             : <><UploadIcon className="mr-2 size-4" />Upload photo</>}
                         </Button>
-                        {avatarUrl && (
+                        {/* Only an uploaded photo can be removed. Offering
+                            "Remove" for the provider's photo was a button that
+                            cleared an already-null column and changed nothing
+                            on screen. */}
+                        {uploadedAvatarUrl && (
                           <Button variant="ghost" size="sm" disabled={avatarBusy} onClick={removeAvatar}>
                             Remove
                           </Button>
                         )}
                       </div>
-                      <p className="text-xs text-muted-foreground">PNG, JPEG or WebP. Up to 2 MB.</p>
+                      <p className="text-xs text-muted-foreground">
+                        PNG, JPEG or WebP. Up to 2 MB.
+                        {!uploadedAvatarUrl && account.providerAvatarUrl && (
+                          <> Currently using your {PROVIDER_LABELS[account.provider ?? ""] ?? "sign-in"} photo.</>
+                        )}
+                      </p>
                       {avatarError && (
                         <p className="flex items-start gap-1.5 text-xs text-destructive">
                           <AlertCircleIcon className="mt-0.5 size-3.5 shrink-0" />
@@ -1252,6 +1277,13 @@ export function SettingsShell({ data }: { data: SettingsData }) {
                         ? <><Loader2Icon className="mr-2 size-4 animate-spin" />Preparing…</>
                         : <><DownloadIcon className="mr-2 size-4" />Download my data</>}
                     </Button>
+
+                    {exportError && (
+                      <p className="mt-2 flex items-start gap-1.5 text-xs text-destructive">
+                        <AlertCircleIcon className="mt-0.5 size-3.5 shrink-0" />
+                        {exportError}
+                      </p>
+                    )}
                   </div>
 
                   {/* Danger zone */}

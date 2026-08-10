@@ -22,7 +22,16 @@ export type SettingsAccount = {
   roles:           string[];
   isSuperadmin:    boolean;
   institutionName: string | null;
-  avatarUrl:       string | null;
+  /**
+   * The avatar the user uploaded (`users.avatar_url`), or null. This is the
+   * only one that can be removed — hence it being separate from the provider's.
+   */
+  uploadedAvatarUrl: string | null;
+  /**
+   * The photo from the OAuth provider, or null. Shown when nothing has been
+   * uploaded, and what the avatar falls back to after a removal.
+   */
+  providerAvatarUrl: string | null;
   createdAt:       string | null;
   lastLoginAt:     string | null;
 };

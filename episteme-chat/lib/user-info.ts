@@ -63,6 +63,40 @@ function profileName(profile: ProfileLike): string | null {
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
+/**
+ * The avatar to display, in precedence order:
+ *   users.avatar_url (uploaded by the user) → OAuth metadata → null
+ *
+ * Exported because more than one surface needs this answer, and they must not
+ * each invent their own. The settings page previously read `profile.avatar_url`
+ * alone: since the OAuth trigger never populates that column, a Google user saw
+ * their photo in the sidebar (which did fall back to metadata) and an initials
+ * placeholder in Settings — the same account rendering two different avatars.
+ *
+ * Note this returns the EFFECTIVE avatar. To decide whether the user has
+ * something of their own to remove, check `profile.avatar_url` directly — the
+ * provider's photo is not ours to delete.
+ */
+export function resolveAvatarUrl(
+  user: AuthUserLike | null | undefined,
+  profile: ProfileLike,
+): string | null {
+  return clean(profile?.avatar_url) ?? getProviderAvatarUrl(user);
+}
+
+/**
+ * The photo supplied by the OAuth provider, or null.
+ *
+ * Separate from `resolveAvatarUrl` because the settings page needs the two
+ * sources apart — it must know whether there is an uploaded photo to offer a
+ * "Remove" button for. Which metadata keys count, and in what order, is decided
+ * here once so no caller has to re-derive it.
+ */
+export function getProviderAvatarUrl(user: AuthUserLike | null | undefined): string | null {
+  const meta = user?.user_metadata ?? null;
+  return metaString(meta, "avatar_url") ?? metaString(meta, "picture") ?? null;
+}
+
 export function buildUserInfo(user: AuthUserLike | null | undefined, profile: ProfileLike): UserInfo | null {
   if (!user) return null;
 
@@ -76,11 +110,7 @@ export function buildUserInfo(user: AuthUserLike | null | undefined, profile: Pr
       metaString(meta, "full_name") ??
       metaString(meta, "name") ??
       null,
-    avatarUrl:
-      clean(profile?.avatar_url) ??
-      metaString(meta, "avatar_url") ??
-      metaString(meta, "picture") ??
-      null,
+    avatarUrl: resolveAvatarUrl(user, profile),
     primary_role:   profile?.primary_role,
     roles:          profile?.roles ?? [],
     institution_id: profile?.institution_id,

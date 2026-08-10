@@ -27,11 +27,20 @@ function Avatar({
 
 function AvatarImage({
   className,
+  referrerPolicy = "no-referrer",
   ...props
 }: React.ComponentProps<typeof AvatarPrimitive.Image>) {
   return (
     <AvatarPrimitive.Image
       data-slot="avatar-image"
+      // Avatars are third-party hosted (lh3.googleusercontent.com for Google
+      // sign-in, Supabase Storage for uploads). The app sets
+      // Referrer-Policy: strict-origin-when-cross-origin, so the browser sends
+      // a Referer to those hosts — and Google's lh3 answers 403 for referrers
+      // it doesn't expect, which Radix renders as the initials fallback with no
+      // error anywhere. Suppressing the header for avatar requests only is the
+      // documented fix and leaks nothing.
+      referrerPolicy={referrerPolicy}
       className={cn("aspect-square size-full", className)}
       {...props}
     />
