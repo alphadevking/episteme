@@ -158,6 +158,20 @@ institution or the global one.
 > one financial-aid and one staff-internal document would make these four cases
 > falsifiable and worth citing on their own.
 
+**The harness now detects this itself (added 2026-08-13).** Each entitlement case
+reports which of its exclusions genuinely withheld content and which were empty:
+
+```
+PASS  entitlement-student-trust2  (1 chunk(s), namespaces: admissions, programmes, general)
+        exclusions: withholds 12 vector(s) across [academic-policy];
+                    VACUOUS for [financial-aid, staff-internal] — empty, cannot leak
+```
+
+A case resting *entirely* on empty namespaces raises a WARNING and is counted in
+the summary, so "no violations" can no longer be read without the caveat
+attached. The gap above was found by a human reading a corpus dump; the next
+namespace to empty out will be caught on the run that empties it.
+
 ---
 
 ## 4. Prompt behaviour — MEASURED, FOUR RUNS
@@ -634,26 +648,27 @@ All tests pass on both packages.
 
 | Package | Test files | Suites | Tests | Passing | Failing |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| `episteme-core` | 25 | 102 | 436 | 436 | 0 |
+| `episteme-core` | 26 | 106 | 450 | 450 | 0 |
 | `episteme-chat` | 11 | 55 | 216 | 216 | 0 |
-| **Total** | **36** | **157** | **652** | **652** | **0** |
+| **Total** | **37** | **161** | **666** | **666** | **0** |
 
 `tsc --noEmit` passes clean on `episteme-core`.
 
-Access control accounts for **105 of the 652** tests — retrieval-gate 50,
+Access control accounts for **105 of the 666** tests — retrieval-gate 50,
 record-gate 27, session-context 28 — the direct unit-level evidence for
 Objective 1.
 
 The count rose from 575 to 652 across this work: 13 tests pinning
 `extractEntities`, 8 pinning stream-frame detection, 19 pinning attribution
-scoring, 14 pinning rate-limit backoff, and 23 pinning the grounded-context
-conflict rule.
+scoring, 14 pinning rate-limit backoff, 23 pinning the grounded-context
+conflict rule, and 14 pinning entitlement vacuity detection.
 
 ### 6.1 episteme-core, per module
 
 | Test file | Suites | Tests |
 | :--- | ---: | ---: |
 | `evals/attribution.test.ts` | 4 | 19 |
+| `evals/entitlement-coverage.test.ts` | 4 | 14 |
 | `evals/retry.test.ts` | 3 | 14 |
 | `evals/retrieval-metrics.test.ts` | 8 | 30 |
 | `mastra/agents/storage-outage.test.ts` | 3 | 6 |
@@ -756,6 +771,6 @@ No test was failing — 337 were never executing. Any coverage claim from a
 4. Normalise numerics before the faithfulness substring match, then take one complete post-fix run
 5. Make eval concurrency configurable so rate limiting stops costing cases
 6. Relax the `news-single-fact-citation` expectation to assert outcome, not tool identity
-7. Ingest one `financial-aid` and one `staff-internal` document so the entitlement cases become falsifiable
+7. **[unchanged — needs real documents]** Ingest one `financial-aid` and one `staff-internal` document so the entitlement cases become falsifiable
 8. Write the two remaining harnesses: registry reconciliation, workflow replay
 9. Supply an EntailmentJudge to activate ALCE recall/precision (§4.6)

@@ -684,14 +684,29 @@ async function runEntitlementCases() {
   }
 
   const { Pinecone } = await import('@pinecone-database/pinecone');
-  const { resolveNamespacesForRoles, expandAudienceRoles, GLOBAL_INSTITUTION } =
-    await import('../mastra/security/retrieval-gate');
+  const {
+    resolveNamespacesForRoles, expandAudienceRoles, GLOBAL_INSTITUTION,
+    ROLE_NAMESPACES, TRUST_NAMESPACES,
+  } = await import('../mastra/security/retrieval-gate');
+  const { assessExclusionCoverage, formatExclusionCoverage, knownNamespaces } =
+    await import('./entitlement-coverage');
   const retrieveKnowledge = await loadRetriever();
 
   const index = new Pinecone({ apiKey: process.env['PINECONE_API_KEY']! })
     .index({ name: process.env['PINECONE_INDEX']! });
 
+  // A vector census, so the harness can tell an exclusion that WITHHELD content
+  // from one that merely described an empty namespace. Pinecone omits empty
+  // namespaces entirely, so an absent key means zero.
+  const indexStats = await index.describeIndexStats();
+  const census: Record<string, number> = Object.fromEntries(
+    Object.entries(indexStats.namespaces ?? {})
+      .map(([ns, st]) => [ns, (st as { recordCount?: number }).recordCount ?? 0]),
+  );
+  const universe = knownNamespaces(ROLE_NAMESPACES, TRUST_NAMESPACES);
+
   const failures: string[] = [];
+  const vacuousCases: string[] = [];
   let chunksInspected = 0;
   let casesWithResults = 0;
 
@@ -774,14 +789,35 @@ async function runEntitlementCases() {
       }
     }
 
+    // Could this case's exclusions have failed at all? A green access-control
+    // result nobody can falsify is worse than a red one — it gets written up as
+    // evidence. Reported per case rather than aggregated so the specific
+    // assertion that is hollow is named.
+    const coverage = assessExclusionCoverage(allowedNamespaces, universe, census);
+    if (coverage.whollyVacuous) vacuousCases.push(c.id);
+
     console.log(
       `${violations.length === 0 ? 'PASS' : 'FAIL'}  ${c.id}  ` +
       `(${res.results.length} chunk(s), namespaces: ${allowedNamespaces.join(', ')})`,
     );
+    console.log(`        exclusions: ${formatExclusionCoverage(coverage)}`);
     for (const v of violations) failures.push(`${c.id}: ${v}`);
   }
 
-  return { failures, chunksInspected, casesWithResults, totalCases: KB_ENTITLEMENT_CASES.length };
+  if (vacuousCases.length > 0) {
+    console.log(
+      `\n  WARNING  ${vacuousCases.length} case(s) rest ENTIRELY on empty namespaces: ` +
+      `${vacuousCases.join(', ')}.\n` +
+      '           Every exclusion they assert is unfalsifiable against this corpus — nothing\n' +
+      '           is there to leak. They cannot be cited as access-control evidence until a\n' +
+      '           document is ingested into the namespaces they guard.',
+    );
+  }
+
+  return {
+    failures, chunksInspected, casesWithResults,
+    totalCases: KB_ENTITLEMENT_CASES.length, vacuousCases,
+  };
 }
 
 // ── Suggestion chips (the product's promises) ────────────────────────────────
@@ -1164,6 +1200,14 @@ async function main() {
     console.log('\nEntitlement');
     console.log(`  cases          ${entitlement.casesWithResults}/${entitlement.totalCases} returned results`);
     console.log(`  chunks checked ${entitlement.chunksInspected}`);
+    if (entitlement.vacuousCases.length > 0) {
+      // Surfaced in the summary as well as inline: a reader who skims to the
+      // bottom must not carry away "no violations" without this attached to it.
+      console.log(
+        `  vacuous        ${entitlement.vacuousCases.length}/${entitlement.totalCases} ` +
+        `case(s) assert only about EMPTY namespaces — not evidence`,
+      );
+    }
     if (entitlement.chunksInspected === 0) {
       // Every case returned nothing, so nothing was actually verified. Saying
       // "PASS" here would be the most dangerous possible output: a security
