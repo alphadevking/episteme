@@ -277,7 +277,16 @@ export const attributionScorer = createScorer({
     // No source-bearing tool ran (refusal, clarification, injection probe):
     // there is no citation apparatus to check, so there is nothing to fail.
     if (!out.toolSources) return { applicable: false as const };
-    return { applicable: true as const, report: scoreAttribution(out.text, out.toolSources) };
+    return {
+      applicable: true as const,
+      report: scoreAttribution(out.text, out.toolSources),
+      // Coverage is only a defect signal on a HIGH-confidence answer. A
+      // confidence=low turn is an abstention offering refinement options, and
+      // 0% coverage there is correct behaviour, not an uncited claim. Run 5
+      // showed both shapes scoring 0.0% side by side, which is unreadable
+      // without this distinction.
+      confidence: out.groundedConfidence,
+    };
   })
   .generateScore(({ results }) => {
     const r = results.preprocessStepResult;
@@ -287,10 +296,23 @@ export const attributionScorer = createScorer({
   .generateReason(({ results }) => {
     const r = results.preprocessStepResult;
     if (!r.applicable) return 'No source-bearing tool ran — no citation apparatus to check.';
-    const summary = formatAttribution(r.report);
-    return r.report.dangling.length === 0 && r.report.mismatched.length === 0
-      ? `Every citation resolves. ${summary}`
-      : `Broken citation apparatus. ${summary}`;
+
+    const intact = r.report.dangling.length === 0 && r.report.mismatched.length === 0;
+    const head = intact ? 'Every citation resolves.' : 'Broken citation apparatus.';
+
+    // Qualify coverage by confidence so an abstention's legitimate 0% is not
+    // read as an uncited answer.
+    const uncited = r.report.claimCount - r.report.citedClaimCount;
+    let note = '';
+    if (r.confidence === 'low') {
+      note = ' (abstention — citations not expected)';
+    } else if (r.confidence === 'high' && r.report.citedClaimCount === 0 && r.report.claimCount > 0) {
+      note = ` — HIGH-CONFIDENCE ANSWER CITING NOTHING across ${r.report.claimCount} claim(s)`;
+    } else if (r.confidence === 'high' && uncited > 0) {
+      note = ` — ${uncited} claim(s) uncited`;
+    }
+
+    return `${head} ${formatAttribution(r.report)}${note}`;
   });
 
 export const promptEvalScorers = [

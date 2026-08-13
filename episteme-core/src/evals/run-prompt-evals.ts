@@ -129,6 +129,17 @@ const summary = await runExperiment(mastra, {
         toolSources = [...(toolSources ?? []), ...numbered];
       }
 
+      // unibenNewsTool names its list `posts`, and numbers them IMPLICITLY by
+      // array position — buildNewsContext emits <post index="i + 1"> and tells
+      // the model those indices are the citation numbers. Reading only `sources`
+      // left attribution blind on the news tier, which reported "no
+      // source-bearing tool ran" for an answer visibly carrying [3](cite:3)[4](cite:4)
+      // — the one tier where badge stacking actually shows up.
+      if (Array.isArray(payload.posts)) {
+        const numbered = payload.posts.map((_: unknown, i: number) => ({ number: i + 1 }));
+        toolSources = [...(toolSources ?? []), ...numbered];
+      }
+
       if (toolName(tr) !== 'groundedResponseTool') continue;
       if (payload.confidence === 'high' || payload.confidence === 'low') {
         groundedConfidence = payload.confidence;
