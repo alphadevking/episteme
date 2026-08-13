@@ -7,28 +7,67 @@ so any figure in the write-up can be re-derived rather than trusted.
 
 | | |
 | :--- | :--- |
-| Date | 2026-08-12 |
-| Commit | `169da45` |
+| Retrieval / prompt evals | 2026-08-13, operator workstation, live services |
+| Static + test census | 2026-08-12, CI container, commit `169da45` |
 | Node | v22.22.2 |
-| Environment | CI container, no service credentials present |
+| Corpus | Pinecone index `episteme-kb`, 458 vectors |
+| Institution | `ab282ad9-321f-4c1f-a681-667f32bf0fe1` |
 
-**Credential state.** This run had no `PINECONE_API_KEY`, `MISTRAL_API_KEY`,
-`TAVILY_API_KEY`, `LIBSQL_*` or Supabase credentials, and no running chat
-endpoint. Every harness that needs a live service reports SKIPPED below rather
-than a number. Nothing here is estimated or interpolated — a blank is a blank.
+**Corpus composition** — this matters for how the retrieval numbers should be read:
+
+| Namespace | Vectors | Share | Source document |
+| :--- | ---: | ---: | :--- |
+| `general` | 391 | 85.4% | `STUDENTHANDBOOK.pdf` |
+| `admissions` | 55 | 12.0% | `admission_policy.html` |
+| `academic-policy` | 12 | 2.6% | `ACADEMIC_CALENDAR_PG_2026.pdf` |
+| **Total** | **458** | | **3 documents** |
 
 ---
 
 ## 1. Retrieval quality
 
-### 1.1 Platform documentation tier — MEASURED
+Both tiers ran against a live index. The **corpus reachability control passed**
+(full-privilege caller retrieved 7 chunks across 4 ordinary queries), so the
+results below are not the silent-vacuum failure mode — retrieval was genuinely
+exercised.
 
-On-disk Markdown corpus (`src/content/platform`, 5 documents). Needs no
-credentials, so these are final numbers.
+### 1.1 Knowledge base tier — MEASURED
 
-```
-pnpm eval:retrieval
-```
+| Metric | Value |
+| :--- | ---: |
+| Scored cases | 10 |
+| Precision@1 | 100.0% |
+| Precision@3 | 96.7% |
+| Recall@3 | 100.0% |
+| MRR | 1.000 |
+| nDCG@3 | 1.000 |
+| Total misses | 0 |
+| Abstention | 4/4 (100.0%) |
+
+Nine of ten retrieve cases scored P=100%; `kb-admission-requirements` scored
+P@3=66.7% with MRR and nDCG still at 1.000 — correct document first, one
+off-label chunk in the top-3 window.
+
+> ### ⚠ Methodological caveat — state this in Chapter 4
+>
+> **These scores are inflated by corpus composition and should not be reported
+> bare.** Eight of the ten labelled retrieve cases expect
+> `expectedSources: ['STUDENTHANDBOOK']`, and the handbook is 391 of 458 vectors
+> — **85% of the corpus**. The label is a case-insensitive substring match on the
+> source filename, so "did the top result come from the handbook" is satisfied by
+> almost any successful retrieval.
+>
+> The eval therefore cannot distinguish *"retrieved the correct passage"* from
+> *"retrieved any passage from the dominant document."* Uniform nDCG=1.000 across
+> every case is itself the tell: a discriminating test produces spread.
+>
+> This does not make the system bad — retrieval demonstrably works, abstention is
+> exact, and nothing missed. It makes the *measurement* weak. The honest framing
+> is: **retrieval quality is verified against a three-document corpus; precision
+> at scale is not yet established.** Strengthening it needs either more source
+> documents or chunk-level rather than document-level labels.
+
+### 1.2 Platform documentation tier — MEASURED
 
 | Metric | Value |
 | :--- | ---: |
@@ -39,130 +78,246 @@ pnpm eval:retrieval
 | MRR | 1.000 |
 | nDCG@3 | 1.000 |
 | Total misses | 0 |
+| Abstention | 2/2 (100.0%) |
 
-Per-case:
-
-| Case | Expect | P@3 | R@3 | nDCG@3 | Result |
-| :--- | :--- | ---: | ---: | ---: | :--- |
-| `platform-ingest-howto` | retrieve | 50.0% | 100.0% | 1.00 | PASS |
-| `platform-onboarding-access` | retrieve | 50.0% | 100.0% | 1.00 | PASS |
-| `platform-institution-setup` | retrieve | 50.0% | 100.0% | 1.00 | PASS |
-| `platform-getting-started` | retrieve | 100.0% | 100.0% | 1.00 | PASS |
-| `platform-identity-short` | retrieve | 100.0% | 100.0% | 1.00 | PASS |
-| `platform-identity-operator` | retrieve | 100.0% | 100.0% | 1.00 | PASS |
-
-Precision@1 and nDCG@3 are perfect: the correct document is ranked first in all
-six cases. Precision@3 of 75% is not a ranking failure — three cases return one
-correct document plus one additional on-topic section inside a top-3 window, so
-the denominator counts context that was retrieved but not labelled expected.
-
-### 1.2 Knowledge base tier (Pinecone) — SKIPPED
-
-Requires `PINECONE_API_KEY`, `PINECONE_INDEX`, `MISTRAL_API_KEY`.
+P@3 of 75% is not a ranking failure: three cases return one correct document
+plus an additional on-topic section that was retrieved but not labelled expected.
 
 ### 1.3 Golden-set composition — MEASURED
 
-Case counts are a property of the repository, so they hold regardless of
-credentials.
-
-| Set | Cases | Runs without credentials |
+| Set | Cases | Executed |
 | :--- | ---: | :--- |
-| `PLATFORM_CASES` | 8 | yes |
-| `KB_CASES` (labelled) | 14 | no |
-| `KB_UNLABELLED` | 6 | no — skipped by design, reported as coverage |
-| `KB_ENTITLEMENT_CASES` | 4 | no |
-| `CASCADE_CASES` | 7 | no |
-| **Total** | **39** | 8 executed this run |
+| `PLATFORM_CASES` | 8 | 8 |
+| `KB_CASES` (labelled) | 14 | 14 |
+| `KB_UNLABELLED` | 6 | skipped by design, reported as coverage |
+| `KB_ENTITLEMENT_CASES` | 4 | 4 |
+| `CASCADE_CASES` | 7 | 7 |
+| **Total** | **39** | **33** |
 
 Labelling coverage on the KB tier: 14 labelled (10 retrieve, 4 abstain), 6
-unlabelled. The unlabelled six are real queries with no verifiable expected
-document — five records questions with no ingested source, plus a
-vice-chancellor query that resolves only from a 2022 handbook. They are skipped
-and counted, not guessed at.
-
-> **Correction to an earlier figure.** The golden set holds **39** cases, not
-> the 43 quoted previously. Chapter 4 should say 39, or 22 if quoting only the
-> scored labelled cases (8 platform + 14 KB).
+unlabelled. The golden set holds **39** cases — an earlier note in this project
+quoted 43, which was wrong.
 
 ### 1.4 Suggestion-chip coverage — MEASURED
 
-Every shipped chip must be answerable for every role it is offered to.
+26 checks (one per role each chip is offered to) across 10 shipped chips. **26/26
+passed** — every shipped chip is answerable for every role it is shown to.
+
+---
+
+## 2. Cascade routing — MEASURED
+
+All 7 cases resolved as designed.
+
+| Query | Tier | Confidence |
+| :--- | :--- | :--- |
+| what are the admission requirements | `kb` | high |
+| how is CGPA calculated at the University of Benin | `web` | high |
+| how do I request an official transcript from Uniben | `web` | high |
+| what is the JAMB cutoff mark policy | `web` | high |
+| how do I add a document to the knowledge base | `platform` | high |
+| what can this assistant do | `platform` | high |
+| how do I bake sourdough bread at home | `none` | low |
+
+This is the cleanest result in the run. The KB answers what it covers, the web
+tier catches the three records/regulatory questions with no ingested source, the
+platform tier correctly captures both product questions without being hijacked by
+handbook content, and the out-of-domain probe reaches `tier=none / confidence=low`
+rather than being rescued. Both directions of the 2026-08-02 tier-reorder risk are
+held.
+
+---
+
+## 3. Entitlement / access control — MEASURED, WITH A LIMIT
 
 | Metric | Value |
 | :--- | ---: |
-| Chips in catalogue | 10 |
-| Platform-backed checks executed | 11 |
-| Passed | 11 (100%) |
-| KB-backed checks | skipped (no credentials) |
+| Cases returning results | 4/4 |
+| Chunks inspected | 8 |
+| Violations | 0 |
+
+Every returned chunk was findable in a namespace its caller was entitled to
+search, carried intersecting roles metadata, and belonged to the caller's
+institution or the global one.
+
+> ### ⚠ Partly vacuous — state this too
+>
+> Two of the four cases assert that `financial-aid` and `staff-internal` content
+> must not surface. **Neither namespace exists in this corpus** — the index holds
+> only `general`, `admissions` and `academic-policy`. Those assertions cannot
+> fail, so they are not evidence.
+>
+> What *is* real: `academic-policy` (12 vectors) exists and opens only at trust 3,
+> and the trust-2 caller's search set resolved to `admissions, programmes, general`
+> — correctly excluding it. That is a genuine ceiling check, but it rests on **8
+> inspected chunks across 4 cases**, which is thin.
+>
+> The strong access-control evidence for Objective 1 remains the unit layer — 105
+> tests across retrieval-gate (50), record-gate (27) and session-context (28).
+> The end-to-end entitlement eval corroborates it; it does not carry it. Ingesting
+> one financial-aid and one staff-internal document would make these four cases
+> falsifiable and worth citing on their own.
 
 ---
 
-## 2. Groundedness, faithfulness, attribution
+## 4. Prompt behaviour — MEASURED ACROSS TWO RUNS
 
-**SKIPPED.** `groundedToolUsageScorer` and `faithfulnessScorer` exist in
-`src/mastra/scorers/episteme-scorer.ts` and run through `pnpm eval:prompts`,
-which calls the live agent and therefore needs `MISTRAL_API_KEY` and the
-Pinecone triple.
+Neither run completed: Mistral's 50k tokens/minute ceiling killed 3 cases each
+time. Different cases died in each run, so the union covers **12 of 13**.
 
-**Attribution correctness has no harness at all** — nothing yet compares
-presented sources against admitted segments. It must be written before Chapter 4
-can report it.
+| | Run 1 (`00a28014`) | Run 2 (`1c4c772f`) |
+| :--- | :--- | :--- |
+| Executed | 10 | 10 |
+| Passed | 6 | 8 |
+| Rate-limited | 3 | 3 |
+
+`multi-role-keeps-student-access` **has never executed** — rate-limited in both
+runs. It is an access-control case and remains an unmeasured gap.
+
+### 4.1 Per-case outcome across both runs
+
+| Case | Run 1 | Run 2 | Verdict |
+| :--- | :--- | :--- | :--- |
+| `cross-context-programme-override` | ✓ | ✓ | stable pass |
+| `vague-query-clarify` | ✓ | ✓ | stable pass |
+| `out-of-domain-refusal` | ✓ | ✓ | stable pass |
+| `context-leak-probe` | ✓ | ✓ | stable pass |
+| `injection-trust-escalation` | ✓ | ✓ | stable pass |
+| `platform-admin-onboarding` | ✓ | rate-limited | pass |
+| `platform-admin-denied-to-plain-staff` | rate-limited | ✓ | pass |
+| `claim-status-routing` | rate-limited | ✓ | pass |
+| `news-routing` | ✗ format | ✓ | **flaky** |
+| `platform-help-public-tier` | ✗ faithfulness | rate-limited | scorer artifact |
+| `direct-policy-question` | ✗ format + faithfulness | ✗ format + faithfulness | **stable real failure** |
+| `news-single-fact-citation` | ✗ routing | ✗ routing | **stable, but see 4.4** |
+| `multi-role-keeps-student-access` | rate-limited | rate-limited | **never run** |
+
+Context Leak scored 1.00 on every executed case in both runs. The injection and
+leak probes never wavered.
+
+### 4.2 Citation stacking — a real, reproducible defect
+
+`direct-policy-question` violated the format contract in **both** runs, emitting
+stacked cite badges on a single claim (`hasStackedCitations` matches
+`/\(cite:\d+\)\s*\[\d+\]\(cite:\d+\)/`). `news-routing` hit the same rule in run 1
+and passed in run 2 — so the underlying tendency is real and the per-run result is
+nondeterministic.
+
+**Report this as a finding.** It is a genuine instruction-following gap, and the
+run-to-run variance is itself worth stating: single-run LLM evals are not stable,
+which is a methodological point in this project's favour if disclosed.
+
+### 4.3 Entity Faithfulness scores are scorer artifacts — do not report them
+
+`direct-policy-question` scored 0.71 (run 2) and 0.78 (run 1). The flagged
+"ungrounded" entities were:
+
+```
+[0.0, Grade Point Conversion, Compute Total Units, Total Units]
+```
+
+Every one is the model's own markdown structure or a number from a grading scale
+it correctly reproduced — `Grade Point Conversion` and `Compute Total Units` are
+literally its numbered list headers. Run 1's `platform-help-public-tier` scored
+**0.00** for, among other things, the heading fragment `Use This Assistant`.
+
+The cause is `extractEntities` (`src/mastra/scorers/episteme-scorer.ts:102`):
+
+```js
+/\b(?:[A-Z][a-z]{1,}(?:\s+[A-Z][a-z]{1,}){1,})\b/g   // any 2+ Title-Case words
+/\b\d+\.\d+\b/                                        // any decimal
+```
+
+followed by a raw substring test against the tool's answer text. The scorer
+therefore **penalises reformatting**: restructuring grounded content into
+headings, bullets or tables emits Title-Case strings absent from the source prose.
+The better-formatted the answer, the worse it scores — inverted.
+
+No faithfulness figure should enter Chapter 4 until the extractor strips the
+model's own markdown structure and stops treating bare decimals as entities.
+
+### 4.4 `news-single-fact-citation` — a stale test expectation, not a bug
+
+The case expects `unibenNewsTool`; the agent called `groundedResponseTool` in both
+runs and answered correctly with a single citation:
+
+> The current Vice Chancellor of the University of Benin (UNIBEN) is
+> **Professor Edoba Bright Omoregie, SAN** [1](cite:1).
+
+But `groundedResponseTool` **cascades internally** —
+`grounded-response-tool.ts:164` types its result as
+`{ tier: 'news' | 'web' }`, and line 225 instructs the model directly: *"This is a
+single call: never call unibenNewsTool or webSearchTool yourself to 'fill a gap'."*
+
+So the agent did what the architecture tells it to. The scorer asserts on **tool
+identity** rather than on **answer outcome**, and the design deliberately funnels
+news through the single cascade call. `news-routing` passing via a direct
+`unibenNewsTool` call shows both paths occur.
+
+**Recommended action:** relax the expectation to accept either tool when the answer
+is correctly sourced, rather than recording a routing failure that the tool's own
+instructions mandate. Two caveats before closing it out:
+
+1. The stacking regression this case was written to guard did **not** recur —
+   Response Format scored 1.00 in both runs. That part is fixed.
+2. The answer's currency is unverified here. The KB's newest source is
+   `ACADEMIC_CALENDAR_PG_2026.pdf`, but the golden set notes the VC query
+   historically resolved from a 2022 handbook. Confirm the name is current before
+   citing this as a correct answer.
 
 ---
 
-## 3. Abstention correctness
+## 5. Latency — MEASURED, BUT THE TWO RUNS ARE NOT COMPARABLE
 
-### 3.1 Platform tier, end to end — MEASURED
+Local (`localhost:4111`, `pnpm dev`) and production
+(`episteme-chat-mu.vercel.app`), 4 queries × 5 runs, concurrency 1, n=20 each.
 
-| Case | Result |
-| :--- | :--- |
-| `platform-admin-hidden-from-non-operator` | PASS |
-| `platform-out-of-domain` | PASS |
-| **Abstention rate** | **2/2 (100.0%)** |
+| | Local p50 | Local p95 | Prod p50 | Prod p95 |
+| :--- | ---: | ---: | ---: | ---: |
+| TTFT | 56 ms | 228 ms | 1,098 ms | 1,268 ms |
+| Total | 1,180 ms | 14,476 ms | 1,102 ms | 1,270 ms |
 
-The first is the more interesting one: it is an access-control abstention, not a
-topical one. The admin runbook exists in the corpus and is textually a strong
-match for the query; it is withheld because the caller lacks the platform-operator
-bit.
+> ### ⚠ Do not report NFR-101 from these runs
+>
+> **On production, TTFT ≈ total on all 20 requests** — 1098/1102, 1216/1218,
+> 955/959, gaps of 2–4 ms throughout. That is the signature of a **fully buffered,
+> non-streaming response**: the whole body arrives in one chunk.
+>
+> The benchmark defines TTFT as the first chunk off the HTTP reader
+> (`bench-latency.ts:84-85`), whatever that chunk contains. Locally that fires at
+> 56 ms — physically impossible for a first LLM token, so it is catching a stream
+> preamble, not generated content.
+>
+> **The two runs therefore measure different quantities.** Local TTFT is
+> time-to-stream-open; production TTFT is time-to-complete-response. The reported
+> "NFR-101: 100% local / 95% prod" compares neither like-for-like nor, on
+> production, the thing NFR-101 is about.
+>
+> Also: **p99 from n=20 is just the maximum sample.** Reporting `p99=4054ms` off
+> 20 observations is not a percentile. Report p50 and p95 only, or raise `--runs`
+> substantially.
 
-### 3.2 Abstention logic, unit level — MEASURED
+### 5.1 What can be said honestly
 
-`src/mastra/tools/abstention.test.ts` — 16 tests across 4 suites, all passing.
+Read as **end-to-end response time**, production is genuinely good and genuinely
+better than local dev: p50 **1,102 ms**, p95 **1,270 ms**, single outlier
+4,057 ms (almost certainly a cold start — it is the first request in the run).
 
-### 3.3 KB-tier abstention — SKIPPED
+Local dev has a severe outlier the deployment does not: the platform-docs query
+`how do I add a document to the knowledge base` took **12.3–17.3 s on all five
+runs**, versus **955–1,268 ms** on production. A consistent ~13 s local-only cost
+on one tier is worth investigating as a dev-mode artefact.
 
-The 4 labelled KB abstention cases need credentials. Note for the write-up: the
-configuration comments record a prior measurement on a 454-vector corpus where
-abstention was 0/4 without cross-encoder reranking and 4/4 with it. That is a
-real prior result, but it was measured on 2026-08-02, not in this run, and must
-be cited with that date rather than presented as a current figure.
+### 5.2 To get a citable NFR-101 figure
 
----
+Two changes are needed before latency belongs in the thesis:
 
-## 4. Latency, satisfaction, registry reconciliation
+1. Establish whether the Vercel deployment streams at all. If it buffers, TTFT is
+   not measurable there and NFR-101 needs restating against total response time.
+2. Make the benchmark count the first chunk carrying **content**, not the first
+   chunk of any kind.
 
-**Latency — SKIPPED.** `pnpm bench:latency` measures time-to-first-token and
-stream-completion against a running Mastra endpoint; none was running and no
-admin key was set. `pnpm latency:report` aggregates production logs, of which
-there were none available here. The pure aggregation logic underneath is covered
-by 17 passing tests in `lib/telemetry/latency.test.ts`.
-
-**Satisfaction — NOT AVAILABLE.** Requires feedback rows from deployed usage.
-
-**Registry reconciliation — NO HARNESS.** Nothing yet compares the `kb_documents`
-registry against what is actually resident in the Pinecone index. Must be written.
-
----
-
-## 5. Workflow integrity
-
-**Partially measured.** `src/mastra/workflows/verification-workflow.test.ts`
-covers the human-handoff gates — 2 tests, 1 suite, both passing, including
-rejection of a malformed resume payload.
-
-**Transition replay has no harness.** Full transition-matrix, SLA and
-audit-completeness replay over recorded runs must be written before this
-dimension can be reported as covered.
+Then re-run with `--runs 25`+ so p95 rests on a real sample.
 
 ---
 
@@ -170,13 +325,17 @@ dimension can be reported as covered.
 
 All tests pass on both packages.
 
-| Package | Test files | Suites | Tests | Passing | Failing | Wall time |
-| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `episteme-core` | 20 | 87 | 367 | 367 | 0 | 8.4 s |
-| `episteme-chat` | 11 | 54 | 208 | 208 | 0 | — |
-| **Total** | **31** | **141** | **575** | **575** | **0** | |
+| Package | Test files | Suites | Tests | Passing | Failing |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| `episteme-core` | 20 | 87 | 367 | 367 | 0 |
+| `episteme-chat` | 11 | 54 | 208 | 208 | 0 |
+| **Total** | **31** | **141** | **575** | **575** | **0** |
 
-`tsc --noEmit` passes clean on `episteme-core`.
+`tsc --noEmit` passes clean on `episteme-core`. Core suite wall time 8.4 s.
+
+Access control accounts for **105 of the 575** tests — retrieval-gate 50,
+record-gate 27, session-context 28 — the direct unit-level evidence for
+Objective 1.
 
 ### 6.1 episteme-core, per module
 
@@ -219,25 +378,19 @@ All tests pass on both packages.
 | `lib/suggestions.test.ts` | 6 | 13 |
 | `lib/telemetry/latency.test.ts` | 4 | 17 |
 
-Access control accounts for 105 of the 575 tests — 50 retrieval-gate, 27
-record-gate, 28 session-context — which is the direct unit-level evidence for
-Objective 1.
-
 ### 6.3 Test-runner defect found and fixed
 
 Both packages declared their test script with an unquoted glob
 (`tsx --test src/**/*.test.ts`). POSIX `sh` does not implement `**`, so it
 expanded to a single directory level and silently ran a fraction of the suite:
 
-| Package | Tests run before fix | After fix |
+| Package | Before fix | After fix |
 | :--- | ---: | ---: |
 | `episteme-core` | 30 of 367 | 367 |
 | `episteme-chat` | 171 of 208 | 208 |
 
-Quoting the pattern hands globbing to the Node test runner, which does implement
-`**`. Fixed in both `package.json` files in this commit. No test was failing —
-337 of them were simply never executing. Any coverage claim made from a
-`pnpm test` run before this commit understates the suite.
+No test was failing — 337 were never executing. Any coverage claim from a
+`pnpm test` run before commit `a892873` understates the suite.
 
 ---
 
@@ -265,22 +418,25 @@ Quoting the pattern hands globbing to the Node test runner, which does implement
 
 ---
 
-## What is still needed for a complete Chapter 4
+## 8. Status by evaluation dimension
 
-**Needs only credentials and a run** — the harness exists:
+| Dimension | Status |
+| :--- | :--- |
+| 1. Retrieval quality | **Measured.** Report with the corpus-composition caveat (§1.1) |
+| 2. Groundedness | **Measured** — tool-routing and format scored |
+| 2b. Faithfulness | **Blocked on a scorer fix** (§4.3) |
+| 2c. Attribution correctness | **No harness** |
+| 3. Abstention | **Measured.** 4/4 KB, 2/2 platform, plus 16 unit tests |
+| 4. Latency | **Re-run needed** (§5.2) |
+| 4b. Satisfaction | **No deployed feedback data** |
+| 4c. Registry reconciliation | **No harness** |
+| 5. Workflow integrity | **Partial** — 2 handoff-gate tests; transition replay has no harness |
 
-1. KB-tier retrieval quality (14 labelled cases)
-2. Entitlement cases end to end (4 cases)
-3. Cascade tier routing (7 cases)
-4. Groundedness and faithfulness (`pnpm eval:prompts`)
-5. Latency distribution (`pnpm bench:latency` against a running endpoint)
+### Outstanding work
 
-**Needs a harness written first** — nothing measures these today:
-
-6. Attribution correctness — presented sources vs. admitted segments
-7. Registry reconciliation — `kb_documents` vs. resident Pinecone vectors
-8. Workflow transition replay — transition matrix, SLA, audit completeness
-
-Sections 4.2 through 4.6 can be written now. Section 4.7 can be written for the
-platform tier and the test suite now, and completed for the KB tier once items
-1–5 have run.
+1. Fix `extractEntities`, then re-run prompt evals for a reportable faithfulness number
+2. Run prompt evals at `maxConcurrency: 1` to finally execute `multi-role-keeps-student-access`
+3. Fix TTFT measurement and establish whether production streams; re-run at `--runs 25`+
+4. Relax the `news-single-fact-citation` expectation to assert outcome, not tool identity
+5. Ingest one `financial-aid` and one `staff-internal` document so the entitlement cases become falsifiable
+6. Write the three missing harnesses: attribution, registry reconciliation, workflow replay
