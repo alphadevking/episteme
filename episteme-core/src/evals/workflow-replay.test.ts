@@ -1,15 +1,19 @@
 // episteme-core/src/evals/workflow-replay.test.ts
 /**
- * These fixtures deliberately include shapes a live database may never yet have
- * produced — a skipped gate, a clock running backwards, an approval with no
- * reviewer. That is the point of replaying against rules rather than against
- * whatever happens to be in storage: the first time one of these appears in
- * production should not also be the first time anyone has checked for it.
+ * These fixtures are claim_status histories as Supabase records them, not Mastra
+ * step traces. That distinction is the point: Mastra's workflow store is
+ * per-instance and local in production, so a replay built on step names would
+ * examine zero rows forever while reporting green.
+ *
+ * Several fixtures below are shapes production may never yet have produced — a
+ * claim approved without review, a clock running backwards, a decision with no
+ * reviewer. The first time one of those appears in a live claim should not also
+ * be the first time anyone checked for it.
  */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  STEPS,
+  STATUS,
   formatReplay,
   replayAll,
   replayClaim,
@@ -17,223 +21,231 @@ import {
 } from './workflow-replay';
 
 const t = (
-  step: string,
+  status: string,
   at: string,
   over: Partial<TransitionRecord> = {},
-): TransitionRecord => ({ claimId: 'claim-1', step, at, ...over });
+): TransitionRecord => ({ claimId: 'claim-1', status, at, ...over });
 
-/** A well-formed run: every step in order, both gates attributed, inside SLA. */
+/** A well-formed claim: created, reviewed, decided by a named reviewer, in SLA. */
 const HEALTHY: TransitionRecord[] = [
-  t(STEPS.validate,  '2026-08-01T09:00:00.000Z'),
-  t(STEPS.route,     '2026-08-01T09:00:01.000Z'),
-  t(STEPS.adminGate, '2026-08-01T09:00:02.000Z', { suspended: true, actor: 'admin-7' }),
-  t(STEPS.hodGate,   '2026-08-01T14:00:00.000Z', { suspended: true, actor: 'hod-3' }),
-  t(STEPS.outcome,   '2026-08-02T10:00:00.000Z'),
+  t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+  t(STATUS.inReview, '2026-08-01T11:00:00.000Z', { actor: 'admin-7' }),
+  t(STATUS.approved, '2026-08-02T10:00:00.000Z', { actor: 'hod-3' }),
 ];
 
-describe('replayClaim — a well-formed run', () => {
+describe('replayClaim — a well-formed claim', () => {
   test('produces no findings', () => {
     assert.deepEqual(replayClaim(HEALTHY), []);
   });
 
+  test('a rejection is equally clean', () => {
+    assert.deepEqual(replayClaim([
+      t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+      t(STATUS.inReview, '2026-08-01T11:00:00.000Z', { actor: 'admin-7' }),
+      t(STATUS.rejected, '2026-08-02T10:00:00.000Z', { actor: 'hod-3' }),
+    ]), []);
+  });
+
   test('out-of-order storage is sorted, not reported as illegal', () => {
-    // Storage order is not guaranteed. Misreading an unordered export as a
-    // broken workflow would make the harness useless on real data.
-    const shuffled = [HEALTHY[3]!, HEALTHY[0]!, HEALTHY[4]!, HEALTHY[1]!, HEALTHY[2]!];
+    const shuffled = [HEALTHY[2]!, HEALTHY[0]!, HEALTHY[1]!];
     assert.deepEqual(replayClaim(shuffled), []);
   });
 
-  test('an empty record set yields nothing rather than throwing', () => {
+  test('an empty history yields nothing rather than throwing', () => {
     assert.deepEqual(replayClaim([]), []);
   });
 });
 
 describe('replayClaim — transition legality', () => {
-  test('skipping the HOD gate is caught', () => {
-    // The failure that matters most: a claim approved without the review step
-    // the whole workflow exists to enforce.
-    const skipped = [
-      t(STEPS.validate,  '2026-08-01T09:00:00.000Z'),
-      t(STEPS.route,     '2026-08-01T09:00:01.000Z'),
-      t(STEPS.adminGate, '2026-08-01T09:00:02.000Z', { suspended: true, actor: 'admin-7' }),
-      t(STEPS.outcome,   '2026-08-01T09:00:03.000Z'),
-    ];
-    const findings = replayClaim(skipped);
+  test('approval without entering review is caught', () => {
+    // THE finding this harness exists for: a claim decided without the review
+    // step the whole workflow is built to enforce.
+    const findings = replayClaim([
+      t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+      t(STATUS.approved, '2026-08-01T09:05:00.000Z', { actor: 'admin-7' }),
+    ]);
     assert.equal(findings.length, 1);
     assert.equal(findings[0]!.kind, 'illegal-transition');
-    assert.match(findings[0]!.detail, /awaitAdminAssignment -> recordOutcome/);
+    assert.match(findings[0]!.detail, /"pending" -> "approved"/);
   });
 
-  test('a run that does not start at validateClaim is caught', () => {
+  test('rejection without entering review is caught', () => {
     const findings = replayClaim([
-      t(STEPS.route,     '2026-08-01T09:00:00.000Z'),
-      t(STEPS.adminGate, '2026-08-01T09:00:01.000Z', { suspended: true, actor: 'a' }),
-      t(STEPS.hodGate,   '2026-08-01T09:00:02.000Z', { suspended: true, actor: 'h' }),
-      t(STEPS.outcome,   '2026-08-01T09:00:03.000Z'),
+      t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+      t(STATUS.rejected, '2026-08-01T09:05:00.000Z', { actor: 'admin-7' }),
+    ]);
+    assert.equal(findings[0]!.kind, 'illegal-transition');
+  });
+
+  test('cancelling from pending is legal', () => {
+    // A claimant withdrawing before review is ordinary, not a violation.
+    assert.deepEqual(replayClaim([
+      t(STATUS.pending,   '2026-08-01T09:00:00.000Z'),
+      t(STATUS.cancelled, '2026-08-01T10:00:00.000Z', { actor: 'user-1' }),
+    ]), []);
+  });
+
+  test('cancelling from review is legal', () => {
+    assert.deepEqual(replayClaim([
+      t(STATUS.pending,   '2026-08-01T09:00:00.000Z'),
+      t(STATUS.inReview,  '2026-08-01T10:00:00.000Z', { actor: 'admin-7' }),
+      t(STATUS.cancelled, '2026-08-01T11:00:00.000Z', { actor: 'user-1' }),
+    ]), []);
+  });
+
+  test('a claim that does not begin as pending is caught', () => {
+    const findings = replayClaim([
+      t(STATUS.inReview, '2026-08-01T09:00:00.000Z', { actor: 'admin-7' }),
+      t(STATUS.approved, '2026-08-01T10:00:00.000Z', { actor: 'hod-3' }),
     ]);
     assert.equal(findings.length, 1);
     assert.equal(findings[0]!.kind, 'wrong-entry-point');
   });
 
-  test('an unknown step is caught rather than silently accepted', () => {
-    // If a step is renamed in the workflow and not here, this fires on every
-    // run — the correct failure, since the rules would otherwise be checking a
-    // workflow that no longer exists.
+  test('a change after a terminal status is caught', () => {
+    // Reopening a decided claim in place destroys the audit trail: the record
+    // no longer shows what was decided or when.
     const findings = replayClaim([
-      t(STEPS.validate, '2026-08-01T09:00:00.000Z'),
-      t('someRenamedStep', '2026-08-01T09:00:01.000Z'),
+      t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+      t(STATUS.inReview, '2026-08-01T10:00:00.000Z', { actor: 'admin-7' }),
+      t(STATUS.approved, '2026-08-02T10:00:00.000Z', { actor: 'hod-3' }),
+      t(STATUS.inReview, '2026-08-03T10:00:00.000Z', { actor: 'admin-7' }),
     ]);
-    assert.ok(findings.some((f) => f.kind === 'illegal-transition' && /unknown step/.test(f.detail)));
+    assert.ok(findings.some((f) => f.kind === 'post-terminal-change'));
   });
 
-  test('every problem in a run is reported, not just the first', () => {
-    // A run that skipped a gate AND lost its reviewer has two problems, and
-    // reporting one would hide the other from whoever has to fix it.
+  test('an unknown status is caught rather than silently accepted', () => {
+    // If claim_status gains a member and this file is not updated, it fires —
+    // the correct failure, since the rules would otherwise be checking an
+    // enum that no longer matches the database.
     const findings = replayClaim([
-      t(STEPS.validate,  '2026-08-01T09:00:00.000Z'),
-      t(STEPS.route,     '2026-08-01T09:00:01.000Z'),
-      t(STEPS.adminGate, '2026-08-01T09:00:02.000Z', { suspended: true }), // no actor
-      t(STEPS.outcome,   '2026-08-01T09:00:03.000Z'),                      // skips hodGate
+      t(STATUS.pending, '2026-08-01T09:00:00.000Z'),
+      t('escalated',    '2026-08-01T10:00:00.000Z'),
     ]);
-    const kinds = findings.map((f) => f.kind).sort();
-    assert.deepEqual(kinds, ['illegal-transition', 'missing-actor']);
+    assert.ok(findings.some((f) => /unknown status/.test(f.detail)));
+  });
+
+  test('every problem is reported, not just the first', () => {
+    const findings = replayClaim([
+      t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+      t(STATUS.approved, '2026-08-01T09:05:00.000Z'), // skips review AND no actor
+    ]);
+    assert.deepEqual(findings.map((f) => f.kind).sort(), ['illegal-transition', 'missing-actor']);
   });
 });
 
 describe('replayClaim — audit completeness', () => {
-  test('a gate that advanced with no recorded actor is caught', () => {
-    // An approval nobody is accountable for is not an approval.
+  test('an approval with no recorded actor is caught', () => {
     const findings = replayClaim([
-      t(STEPS.validate,  '2026-08-01T09:00:00.000Z'),
-      t(STEPS.route,     '2026-08-01T09:00:01.000Z'),
-      t(STEPS.adminGate, '2026-08-01T09:00:02.000Z', { suspended: true, actor: 'admin-7' }),
-      t(STEPS.hodGate,   '2026-08-01T10:00:00.000Z', { suspended: true }), // no actor
-      t(STEPS.outcome,   '2026-08-01T11:00:00.000Z'),
+      t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+      t(STATUS.inReview, '2026-08-01T10:00:00.000Z', { actor: 'admin-7' }),
+      t(STATUS.approved, '2026-08-02T10:00:00.000Z'),
     ]);
     assert.equal(findings.length, 1);
     assert.equal(findings[0]!.kind, 'missing-actor');
-    assert.match(findings[0]!.detail, /awaitHodDecision/);
   });
 
-  test('machine steps need no actor', () => {
-    // Only the human gates carry accountability; requiring an actor on
-    // validateClaim would report noise on every well-formed run.
+  test('a rejection with no recorded actor is caught', () => {
+    const findings = replayClaim([
+      t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+      t(STATUS.inReview, '2026-08-01T10:00:00.000Z', { actor: 'admin-7' }),
+      t(STATUS.rejected, '2026-08-02T10:00:00.000Z', { actor: null }),
+    ]);
+    assert.equal(findings[0]!.kind, 'missing-actor');
+  });
+
+  test('a cancellation needs no reviewer', () => {
+    // A claimant withdrawing their own request is not a decision anyone else
+    // is accountable for. Requiring one would flag every ordinary withdrawal.
+    assert.deepEqual(replayClaim([
+      t(STATUS.pending,   '2026-08-01T09:00:00.000Z'),
+      t(STATUS.cancelled, '2026-08-01T10:00:00.000Z'),
+    ]), []);
+  });
+
+  test('the creation row needs no actor', () => {
     assert.deepEqual(replayClaim(HEALTHY), []);
-  });
-
-  test('a gate still awaiting a human is not yet missing an actor', () => {
-    // The claim is in flight. Demanding a reviewer now would flag every
-    // pending claim as an audit failure.
-    const findings = replayClaim([
-      t(STEPS.validate,  '2026-08-01T09:00:00.000Z'),
-      t(STEPS.route,     '2026-08-01T09:00:01.000Z'),
-      t(STEPS.adminGate, '2026-08-01T09:00:02.000Z', { suspended: true }),
-    ]);
-    assert.deepEqual(findings, []);
-  });
-});
-
-describe('replayClaim — suspension discipline', () => {
-  test('a machine step that suspended is caught', () => {
-    const findings = replayClaim([
-      t(STEPS.validate,  '2026-08-01T09:00:00.000Z'),
-      t(STEPS.route,     '2026-08-01T09:00:01.000Z', { suspended: true }),
-      t(STEPS.adminGate, '2026-08-01T09:00:02.000Z', { suspended: true, actor: 'a' }),
-      t(STEPS.hodGate,   '2026-08-01T09:00:03.000Z', { suspended: true, actor: 'h' }),
-      t(STEPS.outcome,   '2026-08-01T09:00:04.000Z'),
-    ]);
-    assert.equal(findings.length, 1);
-    assert.equal(findings[0]!.kind, 'unexpected-suspend');
   });
 });
 
 describe('replayClaim — SLA and time', () => {
-  test('a gate held past the threshold is a breach', () => {
+  test('a claim left too long in review breaches SLA', () => {
     const findings = replayClaim([
-      t(STEPS.validate,  '2026-08-01T09:00:00.000Z'),
-      t(STEPS.route,     '2026-08-01T09:00:01.000Z'),
-      t(STEPS.adminGate, '2026-08-01T09:00:02.000Z', { suspended: true, actor: 'admin-7' }),
-      t(STEPS.hodGate,   '2026-08-08T09:00:02.000Z', { suspended: true, actor: 'hod-3' }), // 7 days
-      t(STEPS.outcome,   '2026-08-08T10:00:00.000Z'),
+      t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+      t(STATUS.inReview, '2026-08-01T10:00:00.000Z', { actor: 'admin-7' }),
+      t(STATUS.approved, '2026-08-08T10:00:00.000Z', { actor: 'hod-3' }), // 7 days in review
     ], { slaHours: 72 });
     assert.equal(findings.length, 1);
     assert.equal(findings[0]!.kind, 'sla-breach');
-    assert.match(findings[0]!.detail, /168\.0h/);
+    assert.match(findings[0]!.detail, /in_review.*168\.0h/);
   });
 
-  test('the SLA threshold is configurable', () => {
+  test('a claim left too long unassigned breaches SLA', () => {
+    const findings = replayClaim([
+      t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+      t(STATUS.inReview, '2026-08-10T09:00:00.000Z', { actor: 'admin-7' }), // 9 days pending
+      t(STATUS.approved, '2026-08-10T10:00:00.000Z', { actor: 'hod-3' }),
+    ], { slaHours: 72 });
+    assert.equal(findings.length, 1);
+    assert.match(findings[0]!.detail, /in "pending"/);
+  });
+
+  test('the threshold is configurable', () => {
     const run = [
-      t(STEPS.validate,  '2026-08-01T09:00:00.000Z'),
-      t(STEPS.route,     '2026-08-01T09:00:01.000Z'),
-      t(STEPS.adminGate, '2026-08-01T09:00:02.000Z', { suspended: true, actor: 'a' }),
-      t(STEPS.hodGate,   '2026-08-02T09:00:02.000Z', { suspended: true, actor: 'h' }), // 24h
-      t(STEPS.outcome,   '2026-08-02T10:00:00.000Z'),
+      t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+      t(STATUS.inReview, '2026-08-01T10:00:00.000Z', { actor: 'a' }),
+      t(STATUS.approved, '2026-08-02T10:00:00.000Z', { actor: 'h' }), // 24h in review
     ];
     assert.deepEqual(replayClaim(run, { slaHours: 72 }), []);
     assert.equal(replayClaim(run, { slaHours: 12 }).length, 1);
   });
 
-  test('SLA is not applied to machine steps', () => {
-    // Timing validateClaim would measure the model provider, not the process.
-    const findings = replayClaim([
-      t(STEPS.validate,  '2026-08-01T09:00:00.000Z'),
-      t(STEPS.route,     '2026-08-09T09:00:00.000Z'), // 8 days between machine steps
-      t(STEPS.adminGate, '2026-08-09T09:00:01.000Z', { suspended: true, actor: 'a' }),
-      t(STEPS.hodGate,   '2026-08-09T09:00:02.000Z', { suspended: true, actor: 'h' }),
-      t(STEPS.outcome,   '2026-08-09T09:00:03.000Z'),
-    ], { slaHours: 72 });
-    assert.deepEqual(findings, []);
-  });
-
   test('a timestamp running backwards is caught', () => {
     const findings = replayClaim([
-      t(STEPS.validate, '2026-08-01T09:00:00.000Z'),
-      t(STEPS.route,    '2026-08-01T08:00:00.000Z'),
+      t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+      t(STATUS.inReview, '2026-08-01T08:00:00.000Z', { actor: 'admin-7' }),
     ]);
-    // Sorting puts route first, so this surfaces as a wrong entry point — the
-    // record set is corrupt either way, and both readings say so.
+    // Sorting puts in_review first, so this surfaces as a wrong entry point.
+    // The history is corrupt either way and both readings say so.
     assert.ok(findings.length > 0);
   });
 
   test('an unparseable timestamp is reported rather than crashing', () => {
     const findings = replayClaim([
-      t(STEPS.validate, '2026-08-01T09:00:00.000Z'),
-      t(STEPS.route,    'not-a-date'),
+      t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+      t(STATUS.inReview, 'not-a-date', { actor: 'admin-7' }),
     ]);
     assert.ok(findings.some((f) => f.kind === 'time-travel'));
   });
 });
 
 describe('replayClaim — completeness', () => {
-  test('an in-flight claim is not a defect by default', () => {
-    // A claim legitimately mid-review at export time must not be flagged, or
-    // every export is noisy.
-    const inFlight = HEALTHY.slice(0, 4);
-    assert.deepEqual(replayClaim(inFlight), []);
+  test('a claim still under review is not a defect by default', () => {
+    assert.deepEqual(replayClaim(HEALTHY.slice(0, 2)), []);
   });
 
-  test('requireTerminal flags a run that never reached an outcome', () => {
-    const findings = replayClaim(HEALTHY.slice(0, 4), { requireTerminal: true });
+  test('requireTerminal flags a claim that never resolved', () => {
+    const findings = replayClaim(HEALTHY.slice(0, 2), { requireTerminal: true });
     assert.equal(findings.length, 1);
     assert.equal(findings[0]!.kind, 'incomplete');
   });
 });
 
 describe('replayAll', () => {
-  const other = (step: string, at: string, over: Partial<TransitionRecord> = {}) =>
-    ({ ...t(step, at, over), claimId: 'claim-2' });
+  const other = (status: string, at: string, over: Partial<TransitionRecord> = {}) =>
+    ({ ...t(status, at, over), claimId: 'claim-2' });
 
-  test('groups by claim and counts clean runs', () => {
+  test('groups by claim, counts clean runs and outcome distribution', () => {
     const summary = replayAll([
       ...HEALTHY,
-      other(STEPS.validate,  '2026-08-03T09:00:00.000Z'),
-      other(STEPS.route,     '2026-08-03T09:00:01.000Z'),
-      other(STEPS.outcome,   '2026-08-03T09:00:02.000Z'), // skips both gates
+      other(STATUS.pending,  '2026-08-03T09:00:00.000Z'),
+      other(STATUS.approved, '2026-08-03T09:05:00.000Z', { actor: 'admin-9' }), // skips review
     ]);
     assert.equal(summary.claimsReplayed, 2);
     assert.equal(summary.claimsClean, 1);
     assert.equal(summary.completed, 2);
     assert.equal(summary.byKind['illegal-transition'], 1);
+    assert.deepEqual(summary.outcomes, { approved: 2 });
   });
 
   test('no records means nothing was verified', () => {
@@ -248,21 +260,20 @@ describe('formatReplay', () => {
     // The dangerous output: a workflow that never ran reporting green.
     const out = formatReplay(replayAll([]));
     assert.match(out, /UNVERIFIED/);
-    assert.match(out, /This is not a pass/);
+    assert.match(out, /NOT a pass/);
   });
 
-  test('a clean replay says the audit trail is complete', () => {
+  test('a clean replay reports the outcome distribution', () => {
     const out = formatReplay(replayAll(HEALTHY));
     assert.match(out, /clean\s+1\/1/);
-    assert.match(out, /legal transition sequence with a complete audit trail/);
+    assert.match(out, /outcomes\s+approved 1/);
+    assert.match(out, /legal status sequence with a complete audit trail/);
   });
 
   test('findings are grouped by kind and then detailed', () => {
     const out = formatReplay(replayAll([
-      t(STEPS.validate,  '2026-08-01T09:00:00.000Z'),
-      t(STEPS.route,     '2026-08-01T09:00:01.000Z'),
-      t(STEPS.adminGate, '2026-08-01T09:00:02.000Z', { suspended: true }),
-      t(STEPS.outcome,   '2026-08-01T09:00:03.000Z'),
+      t(STATUS.pending,  '2026-08-01T09:00:00.000Z'),
+      t(STATUS.approved, '2026-08-01T09:05:00.000Z'),
     ]));
     assert.match(out, /findings by kind/);
     assert.match(out, /illegal-transition/);

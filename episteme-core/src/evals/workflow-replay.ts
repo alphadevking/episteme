@@ -1,71 +1,104 @@
 // episteme-core/src/evals/workflow-replay.ts
 /**
- * Replays recorded verification-workflow runs against the transition rules.
+ * Replays recorded verification-claim histories against the lifecycle rules.
  *
  * This is §3.18 dimension 5, previously covered only by two unit tests on the
- * handoff gates.
+ * Mastra workflow's handoff gates.
+ *
+ * ── WHICH LIFECYCLE THIS MODELS, AND WHY ─────────────────────────────────────
+ * There are two descriptions of claim handling in this system and only one of
+ * them is auditable.
+ *
+ *   verification-workflow.ts models the process as Mastra steps — validateClaim,
+ *   routeClaim, awaitAdminAssignment, awaitHodDecision, recordOutcome. Mastra
+ *   persists workflow runs to its RUNTIME store, which .env.example documents as
+ *   deliberately local: "Traces are per-instance in production as a result."
+ *   Nothing durable records those step names, so a replay built on them would
+ *   examine zero rows forever while reporting green.
+ *
+ *   The DURABLE record is Supabase: verification_claims.status moving through
+ *   the claim_status enum, with audit_logs capturing actor and timestamp for
+ *   each change. That is what an auditor can read months later, and therefore
+ *   what an integrity check has to be written against.
+ *
+ * This module models the second. The first version of it modelled the first,
+ * which was a mistake — it encoded the design rather than the evidence.
  *
  * ── WHAT A REPLAY CATCHES THAT A UNIT TEST CANNOT ────────────────────────────
- * verification-workflow.test.ts asserts that the gates REJECT a malformed
- * resume payload. That is a property of the code as written. It says nothing
- * about the runs that actually happened — whether a claim ever skipped the HOD
- * gate, sat suspended for three weeks, or reached an outcome with no recorded
- * reviewer.
+ * verification-workflow.test.ts asserts the gates reject a malformed resume
+ * payload. That is a property of the code as written. It says nothing about the
+ * claims that actually happened — whether one was ever approved without passing
+ * through review, sat unassigned for three weeks, or reached a decision with no
+ * recorded reviewer. Only the record answers those, and they are the questions
+ * an audit asks.
  *
- * Those are the questions an audit asks, and they are answerable only from the
- * record. A verification workflow whose audit trail cannot be replayed is not
- * an auditable workflow, whatever its unit tests say.
- *
- * ── WHY EVERY CHECK HERE IS PURE ─────────────────────────────────────────────
- * The runner supplies transition records from storage; this module decides
- * nothing about where they come from. That keeps the rules testable against
- * fixtures covering shapes a live database may not have produced yet — a
- * skipped gate, a clock running backwards — which are exactly the shapes worth
- * being certain about before they appear in production.
+ * Pure: the runner supplies the history, this module decides nothing about
+ * where it comes from.
  */
 
-/**
- * Workflow step ids, mirroring verification-workflow.ts. A step renamed there
- * and not here shows up as an illegal transition on every run, which is the
- * correct failure: the replay rules would otherwise be silently checking a
- * workflow that no longer exists.
- */
-export const STEPS = {
-  validate: 'validateClaim',
-  route: 'routeClaim',
-  adminGate: 'awaitAdminAssignment',
-  hodGate: 'awaitHodDecision',
-  outcome: 'recordOutcome',
+/** The claim_status enum, mirrored from the Supabase schema. */
+export const STATUS = {
+  pending: 'pending',
+  inReview: 'in_review',
+  approved: 'approved',
+  rejected: 'rejected',
+  cancelled: 'cancelled',
 } as const;
 
-/** The only legal successor of each step. */
-export const LEGAL_TRANSITIONS: Readonly<Record<string, readonly string[]>> = {
-  [STEPS.validate]:  [STEPS.route],
-  [STEPS.route]:     [STEPS.adminGate],
-  [STEPS.adminGate]: [STEPS.hodGate],
-  [STEPS.hodGate]:   [STEPS.outcome],
-  [STEPS.outcome]:   [],
+export type ClaimStatus = (typeof STATUS)[keyof typeof STATUS];
+
+/**
+ * Legal successors of each status.
+ *
+ * The load-bearing entry is `pending`: it may NOT go straight to approved or
+ * rejected. A claim that reaches a decision without entering review is one
+ * approved without the review step the whole workflow exists to enforce, and
+ * unlike the Mastra step graph this is checkable against production rows.
+ */
+export const LEGAL_TRANSITIONS: Readonly<Record<string, readonly ClaimStatus[]>> = {
+  [STATUS.pending]:   [STATUS.inReview, STATUS.cancelled],
+  [STATUS.inReview]:  [STATUS.approved, STATUS.rejected, STATUS.cancelled],
+  [STATUS.approved]:  [],
+  [STATUS.rejected]:  [],
+  [STATUS.cancelled]: [],
 };
 
-/** The two human handoff gates — the only steps permitted to suspend. */
-export const SUSPENDABLE_STEPS: readonly string[] = [STEPS.adminGate, STEPS.hodGate];
+/** Statuses that end a claim's life. */
+export const TERMINAL_STATUSES: readonly ClaimStatus[] = [
+  STATUS.approved, STATUS.rejected, STATUS.cancelled,
+];
 
+/**
+ * Statuses representing a STAFF DECISION, which must name who made it.
+ *
+ * `cancelled` is excluded deliberately: a claimant withdrawing their own request
+ * is not a decision anyone else is accountable for, and requiring a reviewer
+ * there would report every ordinary withdrawal as an audit failure.
+ */
+export const DECISION_STATUSES: readonly ClaimStatus[] = [STATUS.approved, STATUS.rejected];
+
+/** Statuses a claim waits in, and which therefore have an SLA. */
+export const WAITING_STATUSES: readonly ClaimStatus[] = [STATUS.pending, STATUS.inReview];
+
+/**
+ * One recorded status change, as reconstructed from audit_logs joined to
+ * verification_claims.
+ */
 export interface TransitionRecord {
   claimId: string;
-  step: string;
-  /** ISO timestamp this step was entered. */
+  /** The status the claim moved INTO. */
+  status: string;
+  /** ISO timestamp of the change (audit_logs.created_at). */
   at: string;
-  /** Who caused it. Required at a human gate; absent is legitimate elsewhere. */
+  /** audit_logs.actor_user_id. Required on a staff decision. */
   actor?: string | null;
-  /** Whether the run suspended here awaiting a human. */
-  suspended?: boolean;
 }
 
 export type FindingKind =
   | 'illegal-transition'
   | 'wrong-entry-point'
-  | 'unexpected-suspend'
   | 'missing-actor'
+  | 'post-terminal-change'
   | 'incomplete'
   | 'time-travel'
   | 'sla-breach';
@@ -77,15 +110,12 @@ export interface ReplayFinding {
 }
 
 export interface ReplayOptions {
-  /**
-   * Hours a claim may sit at a human gate before it is an SLA breach.
-   * Reported per gate, since the two have different realistic turnarounds.
-   */
+  /** Hours a claim may wait in one status before it is an SLA breach. */
   slaHours?: number;
   /**
-   * Treat a run that has not yet reached recordOutcome as incomplete. Off by
-   * default: a claim legitimately in flight at the moment of export is not a
-   * defect, and flagging it would make every export noisy.
+   * Treat a claim still open at export time as a defect. Off by default: a
+   * claim legitimately under review is not a failure, and flagging it would
+   * make every export noisy.
    */
   requireTerminal?: boolean;
 }
@@ -93,85 +123,86 @@ export interface ReplayOptions {
 const DEFAULT_SLA_HOURS = 72;
 
 /**
- * Replays one claim's transitions.
+ * Replays one claim's history.
  *
- * Returns every finding rather than stopping at the first: a run that skipped a
- * gate AND lost its reviewer has two problems, and reporting one would hide the
- * other from whoever has to fix it.
+ * Returns every finding rather than stopping at the first: a claim that skipped
+ * review AND lost its reviewer has two problems, and reporting one would hide
+ * the other from whoever has to fix it.
  */
 export function replayClaim(
-  transitions: readonly TransitionRecord[],
+  history: readonly TransitionRecord[],
   options: ReplayOptions = {},
 ): ReplayFinding[] {
   const slaHours = options.slaHours ?? DEFAULT_SLA_HOURS;
   const findings: ReplayFinding[] = [];
-  if (transitions.length === 0) return findings;
+  if (history.length === 0) return findings;
 
-  const claimId = transitions[0]!.claimId;
+  const claimId = history[0]!.claimId;
   const add = (kind: FindingKind, detail: string) => findings.push({ claimId, kind, detail });
 
   // Order by recorded time. Storage order is not guaranteed, and sorting here
-  // means an out-of-order export is not misreported as an illegal transition.
-  const ordered = [...transitions].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  // means an unordered export is not misreported as an illegal transition.
+  const ordered = [...history].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
 
-  if (ordered[0]!.step !== STEPS.validate) {
+  if (ordered[0]!.status !== STATUS.pending) {
     add('wrong-entry-point',
-      `run begins at ${ordered[0]!.step}; every claim must enter through ${STEPS.validate}`);
+      `history begins at "${ordered[0]!.status}"; every claim is created as "${STATUS.pending}"`);
   }
 
   for (let i = 0; i < ordered.length; i++) {
     const current = ordered[i]!;
     const next = ordered[i + 1];
 
-    if (!(current.step in LEGAL_TRANSITIONS)) {
-      add('illegal-transition', `unknown step "${current.step}"`);
+    if (!(current.status in LEGAL_TRANSITIONS)) {
+      add('illegal-transition', `unknown status "${current.status}"`);
       continue;
     }
 
-    // A step may only suspend if it is one of the two human gates.
-    if (current.suspended && !SUSPENDABLE_STEPS.includes(current.step)) {
-      add('unexpected-suspend',
-        `${current.step} suspended, but only ${SUSPENDABLE_STEPS.join(' and ')} may`);
-    }
-
-    // A human gate that advanced must say who advanced it. This is the audit
-    // property: an approval nobody is accountable for is not an approval.
-    if (SUSPENDABLE_STEPS.includes(current.step) && next && !current.actor) {
-      add('missing-actor', `${current.step} advanced with no recorded actor`);
+    // A staff decision must name who made it. An approval nobody is
+    // accountable for is not an approval.
+    if (DECISION_STATUSES.includes(current.status as ClaimStatus) && !current.actor) {
+      add('missing-actor', `moved to "${current.status}" with no recorded actor`);
     }
 
     if (!next) break;
 
-    const legal = LEGAL_TRANSITIONS[current.step]!;
-    if (!legal.includes(next.step)) {
+    if (TERMINAL_STATUSES.includes(current.status as ClaimStatus)) {
+      add('post-terminal-change',
+        `"${current.status}" is terminal but the claim later moved to "${next.status}"`);
+      continue;
+    }
+
+    const legal = LEGAL_TRANSITIONS[current.status]!;
+    if (!legal.includes(next.status as ClaimStatus)) {
       add('illegal-transition',
-        `${current.step} -> ${next.step}; only ${legal.length > 0 ? legal.join(', ') : '(terminal)'} is permitted`);
+        `"${current.status}" -> "${next.status}"; only ${legal.join(', ')} permitted`);
     }
 
     const from = Date.parse(current.at);
     const to = Date.parse(next.at);
     if (Number.isNaN(from) || Number.isNaN(to)) {
-      add('time-travel', `unparseable timestamp between ${current.step} and ${next.step}`);
+      add('time-travel', `unparseable timestamp around "${current.status}"`);
       continue;
     }
     if (to < from) {
-      add('time-travel', `${next.step} recorded before ${current.step}`);
+      add('time-travel', `"${next.status}" recorded before "${current.status}"`);
       continue;
     }
 
-    // SLA applies only at the human gates. Machine steps run in milliseconds,
-    // so timing them would measure the provider, not the process.
-    if (SUSPENDABLE_STEPS.includes(current.step)) {
+    // SLA applies to the statuses a claim WAITS in. A terminal status has no
+    // duration, and timing it would measure how long ago the claim finished.
+    if (WAITING_STATUSES.includes(current.status as ClaimStatus)) {
       const heldHours = (to - from) / 3_600_000;
       if (heldHours > slaHours) {
         add('sla-breach',
-          `${current.step} held ${heldHours.toFixed(1)}h, over the ${slaHours}h threshold`);
+          `held in "${current.status}" for ${heldHours.toFixed(1)}h, over the ${slaHours}h threshold`);
       }
     }
   }
 
-  if (options.requireTerminal && ordered[ordered.length - 1]!.step !== STEPS.outcome) {
-    add('incomplete', `run ends at ${ordered[ordered.length - 1]!.step}, never reaching ${STEPS.outcome}`);
+  const last = ordered[ordered.length - 1]!;
+  if (options.requireTerminal && !TERMINAL_STATUSES.includes(last.status as ClaimStatus)) {
+    add('incomplete', `claim is still "${last.status}" and never reached a terminal status`);
   }
 
   return findings;
@@ -182,23 +213,26 @@ export interface ReplaySummary {
   claimsClean: number;
   findings: ReplayFinding[];
   byKind: Record<string, number>;
-  /** Claims that reached recordOutcome. */
+  /** Claims that reached a terminal status. */
   completed: number;
+  /** Terminal status counts, for the outcome distribution. */
+  outcomes: Record<string, number>;
 }
 
 /** Replays many claims, grouping transitions by claimId. */
 export function replayAll(
-  transitions: readonly TransitionRecord[],
+  history: readonly TransitionRecord[],
   options: ReplayOptions = {},
 ): ReplaySummary {
   const byClaim = new Map<string, TransitionRecord[]>();
-  for (const t of transitions) {
+  for (const t of history) {
     const list = byClaim.get(t.claimId) ?? [];
     list.push(t);
     byClaim.set(t.claimId, list);
   }
 
   const findings: ReplayFinding[] = [];
+  const outcomes: Record<string, number> = {};
   let claimsClean = 0;
   let completed = 0;
 
@@ -206,20 +240,26 @@ export function replayAll(
     const claimFindings = replayClaim(list, options);
     if (claimFindings.length === 0) claimsClean++;
     findings.push(...claimFindings);
-    if (list.some((t) => t.step === STEPS.outcome)) completed++;
+
+    const terminal = list.find((t) => TERMINAL_STATUSES.includes(t.status as ClaimStatus));
+    if (terminal) {
+      completed++;
+      outcomes[terminal.status] = (outcomes[terminal.status] ?? 0) + 1;
+    }
   }
 
   const byKind: Record<string, number> = {};
   for (const f of findings) byKind[f.kind] = (byKind[f.kind] ?? 0) + 1;
 
-  return { claimsReplayed: byClaim.size, claimsClean, findings, byKind, completed };
+  return { claimsReplayed: byClaim.size, claimsClean, findings, byKind, completed, outcomes };
 }
 
 /** Multi-line report for the eval output. */
 export function formatReplay(s: ReplaySummary): string {
   if (s.claimsReplayed === 0) {
-    return '  No recorded claims to replay — the workflow has not run, so integrity is UNVERIFIED.\n' +
-           '  This is not a pass. Submit and resolve at least one claim before citing this dimension.';
+    return '  No recorded claims to replay — workflow integrity is UNVERIFIED.\n' +
+           '  This is NOT a pass. Submit and resolve at least one claim before citing\n' +
+           '  this dimension; a check that examined nothing proves nothing.';
   }
 
   const lines = [
@@ -228,20 +268,25 @@ export function formatReplay(s: ReplaySummary): string {
     `  clean            ${s.claimsClean}/${s.claimsReplayed}`,
   ];
 
+  const outcomeList = Object.entries(s.outcomes).sort((a, b) => b[1] - a[1]);
+  if (outcomeList.length > 0) {
+    lines.push(`  outcomes         ${outcomeList.map(([k, n]) => `${k} ${n}`).join(', ')}`);
+  }
+
   if (s.findings.length === 0) {
-    lines.push('', '  Every run followed a legal transition sequence with a complete audit trail.');
+    lines.push('', '  Every claim followed a legal status sequence with a complete audit trail.');
     return lines.join('\n');
   }
 
   lines.push('', '  findings by kind:');
   for (const [kind, count] of Object.entries(s.byKind).sort((a, b) => b[1] - a[1])) {
-    lines.push(`    ${kind.padEnd(20)} ${count}`);
+    lines.push(`    ${kind.padEnd(22)} ${count}`);
   }
   lines.push('', '  detail:');
   for (const f of s.findings.slice(0, 20)) {
     lines.push(`    [${f.kind}] claim ${f.claimId}: ${f.detail}`);
   }
-  if (s.findings.length > 20) lines.push(`    … and ${s.findings.length - 20} more`);
+  if (s.findings.length > 20) lines.push(`    ... and ${s.findings.length - 20} more`);
 
   return lines.join('\n');
 }

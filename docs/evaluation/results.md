@@ -784,47 +784,63 @@ a reconciliation that examined only one side proves nothing.
 
 ---
 
-## 4.8 Workflow transition replay — HARNESS BUILT, NEEDS A RUN SOURCE
+## 4.8 Workflow transition replay — HARNESS BUILT, NEEDS AN EXPORTER
 
-`src/evals/workflow-replay.ts`. Closes §3.18 dimension 5's rules; the data source
-is still open.
+`src/evals/workflow-replay.ts`. Closes §3.18 dimension 5's rules.
+
+> ### Which lifecycle this models — a correction worth recording
+>
+> There are two descriptions of claim handling in this system, and **only one is
+> auditable.**
+>
+> `verification-workflow.ts` models it as Mastra steps — `validateClaim`,
+> `routeClaim`, `awaitAdminAssignment`, `awaitHodDecision`, `recordOutcome`.
+> Mastra persists workflow runs to its RUNTIME store, which `.env.example`
+> documents as deliberately local: *"Traces are per-instance in production as a
+> result."* **Nothing durable ever records those step names.**
+>
+> The durable record is Supabase: `verification_claims.status` moving through the
+> `claim_status` enum (`pending → in_review → approved | rejected | cancelled`),
+> with `audit_logs` capturing `actor_user_id` and `created_at` per change. That is
+> what an auditor can read months later.
+>
+> The first version of this harness modelled the Mastra step graph. It would have
+> replayed **zero rows forever while reporting green** — encoding the design
+> instead of the evidence. It now models the status machine.
 
 **Why the existing tests were not enough.** `verification-workflow.test.ts`
-asserts that the handoff gates reject a malformed resume payload — a property of
-the code as written. It says nothing about the runs that actually happened:
-whether a claim ever skipped the HOD gate, sat suspended for three weeks, or
-reached an outcome with no recorded reviewer. Those are the questions an audit
-asks, and only the record can answer them.
+asserts the gates reject a malformed resume payload — a property of the code as
+written. It says nothing about the claims that actually happened.
 
 Checks implemented, all pure:
 
 | Check | Catches |
 | :--- | :--- |
-| Transition legality | A claim reaching `recordOutcome` without passing `awaitHodDecision` — approval without the review the workflow exists to enforce |
-| Entry point | A run that never passed `validateClaim` |
-| Suspension discipline | A machine step suspending; only the two human gates may |
-| Audit completeness | A gate advanced with no recorded actor — an approval nobody is accountable for |
-| SLA | A gate held beyond threshold (default 72h), applied only to human gates |
+| Transition legality | `pending → approved` — a claim decided without ever entering review, which is checkable against production rows |
+| Entry point | A claim whose history does not begin at `pending` |
+| Post-terminal change | A decided claim reopened in place, destroying the record of what was decided and when |
+| Audit completeness | `approved`/`rejected` with no `actor_user_id` — an approval nobody is accountable for |
+| SLA | Time held in `pending` or `in_review` beyond threshold (default 72h) |
 | Time integrity | Timestamps running backwards, or unparseable |
 
-Design choices worth noting: every finding for a run is returned rather than
-stopping at the first, since a run that skipped a gate *and* lost its reviewer has
-two problems; records are sorted by timestamp before replay so an unordered
-export is not misread as a broken workflow; and an in-flight claim is not a
-defect by default, or every export would be noisy.
+Deliberate exclusions: `cancelled` needs no reviewer, because a claimant
+withdrawing their own request is not a decision anyone else is accountable for
+and requiring one would flag every ordinary withdrawal. Terminal statuses carry
+no SLA, since timing them would measure how long ago a claim finished.
 
-`formatReplay` refuses to let an empty replay read as a pass — a workflow that
-never ran reports **UNVERIFIED**, explicitly *"This is not a pass."*
+Every finding for a claim is returned rather than stopping at the first; records
+are sorted by timestamp so an unordered export is not misread as a broken
+workflow; and an open claim is not a defect by default.
 
-23 tests, deliberately including shapes production may not have produced yet.
-The first time a skipped gate appears in a live claim should not also be the
-first time anyone checked for it.
+`formatReplay` refuses to let an empty replay read as a pass — reporting
+**UNVERIFIED** and *"This is NOT a pass."*
 
-**Still needed:** an exporter that turns recorded claim history into
-`TransitionRecord[]`. The rules take that array and decide nothing about where it
-comes from. Whether the right source is Mastra's workflow-run storage or the
-Supabase claims table is a decision that needs someone who can see both — I have
-not guessed at a schema.
+28 tests, deliberately including shapes production may never yet have produced.
+
+**Still needed:** an exporter turning `audit_logs` joined to
+`verification_claims` into `TransitionRecord[]`. That query lives in
+`episteme-chat`, which owns the Supabase client; the rules here decide nothing
+about where the history comes from.
 
 ---
 
@@ -834,13 +850,13 @@ All tests pass on both packages.
 
 | Package | Test files | Suites | Tests | Passing | Failing |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| `episteme-core` | 28 | 120 | 490 | 490 | 0 |
+| `episteme-core` | 28 | 119 | 495 | 495 | 0 |
 | `episteme-chat` | 11 | 55 | 216 | 216 | 0 |
-| **Total** | **39** | **175** | **706** | **706** | **0** |
+| **Total** | **39** | **174** | **711** | **711** | **0** |
 
 `tsc --noEmit` passes clean on `episteme-core`.
 
-Access control accounts for **105 of the 706** tests — retrieval-gate 50,
+Access control accounts for **105 of the 711** tests — retrieval-gate 50,
 record-gate 27, session-context 28 — the direct unit-level evidence for
 Objective 1.
 
@@ -856,7 +872,7 @@ conflict rule, and 14 pinning entitlement vacuity detection.
 | `evals/attribution.test.ts` | 4 | 19 |
 | `evals/entitlement-coverage.test.ts` | 4 | 14 |
 | `evals/registry-reconciliation.test.ts` | 6 | 17 |
-| `evals/workflow-replay.test.ts` | 8 | 23 |
+| `evals/workflow-replay.test.ts` | 7 | 28 |
 | `evals/retry.test.ts` | 3 | 14 |
 | `evals/retrieval-metrics.test.ts` | 8 | 30 |
 | `mastra/agents/storage-outage.test.ts` | 3 | 6 |
