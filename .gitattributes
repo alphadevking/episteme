@@ -1,3 +1,6 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
 # Batch files must keep CRLF endings on checkout, whatever the platform.
 # cmd.exe can mis-parse labels and goto targets in an LF-only .bat, and this
 # repo's run-evals.bat is built entirely from labels and gotos.
