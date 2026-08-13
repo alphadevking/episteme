@@ -837,10 +837,82 @@ workflow; and an open claim is not a defect by default.
 
 28 tests, deliberately including shapes production may never yet have produced.
 
-**Still needed:** an exporter turning `audit_logs` joined to
-`verification_claims` into `TransitionRecord[]`. That query lives in
-`episteme-chat`, which owns the Supabase client; the rules here decide nothing
-about where the history comes from.
+### Separation-of-duties controls — added 2026-08-13
+
+The first version checked the status graph and nothing else. A claim that went
+`pending → in_review → approved` with a named actor, inside SLA, passed **even if
+the claimant approved it themselves**. That is a state-machine validator, not an
+audit.
+
+| Control | Test | Severity |
+| :--- | :--- | :--- |
+| **Self-review** | `reviewer_id == user_id` | critical |
+| **Authority scope** | reviewer's `users.institution_id` ≠ claim's | critical |
+| **Approval without review** | `pending → approved`/`rejected` | critical |
+| **Dual control** | `assigned_by == reviewer_id`, exempting `auto_routed` | high |
+
+Findings are now **severity-ranked and reported most-severe first**. An audit
+report listing a self-approval beside a 73-hour SLA breach, undifferentiated,
+buries the one that matters.
+
+Three deliberate design points:
+
+- **Case attributes are separate from event attributes.** Claimant, reviewer and
+  institution belong to the *claim*; status, timestamp and actor belong to a
+  *transition*. That is the distinction the XES event-log standard encodes, and
+  flattening claim fields onto every event row is a modelling error the exporter
+  would then carry forever.
+- **The controls read stored facts**, never a helper the write path also calls.
+  A check that re-runs the logic it audits is a tautology — the weakness this
+  repo already flags in `expandAudienceRoles`.
+- **An unresolved reviewer institution SKIPS the scope check rather than passing
+  it**, and is counted separately in the summary. An unresolved join must never
+  read as compliance.
+
+Two corrections the schema forced, both found by reading it rather than assuming:
+
+1. **SLA comes from `claim_sla_rules.hod_sla_hours`**, which is configured per
+   claim type per institution. The harness had invented a 72-hour constant —
+   reporting breaches of a threshold nobody agreed to, and missing breaches of
+   the one they did. The configured value now wins; the constant is a labelled
+   fallback for claims with no rule.
+2. **`fn_admin_reopen_claim` exists**, so `approved → in_review` is a *supported*
+   operation. It is recorded as `reopened` (advisory) so it stays visible in the
+   trail without reading as a violation. Any *other* move out of a terminal
+   status has no supported path and stays high.
+
+### Population completeness
+
+`replayAll` takes a `PopulationScope`, and `formatReplay` prints a **WARNING
+above every figure** when it is not `full`. A control result over rows the query
+happened to be permitted to see is not evidence — the same vacuous-green failure
+as the empty-namespace entitlement cases. The exporter must use a service-role
+client and declare what it read.
+
+### ⚠ Detective, not preventive — state this in Chapter 4
+
+Everything here finds a violation **after** it happened.
+
+**A clean run supports:** *"no violations observed across N claims."*
+**It does not support:** *"self-approval is prevented."*
+
+Only an enforced constraint supports the second, and none exists. A harness that
+finds a self-approved transcript request next week is a worse outcome than a
+`CHECK` constraint that made the row impossible to write.
+
+`docs/evaluation/proposed/duty-controls.sql` drafts that preventive layer — the
+two CHECK constraints, a trigger for authority scope (a CHECK cannot read
+`users`), and detection queries to run *first*, since a constraint cannot be
+validated while a violating row exists. **Not applied.** It is written against
+the generated types rather than a live database, and it is a production schema
+change that is yours to review.
+
+### Still needed
+
+An exporter turning `verification_claims` joined to `audit_logs`, `users` and
+`claim_sla_rules` into `ClaimHistory[]`. That query belongs in `episteme-chat`,
+which owns the Supabase client; the rules here decide nothing about where the
+history comes from.
 
 ---
 
@@ -850,13 +922,13 @@ All tests pass on both packages.
 
 | Package | Test files | Suites | Tests | Passing | Failing |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| `episteme-core` | 28 | 119 | 495 | 495 | 0 |
+| `episteme-core` | 28 | 119 | 496 | 496 | 0 |
 | `episteme-chat` | 11 | 55 | 216 | 216 | 0 |
-| **Total** | **39** | **174** | **711** | **711** | **0** |
+| **Total** | **39** | **174** | **712** | **712** | **0** |
 
 `tsc --noEmit` passes clean on `episteme-core`.
 
-Access control accounts for **105 of the 711** tests — retrieval-gate 50,
+Access control accounts for **105 of the 712** tests — retrieval-gate 50,
 record-gate 27, session-context 28 — the direct unit-level evidence for
 Objective 1.
 
@@ -872,7 +944,7 @@ conflict rule, and 14 pinning entitlement vacuity detection.
 | `evals/attribution.test.ts` | 4 | 19 |
 | `evals/entitlement-coverage.test.ts` | 4 | 14 |
 | `evals/registry-reconciliation.test.ts` | 6 | 17 |
-| `evals/workflow-replay.test.ts` | 7 | 28 |
+| `evals/workflow-replay.test.ts` | 7 | 29 |
 | `evals/retry.test.ts` | 3 | 14 |
 | `evals/retrieval-metrics.test.ts` | 8 | 30 |
 | `mastra/agents/storage-outage.test.ts` | 3 | 6 |
