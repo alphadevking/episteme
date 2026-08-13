@@ -47,6 +47,10 @@ import {
 
 const K = RETRIEVAL_CONFIG.maxResults;
 
+/** Served from disk, never from the index — excluded from reconciliation. */
+const PLATFORM_HELP_NS  = 'platform-help';
+const PLATFORM_ADMIN_NS = 'platform-admin';
+
 // Quality gates for --strict. Deliberately conservative: this is a floor that
 // catches regressions, not a target. Raise them as the labelled set grows.
 const MIN_PRECISION           = Number(process.env['EVAL_MIN_PRECISION']   ?? 0.7);
@@ -59,6 +63,24 @@ const LABEL  = args.includes('--label');
 const STRICT = args.includes('--strict');
 const CORPUS = args.includes('--corpus');
 const SCORES = args.includes('--scores');
+
+/**
+ * How many times to run each cascade case.
+ *
+ * The web tier is NOT deterministic — it depends on what a live search returns
+ * against the uniben.edu allowlist — so a single observation cannot tell a
+ * regression from a flake. On 2026-08-13 the transcript query resolved from the
+ * web tier in one run and reached tier=none in the next, same corpus, no code
+ * change, and there was no way to say which reading was right.
+ *
+ *   --repeat 5    run every cascade case five times and report the distribution
+ */
+const REPEAT = (() => {
+  const i = args.indexOf('--repeat');
+  if (i === -1) return 1;
+  const n = Number(args[i + 1]);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
+})();
 
 /**
  * The tenant whose documents the eval should be able to see.
@@ -535,6 +557,10 @@ async function runCascadeCases() {
   const { SESSION_KEYS } = await import('../mastra/server/session-context');
   const { groundedResponseTool } = await import('../mastra/tools/grounded-response-tool');
 
+  if (REPEAT > 1) {
+    console.log(`  Running each case ${REPEAT} times to separate flake from regression.\n`);
+  }
+
   for (const c of CASCADE_CASES) {
     const rc = new RequestContext();
     rc.set(SESSION_KEYS.role, c.role);
@@ -543,26 +569,51 @@ async function runCascadeCases() {
     rc.set(SESSION_KEYS.isPlatformAdmin, c.isPlatformAdmin === true);
     if (EVAL_INSTITUTION_ID) rc.set(SESSION_KEYS.institutionId, EVAL_INSTITUTION_ID);
 
-    try {
-      const result = await (groundedResponseTool.execute as unknown as (
-        input: unknown, ctx: unknown,
-      ) => Promise<{ tier?: string; confidence?: string }>)(
-        { query: c.query },
-        { requestContext: rc },
-      );
+    // Tier per attempt. With --repeat this is the whole point: a query that
+    // answers 4 times out of 5 is a non-deterministic fallback, not a defect,
+    // and only the distribution can say so.
+    const tiers: string[] = [];
+    let confidence = 'unknown';
 
-      const tier = result?.tier ?? 'unknown';
-      const confidence = result?.confidence ?? 'unknown';
-      // Flag both failure shapes: nothing answered when something should have,
-      // and the WRONG tier answering — which is how the platform/KB hijack
-      // showed up in the first place.
-      const flag =
-        c.expectAnswered && tier === 'none' ? '  ← expected a fallback tier to answer this'
-        : c.expectTier && tier !== c.expectTier ? `  ← expected tier=${c.expectTier}`
-        : '';
-      console.log(`  tier=${String(tier).padEnd(9)} confidence=${String(confidence).padEnd(5)} ${c.query}${flag}`);
-    } catch (err) {
-      console.log(`  ERROR     ${c.query}: ${(err as Error).message}`);
+    for (let attempt = 0; attempt < REPEAT; attempt++) {
+      try {
+        const result = await (groundedResponseTool.execute as unknown as (
+          input: unknown, ctx: unknown,
+        ) => Promise<{ tier?: string; confidence?: string }>)(
+          { query: c.query },
+          { requestContext: rc },
+        );
+        tiers.push(result?.tier ?? 'unknown');
+        confidence = result?.confidence ?? 'unknown';
+      } catch (err) {
+        tiers.push('ERROR');
+        if (REPEAT === 1) console.log(`  ERROR     ${c.query}: ${(err as Error).message}`);
+      }
+    }
+
+    // Tally, most frequent first.
+    const tally = new Map<string, number>();
+    for (const t of tiers) tally.set(t, (tally.get(t) ?? 0) + 1);
+    const ranked = [...tally].sort((a, b) => b[1] - a[1]);
+    const dominant = ranked[0]?.[0] ?? 'unknown';
+
+    // Flag both failure shapes: nothing answered when something should have,
+    // and the WRONG tier answering — which is how the platform/KB hijack
+    // showed up in the first place. Judged on the DOMINANT tier, so one flaky
+    // attempt does not condemn a case that mostly works.
+    const flag =
+      c.expectAnswered && dominant === 'none' ? '  ← expected a fallback tier to answer this'
+      : c.expectTier && dominant !== c.expectTier ? `  ← expected tier=${c.expectTier}`
+      : '';
+
+    if (REPEAT === 1) {
+      console.log(`  tier=${dominant.padEnd(9)} confidence=${String(confidence).padEnd(5)} ${c.query}${flag}`);
+    } else {
+      const spread = ranked.map(([t, n]) => `${t}x${n}`).join(' ');
+      // An unstable case is the finding. Say so on the line itself rather than
+      // leaving a reader to compare counts across runs by eye.
+      const stability = ranked.length > 1 ? '  ← UNSTABLE' : '';
+      console.log(`  ${spread.padEnd(22)} ${c.query}${flag}${stability}`);
     }
   }
 
@@ -818,6 +869,60 @@ async function runEntitlementCases() {
     failures, chunksInspected, casesWithResults,
     totalCases: KB_ENTITLEMENT_CASES.length, vacuousCases,
   };
+}
+
+// ── Registry reconciliation (does the registry match the index?) ─────────────
+
+/**
+ * The registry and the index are written by the same ingestion run and nothing
+ * keeps them in step afterwards — by design, since db.ts deliberately keeps the
+ * registry off the chat path. This is the only check that notices when they part.
+ */
+async function runRegistryReconciliation(): Promise<{ reconciled: boolean } | null> {
+  console.log(bar('REGISTRY RECONCILIATION (kb_documents vs resident vectors)'));
+
+  if (!hasKbCredentials()) {
+    console.log('SKIPPED — KB credentials not set.');
+    return null;
+  }
+
+  const { Pinecone } = await import('@pinecone-database/pinecone');
+  const { reconcileRegistry, formatReconciliation } = await import('./registry-reconciliation');
+
+  let documents;
+  try {
+    const { listDocuments } = await import('../mastra/ingestion/kb-store');
+    documents = await listDocuments();
+  } catch (err) {
+    // The registry is deliberately not on the chat path, so it can be
+    // unreachable while everything else here works. Say which half failed
+    // rather than reporting a reconciliation result that examined one side.
+    console.log(`SKIPPED — the registry is unreachable: ${(err as Error).message}`);
+    console.log('Reconciliation needs LIBSQL_URL; the index side alone proves nothing.');
+    return null;
+  }
+
+  const index = new Pinecone({ apiKey: process.env['PINECONE_API_KEY']! })
+    .index({ name: process.env['PINECONE_INDEX']! });
+  const stats = await index.describeIndexStats();
+  const census: Record<string, number> = Object.fromEntries(
+    Object.entries(stats.namespaces ?? {})
+      .map(([ns, st]) => [ns, (st as { recordCount?: number }).recordCount ?? 0]),
+  );
+
+  // The platform tier ships in the repository and is read from disk, so it has
+  // no registry rows by design and must not be reported as unregistered.
+  const report = reconcileRegistry(
+    documents.map((d) => ({
+      docId: d.docId, fileName: d.fileName,
+      namespace: d.namespace, vectorsUpserted: d.vectorsUpserted,
+    })),
+    census,
+    [PLATFORM_HELP_NS, PLATFORM_ADMIN_NS],
+  );
+
+  console.log(formatReconciliation(report));
+  return { reconciled: report.reconciled };
 }
 
 // ── Suggestion chips (the product's promises) ────────────────────────────────
@@ -1150,6 +1255,7 @@ async function main() {
   const suggestions = await runSuggestionCases();
   const entitlement = await runEntitlementCases();
   await runCascadeCases();
+  await runRegistryReconciliation();
 
   console.log(bar('SUMMARY'));
   const platformOk = report('Platform documentation tier', platform);

@@ -753,19 +753,94 @@ time-to-first-token. Re-run with `--runs 25`+ once that is settled.
 
 ---
 
+## 4.7 Registry reconciliation — HARNESS BUILT
+
+`src/evals/registry-reconciliation.ts`, running as its own section of the
+retrieval eval. Closes §3.18 dimension 4's third component.
+
+**Why it is needed.** The registry (`kb_documents`, LibSQL) and the index
+(Pinecone) are written by the same ingestion run and nothing keeps them in step
+afterwards. `db.ts` deliberately keeps the registry off the chat path so that an
+outage there cannot stop chat answering — the right design, and exactly what lets
+the two drift apart in silence.
+
+Two drift directions, each a real failure with no other detector:
+
+| Finding | What it means |
+| :--- | :--- |
+| **Registered but absent** | The admin UI lists a document as ingested and no vector exists. Retrieval abstains on a question the operator was told the corpus covers, indistinguishable from a genuine coverage gap. |
+| **Present but unregistered** | Retrievable content with no ingestion record. Provenance cannot be established, and the admin path cannot delete or re-ingest it, because that path works from the registry. |
+
+Count drift is reported but **not** treated as failure: re-ingesting a document
+upserts the same vector ids, so the registry's running total legitimately exceeds
+the index's distinct count.
+
+Platform namespaces are excluded — that tier ships in the repository and is read
+from disk, so it has no registry rows by design.
+
+17 tests, all against the real 2026-08-13 corpus with one thing broken at a time.
+The section skips with a distinct message when the registry is unreachable, since
+a reconciliation that examined only one side proves nothing.
+
+---
+
+## 4.8 Workflow transition replay — HARNESS BUILT, NEEDS A RUN SOURCE
+
+`src/evals/workflow-replay.ts`. Closes §3.18 dimension 5's rules; the data source
+is still open.
+
+**Why the existing tests were not enough.** `verification-workflow.test.ts`
+asserts that the handoff gates reject a malformed resume payload — a property of
+the code as written. It says nothing about the runs that actually happened:
+whether a claim ever skipped the HOD gate, sat suspended for three weeks, or
+reached an outcome with no recorded reviewer. Those are the questions an audit
+asks, and only the record can answer them.
+
+Checks implemented, all pure:
+
+| Check | Catches |
+| :--- | :--- |
+| Transition legality | A claim reaching `recordOutcome` without passing `awaitHodDecision` — approval without the review the workflow exists to enforce |
+| Entry point | A run that never passed `validateClaim` |
+| Suspension discipline | A machine step suspending; only the two human gates may |
+| Audit completeness | A gate advanced with no recorded actor — an approval nobody is accountable for |
+| SLA | A gate held beyond threshold (default 72h), applied only to human gates |
+| Time integrity | Timestamps running backwards, or unparseable |
+
+Design choices worth noting: every finding for a run is returned rather than
+stopping at the first, since a run that skipped a gate *and* lost its reviewer has
+two problems; records are sorted by timestamp before replay so an unordered
+export is not misread as a broken workflow; and an in-flight claim is not a
+defect by default, or every export would be noisy.
+
+`formatReplay` refuses to let an empty replay read as a pass — a workflow that
+never ran reports **UNVERIFIED**, explicitly *"This is not a pass."*
+
+23 tests, deliberately including shapes production may not have produced yet.
+The first time a skipped gate appears in a live claim should not also be the
+first time anyone checked for it.
+
+**Still needed:** an exporter that turns recorded claim history into
+`TransitionRecord[]`. The rules take that array and decide nothing about where it
+comes from. Whether the right source is Mastra's workflow-run storage or the
+Supabase claims table is a decision that needs someone who can see both — I have
+not guessed at a schema.
+
+---
+
 ## 6. System testing (§4.6)
 
 All tests pass on both packages.
 
 | Package | Test files | Suites | Tests | Passing | Failing |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| `episteme-core` | 26 | 106 | 450 | 450 | 0 |
+| `episteme-core` | 28 | 120 | 490 | 490 | 0 |
 | `episteme-chat` | 11 | 55 | 216 | 216 | 0 |
-| **Total** | **37** | **161** | **666** | **666** | **0** |
+| **Total** | **39** | **175** | **706** | **706** | **0** |
 
 `tsc --noEmit` passes clean on `episteme-core`.
 
-Access control accounts for **105 of the 666** tests — retrieval-gate 50,
+Access control accounts for **105 of the 706** tests — retrieval-gate 50,
 record-gate 27, session-context 28 — the direct unit-level evidence for
 Objective 1.
 
@@ -780,6 +855,8 @@ conflict rule, and 14 pinning entitlement vacuity detection.
 | :--- | ---: | ---: |
 | `evals/attribution.test.ts` | 4 | 19 |
 | `evals/entitlement-coverage.test.ts` | 4 | 14 |
+| `evals/registry-reconciliation.test.ts` | 6 | 17 |
+| `evals/workflow-replay.test.ts` | 8 | 23 |
 | `evals/retry.test.ts` | 3 | 14 |
 | `evals/retrieval-metrics.test.ts` | 8 | 30 |
 | `mastra/agents/storage-outage.test.ts` | 3 | 6 |
@@ -871,17 +948,18 @@ No test was failing — 337 were never executing. Any coverage claim from a
 | 3. Abstention | **Measured.** 4/4 KB, 2/2 platform, plus 16 unit tests |
 | 4. Latency | **NFR-101 not met: ≤86% vs 95% target** — first-byte timing, §5.1 |
 | 4b. Satisfaction | **No deployed feedback data** |
-| 4c. Registry reconciliation | **No harness** |
-| 5. Workflow integrity | **Partial** — 2 handoff-gate tests; transition replay has no harness |
+| 4c. Registry reconciliation | **Harness built; runs with the retrieval eval** (§4.7) |
+| 5. Workflow integrity | **Rules built and tested; needs a run source** (§4.8) |
 
 ### Outstanding work
 
 1. ~~Fix `extractEntities`~~ done, but faithfulness needs the entailment judge, not a fourth patch
 2. ~~Get a complete post-fix run~~ **done — run 5, 13/13 executed**
 3. ~~Fix TTFT measurement~~ done — NFR-101 measured at ≤86%; investigate the 7-10s tail
-4. Re-run the cascade several times to separate the transcript-query flake from a regression (§2)
+4. ~~Separate the cascade flake from a regression~~ tooling done — run `--repeat 5`
 5. ~~Make eval concurrency configurable~~ done — `EVAL_MAX_CONCURRENCY`, plus 429 retry
 6. Relax the `news-single-fact-citation` expectation to assert outcome, not tool identity
 7. **[unchanged — needs real documents]** Ingest one `financial-aid` and one `staff-internal` document so the entitlement cases become falsifiable
-8. Write the two remaining harnesses: registry reconciliation, workflow replay
-9. Supply an EntailmentJudge to activate ALCE recall/precision (§4.6)
+8. ~~Write the two remaining harnesses~~ done — both built (§4.7, §4.8)
+9. Supply a TransitionRecord exporter so workflow replay has recorded runs to read
+10. Supply an EntailmentJudge to activate ALCE recall/precision
