@@ -306,24 +306,23 @@ went unchecked almost everywhere in prose. Removing the boundary makes the score
 | `multi-role-keeps-student-access` | 0.69 | `0.0`, `Assign Grade Points`, `Quality Points`, `Total Quality Points`, `Across Semesters` |
 | `platform-help-public-tier` | 0.00 | `Computer Science` |
 
-**These cannot be reported yet, because it is not established that run 3 used the
-fixed scorer.** Two of the strings it flagged — `Assign Grade Points` and
-`Across Semesters` — are stripped by the current code, verified directly:
+**These are pre-fix numbers and must not be reported.** Confirmed by `git log`:
+run 3 executed at commit `a892873`, while the scorer fix landed in `c482a2d` —
+two commits later. The working tree was never updated between the fix and the
+run.
+
+The tell was visible in the output before the git check: two strings the run
+flagged — `Assign Grade Points` and `Across Semesters` — are stripped by the
+fixed code, verified directly:
 
 ```
 extractEntities('1. **Assign Grade Points**: Convert your letter grades.')      -> []
 extractEntities('3. **Sum the Quality Points Across Semesters**: Add them up.') -> []
 ```
 
-So either the run predates the fix (the working tree was not updated before
-running), or the live response contains a character the strip rule does not
-match — a non-breaking space after `1.`, or a label without the trailing colon
-would both defeat it. `git log --oneline -3` in `episteme-core` settles it.
-
-If the fix *was* in effect, the strip rule needs widening. It is deliberately not
-being widened on speculation: guessing at invisible whitespace would risk
-loosening the rule until nothing is ever flagged, which is the failure mode
-§4.4 exists to prevent.
+No change to the strip rule is warranted. A fourth run at `c482a2d` or later is
+what produces a citable faithfulness figure; these four scores should be treated
+as a pre-fix baseline only.
 
 **Revising an earlier judgment on `0.0`.** It was previously argued here that a
 lone unmatched `0.0` was a credible fabricated table row. Run 3 weakens that: the
@@ -424,24 +423,32 @@ practice than reporting only the metrics that passed.
 The earlier n=20 figure of 95% was optimistic on a sample too small to see the
 tail; the n=20 local figure of 100% was not a TTFT measurement at all.
 
-**Robust under either scorer version.** If the benchmark fix was not in effect for
-this run, TTFT was measured as time-to-first-*byte*, which is a lower bound on
-time-to-first-token — so true compliance would be **at most** 86%, never better.
-The failing verdict holds regardless.
+**Measured as time-to-first-byte, so 86% is an upper bound.** `git log` confirms
+this run also executed at `a892873`, before the benchmark fix in `c482a2d`, so
+TTFT here is the first chunk off the reader rather than the first content frame.
+First-byte time is a lower bound on first-token time, so true NFR-101 compliance
+is **at most 86% and probably worse**. The failing verdict is safe to report; the
+exact figure is not final until a post-fix run.
 
-### 5.2 Streaming status
+### 5.2 Streaming status — buffering confirmed, mechanism still open
 
-No `not streamed` markers and no buffering warning appeared, and TTFT/total gaps
-now vary meaningfully (17 ms, 73 ms, 150 ms, 340 ms, 385 ms) where the n=20 run
-showed a uniform 1–4 ms. That is consistent with the fix being active and finding
-real content frames.
+An earlier reading of this run attributed its wider TTFT/total gaps (17 ms, 73 ms,
+150 ms, 340 ms, 385 ms, against a uniform 1–4 ms at n=20) to the benchmark fix
+finding real content frames. **That was wrong** — the fix was not in the tree.
+Those gaps are body-transfer variance under first-byte timing, and the absence of
+a `not streamed` warning means nothing, because the code that emits it was not
+present.
 
-TTFT still sits within a few ms of total on most requests, so the response is
-delivered essentially all at once rather than progressively: generation completes
-before the body reaches the client. The user gets a ~1.1 s wait then a whole
-answer, with no partial-render benefit. Worth a sentence in Chapter 4 —
-"streaming is implemented but does not materialise end-to-end in the deployed
-topology" is an honest and interesting architectural observation.
+What does hold: on most requests the first byte arrives within a few ms of the
+last, across two independent runs (n=20 and n=100). The whole body lands at once.
+The user waits ~1.1 s and then receives a complete answer with no progressive
+render.
+
+"Streaming is implemented but does not materialise end-to-end in the deployed
+topology" remains the honest description, and it is a genuinely interesting
+architectural observation for Chapter 4 — but the mechanism is unconfirmed. A
+post-fix run will distinguish a buffering proxy from an endpoint that never
+streams, because `carriesText` reports which of the two it is.
 
 ### 5.3 Local dev
 
@@ -583,10 +590,10 @@ No test was failing — 337 were never executing. Any coverage claim from a
 | :--- | :--- |
 | 1. Retrieval quality | **Measured.** Report with the corpus-composition caveat (§1.1) |
 | 2. Groundedness | **Measured** — tool-routing and format scored |
-| 2b. Faithfulness | **Scorer fixed; run provenance unresolved** (§4.4) |
+| 2b. Faithfulness | **Scorer fixed; all runs so far are pre-fix** (§4.4) |
 | 2c. Attribution correctness | **No harness** |
 | 3. Abstention | **Measured.** 4/4 KB, 2/2 platform, plus 16 unit tests |
-| 4. Latency | **Measured at n=100. NFR-101 not met: 86% vs 95% target** (§5.1) |
+| 4. Latency | **NFR-101 not met: ≤86% vs 95% target** — first-byte timing, §5.1 |
 | 4b. Satisfaction | **No deployed feedback data** |
 | 4c. Registry reconciliation | **No harness** |
 | 5. Workflow integrity | **Partial** — 2 handoff-gate tests; transition replay has no harness |
@@ -596,7 +603,7 @@ No test was failing — 337 were never executing. Any coverage claim from a
 1. ~~Fix `extractEntities`~~ done — re-run prompt evals for a reportable faithfulness number
 2. ~~Run prompt evals at `maxConcurrency: 1`~~ done — all 13 cases executed in run 3
 3. ~~Fix TTFT measurement~~ done — NFR-101 measured at 86%; investigate the 7-10s tail
-4. Confirm which scorer version run 3 used (`git log` in episteme-core) before citing faithfulness
+4. Re-run both evals at `c482a2d`+ — every run so far predates the scorer and benchmark fixes
 5. Relax the `news-single-fact-citation` expectation to assert outcome, not tool identity
 6. Ingest one `financial-aid` and one `staff-internal` document so the entitlement cases become falsifiable
 7. Write the three missing harnesses: attribution, registry reconciliation, workflow replay
