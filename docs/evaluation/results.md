@@ -387,6 +387,41 @@ summarising the scale without reproducing every row, would both produce this. Th
 honest status is **unresolved**: it needs someone to read the tool's actual
 `answer` payload for that case, not further inference.
 
+### 4.5b Freshness conflict rule — now tested
+
+`buildGroundedContext` instructs the model that when sources disagree on a
+time-varying fact it must state ONLY the most recently dated value. Its own
+comment records why: the agent was observed answering with a 2022 handbook's
+former Vice Chancellor while a current principal-staff source sat beside it in
+the same context.
+
+**That rule had no test.** `content-date.test.ts` covers date *extraction*;
+nothing covered the preference behaviour. The failure mode it guards against was
+protected by a prompt instruction and nothing else.
+
+The rule has two halves, and only one is deterministic:
+
+| Half | Testable? |
+| :--- | :--- |
+| Is the context correctly built — dates attached, stale sources tagged, conflict paragraph emitted? | **Yes, purely.** 23 tests, added 2026-08-13 |
+| Does the model obey a correctly-built context? | Needs a live model — belongs in the prompt evals |
+
+The deterministic half is the one that breaks in silence. Drop a date tag,
+mislabel a dated source as undated, or stop emitting the conflict paragraph, and
+the model *loses the ability* to choose correctly while the answer still reads
+perfectly well. Nothing else in the suite would notice.
+
+Testing it required extracting `buildGroundedContext` into `grounded-context.ts`:
+it previously sat in a module that constructs a Pinecone client at import time,
+so any unit test of it demanded live credentials. That is why the most
+consequential prompt logic in the system was untested — it was structurally
+untestable.
+
+The VC incident is now encoded directly as a fixture: a 2022 stale handbook chunk
+and a 2026 officers-page chunk for the same fact, **stale one first** so ordering
+cannot rescue the result. It asserts both arrive with distinguishable dates,
+exactly one is tagged stale, and the conflict instruction accompanies them.
+
 ### 4.5 `news-single-fact-citation` — a stale test expectation, not a bug
 
 The case expects `unibenNewsTool`; the agent called `groundedResponseTool` in both
@@ -599,25 +634,27 @@ All tests pass on both packages.
 
 | Package | Test files | Suites | Tests | Passing | Failing |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| `episteme-core` | 22 | 94 | 399 | 399 | 0 |
+| `episteme-core` | 25 | 102 | 436 | 436 | 0 |
 | `episteme-chat` | 11 | 55 | 216 | 216 | 0 |
-| **Total** | **33** | **149** | **615** | **615** | **0** |
+| **Total** | **36** | **157** | **652** | **652** | **0** |
 
 `tsc --noEmit` passes clean on `episteme-core`.
 
-Access control accounts for **105 of the 615** tests — retrieval-gate 50,
+Access control accounts for **105 of the 652** tests — retrieval-gate 50,
 record-gate 27, session-context 28 — the direct unit-level evidence for
 Objective 1.
 
-The count rose from 575 to 615 across this work: 13 tests pinning
-`extractEntities`, 8 pinning stream-frame detection, and 19 pinning attribution
-scoring.
+The count rose from 575 to 652 across this work: 13 tests pinning
+`extractEntities`, 8 pinning stream-frame detection, 19 pinning attribution
+scoring, 14 pinning rate-limit backoff, and 23 pinning the grounded-context
+conflict rule.
 
 ### 6.1 episteme-core, per module
 
 | Test file | Suites | Tests |
 | :--- | ---: | ---: |
 | `evals/attribution.test.ts` | 4 | 19 |
+| `evals/retry.test.ts` | 3 | 14 |
 | `evals/retrieval-metrics.test.ts` | 8 | 30 |
 | `mastra/agents/storage-outage.test.ts` | 3 | 6 |
 | `mastra/ingestion/chunker-tables.test.ts` | 3 | 17 |
@@ -633,6 +670,7 @@ scoring.
 | `mastra/server/kb-routes.dry-run.test.ts` | 2 | 8 |
 | `mastra/server/session-context.test.ts` | 4 | 28 |
 | `mastra/tools/abstention.test.ts` | 4 | 16 |
+| `mastra/tools/grounded-context.test.ts` | 5 | 23 |
 | `mastra/tools/platform-docs-tier.test.ts` | 7 | 20 |
 | `mastra/tools/relevance-gate.test.ts` | 1 | 6 |
 | `mastra/tools/rerank.test.ts` | 2 | 11 |
