@@ -160,20 +160,24 @@ institution or the global one.
 
 ---
 
-## 4. Prompt behaviour — MEASURED, THREE RUNS
+## 4. Prompt behaviour — MEASURED, FOUR RUNS
 
-Run 3 (`079efee5`, at `maxConcurrency: 1`) is the **first complete run**: all 13
-cases executed, none rate-limited. Runs 1 and 2 each lost 3 cases to Mistral's
-50k tokens/minute ceiling and are retained only as evidence of run-to-run
-variance.
+Mistral's 50k tokens/minute ceiling has cost cases in three of four runs. Run 3 is
+the only complete one; run 4 is the only one on fixed scorers. No run is yet both.
 
-| | Run 1 (`00a28014`) | Run 2 (`1c4c772f`) | **Run 3 (`079efee5`)** |
-| :--- | :--- | :--- | :--- |
-| Executed | 10 | 10 | **13** |
-| Passed | 6 | 8 | **7** |
-| Rate-limited | 3 | 3 | **0** |
+| | Run 1 (`00a28014`) | Run 2 (`1c4c772f`) | **Run 3 (`079efee5`)** | Run 4 (`a2a0453d`) |
+| :--- | :--- | :--- | :--- | :--- |
+| Commit | `a892873` | `a892873` | `a892873` | `c482a2d`+ |
+| Executed | 10 | 10 | **13** | 8 |
+| Passed | 6 | 8 | **7** | 6 |
+| Rate-limited | 3 | 3 | **0** | 5 |
 
-**Quote run 3.** Headline: **7 of 13 cases passed (53.8%)**.
+**Quote run 3 for case-level results** — the only complete run: **7 of 13 passed
+(53.8%)**. Run 4 is the only run on fixed scorers but lost 5 cases to rate
+limiting, so it is authoritative for *how* faithfulness behaves (§4.4) and not
+for pass rates.
+
+**No run is yet both complete and post-fix.** That run still needs to happen.
 
 ### 4.1 Per-scorer results, run 3 — the more informative view
 
@@ -216,7 +220,10 @@ is the finding.
 | `platform-help-public-tier` | ✗ faith. | — | ✗ faith. | see §4.4 |
 | `news-single-fact-citation` | ✗ routing | ✗ routing | ✗ routing | **stable, see §4.5** |
 
-(— = rate-limited, never executed that run.)
+(— = rate-limited, never executed that run. Run 4 is omitted from this table: it
+executed only the first 8 cases, and reproduced `direct-policy-question` ✗ format,
+`news-single-fact-citation` ✗ routing, and `news-routing` ✓ — a fourth consecutive
+result for each.)
 
 Three cases flip between pass and fail across runs with no code change in between.
 **Single-run prompt evals are not reproducible**, and any Chapter 4 figure quoted
@@ -297,7 +304,54 @@ holds when a word character follows. `40% overall` never matched — percentages
 went unchecked almost everywhere in prose. Removing the boundary makes the scorer
 **stricter**, so it cannot have inflated any past score.
 
-#### Run 3 faithfulness — provenance unresolved, do not cite yet
+#### Run 4 — fix confirmed active, and it exposed a deeper flaw
+
+Run 4 (`a2a0453d`) is the first run at `c482a2d`+. Two independent proofs the fix
+took effect, from `direct-policy-question` alone:
+
+1. Its answer contains `1. **Grade Point Conversion**:` and
+   `2. **Compute Total Units x Grade Point (TUGP)**:` — **neither was flagged**.
+   Pre-fix, those exact constructs were the reported hallucinations.
+2. Percentages appear in the ungrounded list for the first time ever, which the
+   old `/\b\d+\s*%\b/` could not produce at all.
+
+The score moved **0.80 → 0.54**. That is the percentage fix biting, not a
+regression: an entity class that was silently unchecked is now checked.
+
+| Run 4 case | Score | Ungrounded |
+| :--- | ---: | :--- |
+| `direct-policy-question` | 0.54 | `100%`, `69%`, `59%`, `49%`, `44%`, `39%` |
+
+> ### ⚠ The new flags are almost certainly formatting artifacts
+>
+> All six are percentage bands from a grading scale the model reproduced:
+> `70–100% = A = 5.0`, `60–69% = B = 4.0`, and so on. The grade points (`5.0`,
+> `4.0`, …) **were** grounded; only the bands were not.
+>
+> Faithfulness compares by raw substring against the tool's `answer`. A source
+> that writes the same bands without a percent sign — `70 - 100 = A` — fails every
+> one of them. Verified directly:
+>
+> ```
+> ungrounded against a %-less source: [ '100%', '69%', '39%' ]
+> ```
+>
+> The same run shows the model writing `F = 0` where an earlier run wrote
+> `F = 0.0`. It varies its own numeric formatting between runs, so a
+> character-exact comparison is measuring presentation, not fidelity.
+>
+> **This is a limitation of the method, not a bug in this fix.** Entity-level
+> faithfulness by substring match is a weak proxy for groundedness: it cannot
+> distinguish a fabricated figure from a correctly-sourced one that was rendered
+> differently. Chapter 4 should say so if it reports the metric at all.
+>
+> The targeted remedy is to normalise before comparison — strip `%`, unify
+> en/em dashes with hyphens, and trim a trailing `.0` — so `70–100%` matches
+> `70 - 100` and `0.0` matches `0`, while a genuinely absent number still fails.
+> That removes formatting-driven false positives without loosening the check.
+> **Not yet implemented.**
+
+#### Run 3 faithfulness — pre-fix baseline, do not cite
 
 | Case | Score | Reported ungrounded |
 | :--- | ---: | :--- |
@@ -590,7 +644,7 @@ No test was failing — 337 were never executing. Any coverage claim from a
 | :--- | :--- |
 | 1. Retrieval quality | **Measured.** Report with the corpus-composition caveat (§1.1) |
 | 2. Groundedness | **Measured** — tool-routing and format scored |
-| 2b. Faithfulness | **Scorer fixed; all runs so far are pre-fix** (§4.4) |
+| 2b. Faithfulness | **Method unsound for numerics — needs normalisation** (§4.4) |
 | 2c. Attribution correctness | **No harness** |
 | 3. Abstention | **Measured.** 4/4 KB, 2/2 platform, plus 16 unit tests |
 | 4. Latency | **NFR-101 not met: ≤86% vs 95% target** — first-byte timing, §5.1 |
@@ -603,7 +657,8 @@ No test was failing — 337 were never executing. Any coverage claim from a
 1. ~~Fix `extractEntities`~~ done — re-run prompt evals for a reportable faithfulness number
 2. ~~Run prompt evals at `maxConcurrency: 1`~~ done — all 13 cases executed in run 3
 3. ~~Fix TTFT measurement~~ done — NFR-101 measured at 86%; investigate the 7-10s tail
-4. Re-run both evals at `c482a2d`+ — every run so far predates the scorer and benchmark fixes
-5. Relax the `news-single-fact-citation` expectation to assert outcome, not tool identity
-6. Ingest one `financial-aid` and one `staff-internal` document so the entitlement cases become falsifiable
-7. Write the three missing harnesses: attribution, registry reconciliation, workflow replay
+4. Normalise numerics before the faithfulness substring match, then take one complete post-fix run
+5. Make eval concurrency configurable so rate limiting stops costing cases
+6. Relax the `news-single-fact-citation` expectation to assert outcome, not tool identity
+7. Ingest one `financial-aid` and one `staff-internal` document so the entitlement cases become falsifiable
+8. Write the three missing harnesses: attribution, registry reconciliation, workflow replay
