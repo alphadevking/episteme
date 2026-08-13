@@ -33,6 +33,18 @@ const { mastra }         = await import('../mastra/index');
 const { SESSION_KEYS }   = await import('../mastra/server/session-context');
 const { promptEvalCases } = await import('./prompt-eval-dataset');
 const { promptEvalScorers } = await import('./prompt-eval-scorers');
+const { withRetry, totalBackoffMs } = await import('./retry');
+
+/**
+ * Concurrency is env-configurable and defaults to 1.
+ *
+ * It was hardcoded at 2, which meant the only way to slow a run down was to
+ * edit this file — an edit that `git pull` then silently discarded, which is
+ * exactly what happened between runs 3 and 4 and cost five cases. Serial is the
+ * right default: 13 cases against a 50k tokens/minute ceiling has headroom one
+ * at a time, and an eval that finishes slowly beats one that finishes wrong.
+ */
+const MAX_CONCURRENCY = Math.max(1, Number(process.env['EVAL_MAX_CONCURRENCY'] ?? 1) || 1);
 
 import type { PromptEvalCase } from './prompt-eval-dataset';
 import type { EvalRunOutput } from './prompt-eval-scorers';
@@ -81,10 +93,18 @@ const summary = await runExperiment(mastra, {
   })),
   task: async ({ input }): Promise<EvalRunOutput> => {
     const c = input as PromptEvalCase;
-    const result = await agent.generate(c.query, {
-      system: c.system,
-      requestContext: buildRequestContext(c),
-    });
+    // A 429 means the case was never asked, not that it answered badly. Waiting
+    // out the per-minute window turns a lost measurement back into a real one.
+    const result = await withRetry(
+      () => agent.generate(c.query, {
+        system: c.system,
+        requestContext: buildRequestContext(c),
+      }),
+      {
+        onRetry: (attempt, delayMs) =>
+          console.log(`  … ${c.id}: rate limited, retry ${attempt} in ${delayMs / 1000}s`),
+      },
+    );
 
     const toolsCalled = (result.toolCalls ?? []).map(toolName).filter(Boolean);
 
@@ -119,14 +139,24 @@ const summary = await runExperiment(mastra, {
     return { text: result.text, toolsCalled, groundedConfidence, toolAnswer, toolSources };
   },
   scorers: promptEvalScorers,
-  maxConcurrency: 2,
-  itemTimeout: 120_000,
+  maxConcurrency: MAX_CONCURRENCY,
+  // Sized FROM the backoff schedule, not guessed. A timeout shorter than the
+  // total wait would cancel the very retry the schedule exists to perform,
+  // reintroducing the dropped case by another route.
+  itemTimeout: totalBackoffMs() + 120_000,
 });
 
 // ── Report ────────────────────────────────────────────────────────────────────
 let failures = 0;
 
-console.log(`\n═══ prompt-behaviour-evals — experiment ${summary.experimentId} ═══\n`);
+// Record HOW the run was configured, not just what it produced. Four earlier
+// runs had to have their concurrency reconstructed from which cases went
+// missing; a results file should never need that kind of forensics.
+console.log(
+  `\n═══ prompt-behaviour-evals — experiment ${summary.experimentId} ═══\n` +
+  `    concurrency ${MAX_CONCURRENCY}` +
+  `${MAX_CONCURRENCY > 1 ? ' (set EVAL_MAX_CONCURRENCY=1 if rate limited)' : ''}\n`,
+);
 
 for (const item of summary.results) {
   const caseId = (item.input as PromptEvalCase)?.id ?? item.itemId;
