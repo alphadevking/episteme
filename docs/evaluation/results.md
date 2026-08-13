@@ -13,6 +13,20 @@ so any figure in the write-up can be re-derived rather than trusted.
 | Corpus | Pinecone index `episteme-kb`, 458 vectors |
 | Institution | `ab282ad9-321f-4c1f-a681-667f32bf0fe1` |
 
+**Reproducing every number here.** From the repository root:
+
+```
+run-evals.bat
+```
+
+One command, one output file (`eval-run.txt`): provenance, both type checks, both
+test suites, the retrieval/entitlement/cascade eval, and the prompt-behaviour
+eval. Sections needing credentials skip with a printed reason rather than
+crashing, so it still produces results on a machine with no `.env.local`. Set
+`MASTRA_BASE_URL` beforehand to include the latency benchmark against the
+deployment — it is omitted by default because a localhost measurement describes
+the operator's laptop rather than the system.
+
 **Corpus composition** — this matters for how the retrieval numbers should be read:
 
 | Namespace | Vectors | Share | Source document |

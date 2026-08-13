@@ -4,3 +4,6 @@ research-data
 .vscode
 .idea
 .mcp.json
+# Evaluation output from run-evals.bat - a run artefact, not source.
+# Copy it under a dated name if you want to keep a particular run.
+eval-run.txt
