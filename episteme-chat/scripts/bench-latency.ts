@@ -20,6 +20,7 @@
  * It does consume model tokens — that is the cost of measuring the real thing.
  */
 import {
+  carriesText,
   describe as describeDistribution,
   formatLatencySummary,
   summarizeLatency,
@@ -53,11 +54,22 @@ function arg(name: string, fallback: number): number {
 const RUNS        = arg('runs', 3);
 const CONCURRENCY = arg('concurrency', 1);
 
-interface Sample { query: string; role: string; ttftMs: number; totalMs: number; ok: boolean }
+interface Sample {
+  query: string;
+  role: string;
+  ttftMs: number;
+  totalMs: number;
+  ok: boolean;
+  /** Reads that delivered bytes. 1 means the whole body arrived in one piece. */
+  chunks: number;
+  /** Whether a frame carrying generated text was ever identified. */
+  streamed: boolean;
+}
 
 async function measure(query: string, role: string, trust: number): Promise<Sample> {
   const started = Date.now();
   let ttftMs = -1;
+  let chunks = 0;
 
   const res = await fetch(`${BASE_URL.replace(/\/$/, '')}/chat/${encodeURIComponent(AGENT_ID)}`, {
     method: 'POST',
@@ -75,18 +87,42 @@ async function measure(query: string, role: string, trust: number): Promise<Samp
   });
 
   if (!res.ok || !res.body) {
-    return { query, role, ttftMs: Date.now() - started, totalMs: Date.now() - started, ok: false };
+    const elapsed = Date.now() - started;
+    return { query, role, ttftMs: elapsed, totalMs: elapsed, ok: false, chunks: 0, streamed: false };
   }
 
-  const reader = res.body.getReader();
-  // Read to completion: first chunk gives TTFT, stream close gives total.
+  const reader  = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  // Read to completion, timing the first CONTENT frame rather than the first
+  // read. Whole lines only: a frame split across a chunk boundary will not parse,
+  // and treating that as "no content yet" would push TTFT artificially later.
   for (;;) {
-    const { done } = await reader.read();
-    if (ttftMs === -1) ttftMs = Date.now() - started;
+    const { done, value } = await reader.read();
     if (done) break;
+    if (!value || value.length === 0) continue;
+
+    chunks++;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    if (ttftMs === -1 && lines.some(carriesText)) ttftMs = Date.now() - started;
   }
 
-  return { query, role, ttftMs, totalMs: Date.now() - started, ok: true };
+  buffer += decoder.decode();
+  if (ttftMs === -1 && buffer.split('\n').some(carriesText)) ttftMs = Date.now() - started;
+
+  const totalMs  = Date.now() - started;
+  const streamed = ttftMs !== -1;
+
+  // No identifiable content frame — the endpoint buffered the whole body, or it
+  // speaks a protocol this script does not know. Either way TTFT is unmeasurable
+  // here, so report the honest value and let the caller flag it. Publishing the
+  // first-read time instead is what produced the misleading 2026-08-13 production
+  // figures, where TTFT sat within 4ms of total on all 20 requests.
+  return { query, role, ttftMs: streamed ? ttftMs : totalMs, totalMs, ok: true, chunks, streamed };
 }
 
 /** Runs tasks with a fixed concurrency cap — same shape as the embedder's. */
@@ -123,9 +159,38 @@ async function main() {
   const failed = samples.length - ok.length;
 
   for (const s of ok) {
-    console.log(`  ${String(s.ttftMs).padStart(6)}ms ttft  ${String(s.totalMs).padStart(6)}ms total  [${s.role}] ${s.query}`);
+    const mark = s.streamed ? '' : '   ← not streamed';
+    console.log(`  ${String(s.ttftMs).padStart(6)}ms ttft  ${String(s.totalMs).padStart(6)}ms total  [${s.role}] ${s.query}${mark}`);
   }
   if (failed > 0) console.log(`\n  ${failed} request(s) failed — excluded from the distribution.`);
+
+  // VALIDITY GATE. A TTFT number is only a time-to-first-token if the response
+  // actually streamed. Say so loudly rather than letting a buffered response be
+  // written up as if it met a first-token target.
+  const buffered = ok.filter((s) => !s.streamed);
+  if (buffered.length > 0) {
+    console.log(
+      `\n  WARNING  ${buffered.length}/${ok.length} response(s) carried no identifiable content frame.\n` +
+      '           The endpoint buffered the body, or speaks a protocol this script does not\n' +
+      '           recognise. For those rows TTFT EQUALS total response time and is NOT a\n' +
+      '           time-to-first-token. Do not report NFR-101 from this run until that is resolved.',
+    );
+  } else {
+    const singleChunk = ok.filter((s) => s.chunks <= 1);
+    if (singleChunk.length > 0) {
+      console.log(
+        `\n  NOTE  ${singleChunk.length}/${ok.length} response(s) arrived in a single chunk — ` +
+        'TTFT and total are the same event there.',
+      );
+    }
+  }
+
+  if (ok.length < 100) {
+    console.log(
+      `\n  NOTE  n=${ok.length}. Nearest-rank p99 over ${ok.length} samples is just the maximum ` +
+      'observation.\n        Quote p50/p95, or raise --runs, before citing a percentile.',
+    );
+  }
   if (ok.length === 0) {
     console.error('\nNo successful requests; nothing to summarize.');
     process.exit(1);
