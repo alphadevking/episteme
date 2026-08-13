@@ -416,6 +416,62 @@ instructions mandate. Two caveats before closing it out:
    historically resolved from a 2022 handbook. Confirm the name is current before
    citing this as a correct answer.
 
+### 4.6 Attribution correctness — harness built
+
+`src/evals/attribution.ts`, wired into the prompt evals as a fifth scorer. This
+is §3.18 dimension 2c, and the metric this system uniquely earns the right to
+report: it already emits `[N](cite:N)` badges the client resolves against a
+structured source list, which most RAG systems do not.
+
+**The design splits what is decidable from what is not.** The literature standard
+is ALCE-style citation recall and precision, and both require an *entailment*
+judgement that no regex can supply. This repo has already paid twice for
+treating string overlap as meaning — the faithfulness extractor flagged an
+answer's own headings as fabrications, then flagged `70-100%` because its source
+wrote `70 - 100`. A third string-matching metric wearing ALCE's name would repeat
+that error with more authority.
+
+**Structural tier — runs today, deterministic, 19 unit tests:**
+
+| Metric | What it catches |
+| :--- | :--- |
+| Dangling citations | `[5](cite:5)` when only 3 sources exist — the badge renders against nothing |
+| Label/anchor mismatch | `[2](cite:5)` — the reader is shown one source, the client resolves another |
+| Citation coverage | fraction of claim-bearing statements carrying any citation |
+| Uncited sources | sources retrieved and returned but never referenced |
+| Multi-cited statements | the syntactic shadow of ALCE precision |
+
+Only dangling and mismatched citations are **scored**. Coverage is reported and
+deliberately unscored: it rests on a heuristic for which statements are claims,
+and scoring a heuristic as ground truth is precisely the habit that produced the
+faithfulness mess.
+
+**Semantic tier — defined, awaiting a judge.** `scoreCitationSupport` implements
+ALCE recall (do a statement's cited passages jointly entail it?) and precision (a
+citation counts only if it stands alone or its removal breaks support). It takes
+an injected `EntailmentJudge`, so plugging in an NLI model (AlignScore,
+MiniCheck, an MNLI cross-encoder) or an LLM judge is the only work left. The
+arithmetic is unit-tested against a stub; no number is invented in the meantime.
+
+#### Dry-run against recorded answers
+
+Run against real answers captured from prompt-eval runs 1–4:
+
+| Case | Result |
+| :--- | :--- |
+| `news-single-fact-citation` | coverage 100% (1/1), 1 citation — clean |
+| `news-routing` (run 1) | coverage 100% (2/2), 3 citations, **1 source never cited**, 1 multi-cited statement |
+| `direct-policy-question` (run 4) | **coverage 33.3% (1/3 claims cited), 2 of 3 sources never cited** |
+
+That last row is a finding no existing scorer surfaces. The CGPA answer had three
+sources available and cited one of them once, leaving two-thirds of its claims
+unattributed — which is the substantive version of the complaint the format
+scorer could only phrase as "neither a cited answer nor a valid abstention".
+
+Zero dangling and zero mismatched citations across every recorded answer. On the
+evidence so far the citation apparatus is structurally sound; the weakness is
+coverage, not integrity.
+
 ---
 
 ## 5. Latency — MEASURED, BUT THE TWO RUNS ARE NOT COMPARABLE
@@ -543,23 +599,25 @@ All tests pass on both packages.
 
 | Package | Test files | Suites | Tests | Passing | Failing |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| `episteme-core` | 21 | 90 | 380 | 380 | 0 |
+| `episteme-core` | 22 | 94 | 399 | 399 | 0 |
 | `episteme-chat` | 11 | 55 | 216 | 216 | 0 |
-| **Total** | **32** | **145** | **596** | **596** | **0** |
+| **Total** | **33** | **149** | **615** | **615** | **0** |
 
 `tsc --noEmit` passes clean on `episteme-core`.
 
-Access control accounts for **105 of the 596** tests — retrieval-gate 50,
+Access control accounts for **105 of the 615** tests — retrieval-gate 50,
 record-gate 27, session-context 28 — the direct unit-level evidence for
 Objective 1.
 
-The count rose from 575 to 596 with the two scorer/telemetry fixes below: 13 new
-tests pinning `extractEntities` and 8 pinning stream-frame detection.
+The count rose from 575 to 615 across this work: 13 tests pinning
+`extractEntities`, 8 pinning stream-frame detection, and 19 pinning attribution
+scoring.
 
 ### 6.1 episteme-core, per module
 
 | Test file | Suites | Tests |
 | :--- | ---: | ---: |
+| `evals/attribution.test.ts` | 4 | 19 |
 | `evals/retrieval-metrics.test.ts` | 8 | 30 |
 | `mastra/agents/storage-outage.test.ts` | 3 | 6 |
 | `mastra/ingestion/chunker-tables.test.ts` | 3 | 17 |
@@ -645,7 +703,7 @@ No test was failing — 337 were never executing. Any coverage claim from a
 | 1. Retrieval quality | **Measured.** Report with the corpus-composition caveat (§1.1) |
 | 2. Groundedness | **Measured** — tool-routing and format scored |
 | 2b. Faithfulness | **Method unsound for numerics — needs normalisation** (§4.4) |
-| 2c. Attribution correctness | **No harness** |
+| 2c. Attribution correctness | **Harness built; structural tier ready to run** (§4.6) |
 | 3. Abstention | **Measured.** 4/4 KB, 2/2 platform, plus 16 unit tests |
 | 4. Latency | **NFR-101 not met: ≤86% vs 95% target** — first-byte timing, §5.1 |
 | 4b. Satisfaction | **No deployed feedback data** |
@@ -661,4 +719,5 @@ No test was failing — 337 were never executing. Any coverage claim from a
 5. Make eval concurrency configurable so rate limiting stops costing cases
 6. Relax the `news-single-fact-citation` expectation to assert outcome, not tool identity
 7. Ingest one `financial-aid` and one `staff-internal` document so the entitlement cases become falsifiable
-8. Write the three missing harnesses: attribution, registry reconciliation, workflow replay
+8. Write the two remaining harnesses: registry reconciliation, workflow replay
+9. Supply an EntailmentJudge to activate ALCE recall/precision (§4.6)

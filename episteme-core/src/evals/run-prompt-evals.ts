@@ -90,16 +90,33 @@ const summary = await runExperiment(mastra, {
 
     let groundedConfidence: 'high' | 'low' | undefined;
     let toolAnswer: string | undefined;
+    // Any source-bearing tier counts — the attribution scorer asks whether the
+    // prose's [N](cite:N) badges resolve against whatever source list the client
+    // will render, and news and web answers carry one just as the KB does.
+    let toolSources: Array<{ number: number }> | undefined;
+
     for (const tr of result.toolResults ?? []) {
-      if (toolName(tr) !== 'groundedResponseTool') continue;
       const payload = toolResultPayload(tr);
-      if (payload && (payload.confidence === 'high' || payload.confidence === 'low')) {
+      if (!payload) continue;
+
+      if (Array.isArray(payload.sources)) {
+        const numbered = payload.sources.filter(
+          (s: unknown): s is { number: number } =>
+            typeof (s as { number?: unknown })?.number === 'number',
+        );
+        // A tier that answered from nothing still reports an empty list; that is
+        // meaningfully different from no source-bearing tool having run at all.
+        toolSources = [...(toolSources ?? []), ...numbered];
+      }
+
+      if (toolName(tr) !== 'groundedResponseTool') continue;
+      if (payload.confidence === 'high' || payload.confidence === 'low') {
         groundedConfidence = payload.confidence;
         toolAnswer = typeof payload.answer === 'string' ? payload.answer : undefined;
       }
     }
 
-    return { text: result.text, toolsCalled, groundedConfidence, toolAnswer };
+    return { text: result.text, toolsCalled, groundedConfidence, toolAnswer, toolSources };
   },
   scorers: promptEvalScorers,
   maxConcurrency: 2,
