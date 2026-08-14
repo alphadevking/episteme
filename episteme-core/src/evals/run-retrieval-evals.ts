@@ -201,6 +201,21 @@ async function runKbCases() {
   const abstentionResults: boolean[] = [];
   const failures: string[] = [];
 
+  // WHICH JUDGE ACTUALLY RULED, observed per case rather than read from config.
+  //
+  // Reranking is FAIL-SOFT: any error falls back to embedding order and still
+  // answers, and it is off by default so it ships dark. Either way the run
+  // produces numbers with no indication that the mechanism under test was
+  // absent — which is exactly what happened on 2026-08-13, when abstention
+  // dropped to 3/4 and the whole cascade collapsed to the KB tier with nothing
+  // in the output saying why.
+  //
+  // config.ts already predicts the signature: "weather in Benin City" hits the
+  // handbook at 0.744 on embeddings alone. A result set judged by embedding is
+  // therefore not comparable with one judged by cross-encoder, and reporting
+  // them under the same heading invites exactly that comparison.
+  const judges = new Set<string>();
+
   for (const c of KB_CASES) {
     const res = await retrieveKnowledge({
       query: c.query,
@@ -213,6 +228,8 @@ async function runKbCases() {
       programme: c.programme,
       level: c.level,
     });
+
+    if (res.found) judges.add(res.judgedBy);
 
     const retrieved: RetrievedItem[] = res.found
       ? res.results.map((r) => ({ source: r.source, score: res.maxScore }))
@@ -259,7 +276,11 @@ async function runKbCases() {
     }
   }
 
-  return { summary: summarize(retrievalScores, abstentionResults), failures };
+  return {
+    summary: summarize(retrievalScores, abstentionResults),
+    failures,
+    judges: [...judges].sort(),
+  };
 }
 
 // ── Threshold calibration (--scores) ─────────────────────────────────────────
@@ -1259,6 +1280,28 @@ async function main() {
 
   console.log(bar('SUMMARY'));
   const platformOk = report('Platform documentation tier', platform);
+  if (kb && kb.judges.length > 0) {
+    const rerankRuled = kb.judges.includes('rerank');
+    console.log(
+      `\nRelevance judge   ${kb.judges.join(' + ')}` +
+      (rerankRuled ? '' : '   ← CROSS-ENCODER DID NOT RULE'),
+    );
+    if (!rerankRuled) {
+      // Not a footnote. Every KB figure below was produced without the mechanism
+      // the abstention numbers depend on, and is not comparable with a run where
+      // it ruled.
+      console.log(
+        '  Every knowledge-base figure below was judged by EMBEDDING SIMILARITY alone.\n' +
+        '  config.ts records why that matters: in-domain (0.694-0.808) and out-of-domain\n' +
+        '  (0.611-0.744) scores OVERLAP, so no threshold separates them and out-of-domain\n' +
+        '  probes get answered. Expect degraded abstention and a cascade that never falls\n' +
+        '  through to the news, web or platform tiers.\n' +
+        '  Either RERANK_ENABLED is unset (it defaults to FALSE) or reranking failed and\n' +
+        '  fell soft to embedding order. Do not compare these numbers with a reranked run.',
+      );
+    }
+  }
+
   const kbOk       = report('Knowledge base tier', kb);
 
   // An abstention score computed against an invisible corpus is not a result.

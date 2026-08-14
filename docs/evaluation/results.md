@@ -38,6 +38,38 @@ the operator's laptop rather than the system.
 
 ---
 
+> ### ⚠⚠ RUN OF 2026-08-13 23:00 — RERANKING DID NOT RULE. NUMBERS BELOW SUPERSEDED FOR THE KB TIER.
+>
+> A later full run (commit `d772913`, Node v24.19.0) shows the knowledge-base
+> tier degraded across the board:
+>
+> | | Reranked run | 2026-08-13 23:00 |
+> | :--- | ---: | ---: |
+> | Precision@1 | 100.0% | **90.0%** |
+> | Precision@3 | 96.7% | **83.3%** |
+> | MRR / nDCG@3 | 1.000 | **0.900** |
+> | Abstention | 4/4 | **3/4** |
+>
+> `kb-abstain-weather` **answered** from the admission policy and student
+> handbook at `maxScore=0.744`, and the cascade collapsed — every query resolved
+> `tier=kb`, including the platform question the tier-reorder guard exists to
+> catch.
+>
+> That is the exact signature `config.ts` documents for reranking being absent:
+> *"weather in Benin City hits a Uniben handbook at 0.744 because both are about
+> Benin and a university"*, and *"without rerank: abstention 0/4 — every
+> out-of-domain probe was ANSWERED"*.
+>
+> `RERANK_CONFIG.enabled` defaults to **false** — it ships dark by design.
+> Reranking is also **fail-soft**, so an outage degrades relevance silently. The
+> harness now reports which judge actually ruled (added 2026-08-14) rather than
+> leaving it to be inferred from degraded numbers.
+>
+> **Do not mix figures across these runs.** A result set judged by embedding
+> similarity is not comparable with one judged by cross-encoder. Re-run with
+> `RERANK_ENABLED=true` confirmed, check the summary says `Relevance judge
+> rerank`, and use that run for Chapter 4.
+
 ## 1. Retrieval quality
 
 Both tiers ran against a live index. The **corpus reachability control passed**
@@ -644,6 +676,28 @@ Local (`localhost:4111`, `pnpm dev`) and production
 | TTFT | 56 ms | 228 ms | 1,098 ms | 1,268 ms |
 | Total | 1,180 ms | 14,476 ms | 1,102 ms | 1,270 ms |
 
+> ### Re-run of 2026-08-13 23:00 — still not streaming
+>
+> Benchmarked against the deployment at n=100 **after** the Content-Length fix
+> was committed (`4a16769`, contained in `d772913`):
+>
+> ```
+> WARNING  100/100 response(s) carried no identifiable content frame.
+> TTFT   n=100  p50=1206ms  p95=3540ms  p99=4701ms  max=5049ms
+> total  n=100  p50=1206ms  p95=3540ms  p99=4701ms  max=5049ms
+> NFR-101: 89.0%   ← below a 95% target
+> ```
+>
+> **TTFT is identical to total on every percentile.** The signature has not
+> moved, so the fix was not exercised — almost certainly because the commit was
+> not redeployed before the benchmark ran. The benchmark targets the deployed
+> build, not the working tree.
+>
+> 89% against 86%, and max improving from 9.7s to 5.0s, is load variation rather
+> than evidence of the fix. **Verify the deployment is at `4a16769` or later
+> before the next run**, e.g. by checking whether a `content-length` header still
+> comes back on the streamed response.
+>
 > ### ⚠ Do not report NFR-101 from these runs
 >
 > **On production, TTFT ≈ total on all 20 requests** — 1098/1102, 1216/1218,
