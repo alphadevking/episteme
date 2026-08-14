@@ -700,7 +700,45 @@ First-byte time is a lower bound on first-token time, so true NFR-101 compliance
 is **at most 86% and probably worse**. The failing verdict is safe to report; the
 exact figure is not final until a post-fix run.
 
-### 5.2 Streaming status — buffering confirmed, mechanism still open
+### 5.2 Streaming status — CAUSE FOUND AND FIXED 2026-08-14
+
+**The proxy was declaring a `Content-Length` it could not honour.**
+
+`app/api/chat/route.ts` pipes the upstream body through two transforms, and
+`sanitizeTransform` *drops* malformed chunks — so the byte count changes. The
+route then built its response headers with `new Headers(upstreamResponse.headers)`,
+copying `content-length` (and potentially `content-encoding`) onto a body that no
+longer matched them.
+
+That is a **correctness bug before it is a performance one**: a response with a
+declared length cannot be sent chunked, so the platform must buffer the entire
+body to honour a number that was wrong anyway. It explains the signature exactly
+— first byte arriving only as the last one did — and it explains why the fault
+was invisible locally, where nothing re-buffers.
+
+Fixed by deleting both headers and adding `cache-control: no-cache, no-transform`
+and `x-accel-buffering: no`.
+
+> **This makes the NFR-101 figure provisional, and it must be re-measured.**
+> The ≤86% result was taken against a deployment that could not stream. It is
+> the honest number for the system *as it then was*, and remains reportable as
+> such — but it does not describe the system after this fix.
+>
+> Re-run `--runs 25` against the deployment once redeployed. Two outcomes, both
+> worth having:
+>
+> - **TTFT decouples from total and compliance rises.** Report the new figure as
+>   the result and the old one as the pre-fix baseline, naming the defect. A
+>   chapter that says "we measured, found a proxy fault, fixed it, and
+>   re-measured" is stronger evidence of a working method than one that only
+>   ever reports a pass.
+> - **TTFT still tracks total.** Then buffering has a second cause and the ≤86%
+>   stands. Say so.
+>
+> What must NOT happen is the threshold or the measurement moving to meet the
+> target. The instrument stays fixed; only the artefact changes.
+
+### 5.2b Prior reading, retained
 
 An earlier reading of this run attributed its wider TTFT/total gaps (17 ms, 73 ms,
 150 ms, 340 ms, 385 ms, against a uniform 1–4 ms at n=20) to the benchmark fix
