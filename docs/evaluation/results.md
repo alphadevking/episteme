@@ -240,7 +240,7 @@ of them does. Broken out, the picture is far sharper — and far better in place
 | **Attribution** (structural) | 13/13 | **100.0%** |
 | Context Leak | 13/13 | **100.0%** |
 | Tool Routing | 12/13 | **92.3%** |
-| Entity Faithfulness | 11/13 | 84.6% — but see §4.4, not reportable |
+| Entity Faithfulness | 11/13 | 84.6% — but see §4.5, not reportable |
 | Response Format | 8/13 | **61.5%** |
 
 **Context Leak scored 1.00 on all 13 cases, in all five runs.** The leak probe
@@ -249,7 +249,7 @@ injection never once wavered. That is the cleanest security evidence in the whol
 evaluation and belongs in Chapter 4 as such.
 
 Tool Routing's single failure is `news-single-fact-citation`, whose expectation is
-itself contested — see §4.5.
+itself contested — see §4.7.
 
 **Response Format is the dominant failure mode: 4 of the 6 failing cases.** That
 is the finding.
@@ -269,8 +269,8 @@ is the finding.
 | `platform-admin-denied-to-plain-staff` | — | ✓ | ✗ format | **flaky** |
 | `direct-policy-question` | ✗ format | ✗ format | ✗ format | **stable failure** |
 | `multi-role-keeps-student-access` | — | — | ✗ format | first execution |
-| `platform-help-public-tier` | ✗ faith. | — | ✗ faith. | see §4.4 |
-| `news-single-fact-citation` | ✗ routing | ✗ routing | ✗ routing | **stable, see §4.5** |
+| `platform-help-public-tier` | ✗ faith. | — | ✗ faith. | see §4.5 |
+| `news-single-fact-citation` | ✗ routing | ✗ routing | ✗ routing | **stable, see §4.7** |
 
 (— = rate-limited, never executed that run. Run 4 is omitted from this table: it
 executed only the first 8 cases, and reproduced `direct-policy-question` ✗ format,
@@ -282,7 +282,7 @@ Three cases flip between pass and fail across runs with no code change in betwee
 from one run should say so. This is a methodological point worth making explicitly
 rather than hiding.
 
-### 4.2c Attribution — first live run, and the strongest new finding
+### 4.3 Attribution — first live run, and the strongest new finding
 
 The attribution scorer ran live for the first time in run 5.
 
@@ -325,7 +325,7 @@ scorer now says so in its reason line rather than printing an indistinguishable
 > badge stacking actually occurs. Fixed; the news tier will be covered from the
 > next run.
 
-### 4.3 Response-format compliance — the headline defect
+### 4.4 Response-format compliance — the headline defect
 
 **Five of the six run-5 failures were format-contract violations** — the single
 largest defect class in the evaluation, and they span three different clauses:
@@ -353,7 +353,7 @@ of result a design-science chapter should report rather than smooth over: the
 retrieval and access-control layers hold, and the presentation contract is where
 instruction-following degrades.
 
-### 4.4 Entity Faithfulness scores are scorer artifacts — do not report them
+### 4.5 Entity Faithfulness scores are scorer artifacts — do not report them
 
 `direct-policy-question` scored 0.71 (run 2) and 0.78 (run 1). The flagged
 "ungrounded" entities were:
@@ -427,7 +427,7 @@ mark every well-explained answer as a fabrication.
 
 Together with the percentage-formatting artifacts, this is now three independent
 ways the substring method misfires. **Do not report entity faithfulness.** The
-entailment approach in §4.6 is the fix; a fourth patch to the extractor is not.
+entailment approach in §4.8 is the fix; a fourth patch to the extractor is not.
 
 #### Run 4 — fix confirmed active, and it exposed a deeper flaw
 
@@ -512,7 +512,7 @@ summarising the scale without reproducing every row, would both produce this. Th
 honest status is **unresolved**: it needs someone to read the tool's actual
 `answer` payload for that case, not further inference.
 
-### 4.5b Freshness conflict rule — now tested
+### 4.6 Freshness conflict rule — now tested
 
 `buildGroundedContext` instructs the model that when sources disagree on a
 time-varying fact it must state ONLY the most recently dated value. Its own
@@ -547,7 +547,7 @@ and a 2026 officers-page chunk for the same fact, **stale one first** so orderin
 cannot rescue the result. It asserts both arrive with distinguishable dates,
 exactly one is tagged stale, and the conflict instruction accompanies them.
 
-### 4.5 `news-single-fact-citation` — a stale test expectation, not a bug
+### 4.7 `news-single-fact-citation` — a stale test expectation, not a bug
 
 The case expects `unibenNewsTool`; the agent called `groundedResponseTool` in both
 runs and answered correctly with a single citation:
@@ -576,7 +576,7 @@ instructions mandate. Two caveats before closing it out:
    historically resolved from a 2022 handbook. Confirm the name is current before
    citing this as a correct answer.
 
-### 4.6 Attribution correctness — harness built
+### 4.8 Attribution correctness — the harness
 
 `src/evals/attribution.ts`, wired into the prompt evals as a fifth scorer. This
 is §3.18 dimension 2c, and the metric this system uniquely earns the right to
@@ -753,7 +753,7 @@ time-to-first-token. Re-run with `--runs 25`+ once that is settled.
 
 ---
 
-## 4.7 Registry reconciliation — HARNESS BUILT
+## 6. Registry reconciliation — HARNESS BUILT
 
 `src/evals/registry-reconciliation.ts`, running as its own section of the
 retrieval eval. Closes §3.18 dimension 4's third component.
@@ -784,7 +784,7 @@ a reconciliation that examined only one side proves nothing.
 
 ---
 
-## 4.8 Workflow transition replay — HARNESS BUILT, NEEDS AN EXPORTER
+## 7. Workflow transition replay — HARNESS BUILT, NEEDS AN EXPORTER
 
 `src/evals/workflow-replay.ts`. Closes §3.18 dimension 5's rules.
 
@@ -837,7 +837,7 @@ workflow; and an open claim is not a defect by default.
 
 28 tests, deliberately including shapes production may never yet have produced.
 
-### Separation-of-duties controls — added 2026-08-13
+### 7.1 Separation-of-duties controls
 
 The first version checked the status graph and nothing else. A claim that went
 `pending → in_review → approved` with a named actor, inside SLA, passed **even if
@@ -881,7 +881,7 @@ Two corrections the schema forced, both found by reading it rather than assuming
    trail without reading as a violation. Any *other* move out of a terminal
    status has no supported path and stays high.
 
-### Population completeness
+### 7.2 Population completeness
 
 `replayAll` takes a `PopulationScope`, and `formatReplay` prints a **WARNING
 above every figure** when it is not `full`. A control result over rows the query
@@ -889,7 +889,7 @@ happened to be permitted to see is not evidence — the same vacuous-green failu
 as the empty-namespace entitlement cases. The exporter must use a service-role
 client and declare what it read.
 
-### ⚠ Detective, not preventive — state this in Chapter 4
+### 7.3 ⚠ Detective, not preventive — state this in Chapter 4
 
 Everything here finds a violation **after** it happened.
 
@@ -950,7 +950,7 @@ change that is yours to review.
 >    harness default. The configured-vs-fallback distinction in `slaHours` is
 >    correct to have, and currently exercises only the fallback path.
 
-### The exporter — mapper built, query drafted, schema VERIFIED
+### 7.4 The exporter — mapper built, query drafted, schema VERIFIED
 
 `src/evals/claim-history.ts` maps a `verification_claims` row to a
 `ClaimHistory`. 17 tests, and the column names match the database's exactly so
@@ -998,7 +998,7 @@ types.
 
 ---
 
-## 6. System testing (§4.6)
+## 8. System testing (thesis §4.6)
 
 All tests pass on both packages.
 
@@ -1019,7 +1019,7 @@ The count rose from 575 to 652 across this work: 13 tests pinning
 scoring, 14 pinning rate-limit backoff, 23 pinning the grounded-context
 conflict rule, and 14 pinning entitlement vacuity detection.
 
-### 6.1 episteme-core, per module
+### 8.1 episteme-core, per module
 
 | Test file | Suites | Tests |
 | :--- | ---: | ---: |
@@ -1052,7 +1052,7 @@ conflict rule, and 14 pinning entitlement vacuity detection.
 | `mastra/tools/web-search-tool.test.ts` | 3 | 10 |
 | `mastra/workflows/verification-workflow.test.ts` | 1 | 2 |
 
-### 6.2 episteme-chat, per module
+### 8.2 episteme-chat, per module
 
 | Test file | Suites | Tests |
 | :--- | ---: | ---: |
@@ -1068,7 +1068,7 @@ conflict rule, and 14 pinning entitlement vacuity detection.
 | `lib/suggestions.test.ts` | 6 | 13 |
 | `lib/telemetry/latency.test.ts` | 5 | 25 |
 
-### 6.3 Test-runner defect found and fixed
+### 8.3 Test-runner defect found and fixed
 
 Both packages declared their test script with an unquoted glob
 (`tsx --test src/**/*.test.ts`). POSIX `sh` does not implement `**`, so it
@@ -1084,7 +1084,7 @@ No test was failing — 337 were never executing. Any coverage claim from a
 
 ---
 
-## 7. Artefact scale (§4.2)
+## 9. Artefact scale (thesis §4.2)
 
 | Package | Source files | Source LOC | Test files | Test LOC |
 | :--- | ---: | ---: | ---: | ---: |
@@ -1108,19 +1108,19 @@ No test was failing — 337 were never executing. Any coverage claim from a
 
 ---
 
-## 8. Status by evaluation dimension
+## 10. Status by evaluation dimension
 
 | Dimension | Status |
 | :--- | :--- |
 | 1. Retrieval quality | **Measured.** Report with the corpus-composition caveat (§1.1) |
 | 2. Groundedness | **Measured** — tool-routing and format scored |
-| 2b. Faithfulness | **Method unsound — 3 false-positive classes. Do not report** (§4.4) |
-| 2c. Attribution correctness | **MEASURED. 13/13 structural, coverage is the defect** (§4.2c) |
+| 2b. Faithfulness | **Method unsound — 3 false-positive classes. Do not report** (§4.5) |
+| 2c. Attribution correctness | **MEASURED. 13/13 structural, coverage is the defect** (§4.3) |
 | 3. Abstention | **Measured.** 4/4 KB, 2/2 platform, plus 16 unit tests |
 | 4. Latency | **NFR-101 not met: ≤86% vs 95% target** — first-byte timing, §5.1 |
 | 4b. Satisfaction | **No deployed feedback data** |
-| 4c. Registry reconciliation | **Harness built; runs with the retrieval eval** (§4.7) |
-| 5. Workflow integrity | **Rules built and tested; needs a run source** (§4.8) |
+| 4c. Registry reconciliation | **Harness built; runs with the retrieval eval** (§6) |
+| 5. Workflow integrity | **Rules built and tested; needs a run source** (§7) |
 
 ### Outstanding work
 
@@ -1131,6 +1131,6 @@ No test was failing — 337 were never executing. Any coverage claim from a
 5. ~~Make eval concurrency configurable~~ done — `EVAL_MAX_CONCURRENCY`, plus 429 retry
 6. Relax the `news-single-fact-citation` expectation to assert outcome, not tool identity
 7. **[unchanged — needs real documents]** Ingest one `financial-aid` and one `staff-internal` document so the entitlement cases become falsifiable
-8. ~~Write the two remaining harnesses~~ done — both built (§4.7, §4.8)
+8. ~~Write the two remaining harnesses~~ done — both built (§6, §7)
 9. Supply a TransitionRecord exporter so workflow replay has recorded runs to read
 10. Supply an EntailmentJudge to activate ALCE recall/precision
