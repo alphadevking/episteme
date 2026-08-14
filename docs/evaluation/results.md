@@ -907,12 +907,51 @@ validated while a violating row exists. **Not applied.** It is written against
 the generated types rather than a live database, and it is a production schema
 change that is yours to review.
 
-### Still needed
+### The exporter — mapper built, query drafted
 
-An exporter turning `verification_claims` joined to `audit_logs`, `users` and
-`claim_sla_rules` into `ClaimHistory[]`. That query belongs in `episteme-chat`,
-which owns the Supabase client; the rules here decide nothing about where the
-history comes from.
+`src/evals/claim-history.ts` maps a `verification_claims` row to a
+`ClaimHistory`. 17 tests, and the column names match the database's exactly so
+no translation layer sits between query and mapper to get subtly wrong.
+
+**It derives history from the claim's own timestamps, not from `audit_logs`** —
+and that choice is the finding. `audit_logs` would be the richer source, but its
+claim-transition shape cannot be established from outside the database: the only
+audit writes visible in the application are `fn_write_audit_log_for_kb`, for
+knowledge-base actions. The claim RPCs are `SECURITY DEFINER` and may log
+internally, but neither the `action` vocabulary nor whether `new_value` carries
+the status is knowable from the client. Building on an assumed shape would yield
+an empty or wrong history **that reads as a clean audit**.
+
+`created_at`, `assigned_at` and `reviewed_at` are certain, and `assigned_by` /
+`reviewer_id` attribute the transitions they mark.
+
+> ### ⚠ A derived history is a lower bound
+>
+> Columns hold only the *latest* value. A claim reviewed, reopened and reviewed
+> again presents as a single review. So this **can prove a violation occurred,
+> never that none did** — and `reopened` and `post-terminal-change` are
+> unreachable from it entirely.
+>
+> `docs/evaluation/proposed/claim-export.sql` §4 counts the claims this could
+> apply to, so Chapter 4 can state the blind spot with a number rather than as a
+> general caveat.
+
+The tests are mostly adversarial: **a broken row must stay broken through
+derivation.** A claim with `status = approved` and no `assigned_at` derives
+`pending → approved`, which replay then flags critical. Inventing an `in_review`
+step to make the sequence look legal would erase the finding on the way in. Same
+for self-approval, cross-institution reviewers, and decisions with no timestamp
+— the last is emitted with an empty `at` rather than dropped, because dropping it
+would show a claim that never resolved, a cleaner history than the truth.
+
+A missing reviewer institution becomes `null`, never the claim's own — which
+would manufacture a pass for a control that was never evaluated.
+
+`docs/evaluation/proposed/claim-export.sql` drafts the query, including a
+population count to compare against (an export short of it was RLS-filtered and
+must be declared `rls-limited`) and a probe that settles whether `audit_logs`
+carries transitions after all. **Not run** — it is written against generated
+types.
 
 ---
 
@@ -922,13 +961,13 @@ All tests pass on both packages.
 
 | Package | Test files | Suites | Tests | Passing | Failing |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| `episteme-core` | 28 | 119 | 496 | 496 | 0 |
+| `episteme-core` | 29 | 125 | 513 | 513 | 0 |
 | `episteme-chat` | 11 | 55 | 216 | 216 | 0 |
-| **Total** | **39** | **174** | **712** | **712** | **0** |
+| **Total** | **40** | **180** | **729** | **729** | **0** |
 
 `tsc --noEmit` passes clean on `episteme-core`.
 
-Access control accounts for **105 of the 712** tests — retrieval-gate 50,
+Access control accounts for **105 of the 729** tests — retrieval-gate 50,
 record-gate 27, session-context 28 — the direct unit-level evidence for
 Objective 1.
 
@@ -942,6 +981,7 @@ conflict rule, and 14 pinning entitlement vacuity detection.
 | Test file | Suites | Tests |
 | :--- | ---: | ---: |
 | `evals/attribution.test.ts` | 4 | 19 |
+| `evals/claim-history.test.ts` | 6 | 17 |
 | `evals/entitlement-coverage.test.ts` | 4 | 14 |
 | `evals/registry-reconciliation.test.ts` | 6 | 17 |
 | `evals/workflow-replay.test.ts` | 7 | 29 |
