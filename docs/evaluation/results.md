@@ -998,10 +998,36 @@ no translation layer sits between query and mapper to get subtly wrong.
 2026-08-14**, so the mapper is no longer written against generated types alone.
 
 **It derives history from the claim's own timestamps, not from `audit_logs`** —
-a choice made under uncertainty and since **confirmed correct**. `audit_logs`
-contains no claim rows whatsoever; its resource types are `user`, `kb_document`
-and `user_student_link`. Had the exporter been built on an assumed audit shape it
-would have returned an empty history **that reads as a clean audit**.
+a choice made under uncertainty and since **confirmed correct**, though for a
+different reason than first recorded.
+
+When the database was first inspected (2026-08-14, zero claims) `audit_logs` held
+no claim rows at all. After the first real claim was submitted through the
+interface, the picture sharpened:
+
+| Question | Answer |
+| :--- | :--- |
+| Does `fn_submit_verification_claim` write an audit row? | **Yes** — `resource_type=verification_claim`, `action=claim_submitted` |
+| Does it record the actor? | **Yes** |
+| Does it record the resulting **status**? | **No** — `new_value->>'status'` is null |
+
+So the audit trail records *that* a claim was submitted and *by whom*, but not
+*what state it entered*. That is the third of the three outcomes anticipated in
+`proposed/claim-export.sql` §3: a log that records a change without recording
+what changed.
+
+**Consequences:**
+
+- The column-derived history stays the primary source. `audit_logs` cannot
+  replace it, because a status history cannot be reconstructed from rows that
+  omit the status.
+- `audit_logs` *can* enrich it — actor and timestamp per event are exactly what
+  the derivation approximates from `assigned_by` / `reviewer_id`.
+- **There is a small, worthwhile fix at the source:** include the status in
+  `new_value` when the claim RPCs write their audit rows. That single change
+  would make `reopened` and `post-terminal-change` detectable, which the derived
+  history cannot see at all, and would make the audit trail independently
+  sufficient rather than a supplement.
 
 `created_at`, `assigned_at` and `reviewed_at` are certain, and `assigned_by` /
 `reviewer_id` attribute the transitions they mark.
