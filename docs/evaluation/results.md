@@ -70,6 +70,40 @@ the operator's laptop rather than the system.
 > `RERANK_ENABLED=true` confirmed, check the summary says `Relevance judge
 > rerank`, and use that run for Chapter 4.
 
+### Runs are now self-describing — added 2026-08-14
+
+Two runs differing only in `RERANK_ENABLED` produce entirely incomparable
+knowledge-base figures, and until now nothing in a saved transcript said which
+was which. Recovering it meant consulting a shell history that no longer exists.
+
+`run-retrieval-evals.ts` now opens with a **CONFIGURATION UNDER TEST** banner
+before any number is printed:
+
+```
+==============================================================================
+CONFIGURATION UNDER TEST
+==============================================================================
+commit                1ab63e9
+run at                2026-08-14T06:47:47.359Z
+tenant                (unset — GLOBAL documents only)
+credentials           KB ABSENT — knowledge-base tier will skip
+retrieval             k=3  embedding floor=0.68
+rerank                DISABLED  ← the cross-encoder will not rule; see the summary
+cascade repeats       1  (web tier is non-deterministic — consider --repeat 5)
+```
+
+The commit is read from `git rev-parse`, with a `+dirty` suffix when the working
+tree has uncommitted changes. This is not decoration: **twice in this evaluation
+a result was misattributed because the build that produced it was not
+recorded.** A latency improvement was credited to a benchmark fix that was not
+yet in the tree (§5.2b), and two retrieval runs taken at different commits were
+compared as though they were a before/after pair. A saved eval output that
+cannot name its own build cannot be reasoned about after the fact.
+
+The banner prints in `--scores` and `--label` mode too — a threshold
+recommendation is only interpretable against the corpus and judge configuration
+that produced it.
+
 ## 1. Retrieval quality
 
 Both tiers ran against a live index. The **corpus reachability control passed**
@@ -791,6 +825,44 @@ and `x-accel-buffering: no`.
 >
 > What must NOT happen is the threshold or the measurement moving to meet the
 > target. The instrument stays fixed; only the artefact changes.
+
+### 5.2c The benchmark now discriminates the two causes — added 2026-08-14
+
+The 2026-08-13 23:00 re-run could not be interpreted from its own output. TTFT
+tracked total exactly, which is consistent with two entirely different states of
+the world, and telling them apart required a manual `curl` the operator had not
+run:
+
+- the streaming fix is **not in the deployed build** — the route still declares a
+  `Content-Length` it cannot honour, so the platform buffers; or
+- the fix **is** deployed, the route frames the response correctly, and something
+  further up the path buffers regardless.
+
+The first calls for a redeploy and a re-measure. The second is a new finding that
+would require NFR-101 to be restated against total response time. Producing a
+run that cannot distinguish them wastes the run.
+
+`bench-latency.ts` now captures the response framing — `content-length`,
+`transfer-encoding`, and Vercel's `x-vercel-id` — and reports it on **every** run,
+not only failing ones, so a saved transcript stays interpretable:
+
+```
+  Response framing
+    content-length declared   100/100
+    transfer-encoding         (none)
+    deployment                fra1::abc123-1755151234567-0a1b2c3d4e5f
+
+    DIAGNOSIS  the response still declares a Content-Length, so the build under
+               test predates the streaming fix. Redeploy and re-run; these numbers
+               describe the old artefact.
+```
+
+When the body did not stream and no `Content-Length` was declared, it prints the
+opposite diagnosis instead, and says to record the finding rather than re-run.
+
+The deployment identifier serves the same purpose as the commit SHA on the
+retrieval side: a latency figure that cannot name the build it measured is not
+re-derivable, and §5.2b is the record of what that costs.
 
 ### 5.2b Prior reading, retained
 

@@ -20,6 +20,7 @@
  * on live services, so it must never gate `pnpm test`. The scoring rules that
  * must not drift are pure and unit-tested in retrieval-metrics.test.ts.
  */
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { RETRIEVAL_CONFIG, RERANK_CONFIG } from '../mastra/config';
@@ -1233,7 +1234,62 @@ function report(
   return meetsQuality;
 }
 
+/**
+ * The commit the run executed at, or 'unknown' outside a git checkout.
+ *
+ * Not decoration. Twice in this project a result was misattributed because
+ * nobody recorded which build produced it: a latency figure was credited to a
+ * benchmark fix that was not yet in the tree, and a retrieval run was compared
+ * against one taken at a different commit. A saved eval output that cannot name
+ * its own build cannot be reasoned about later.
+ */
+function currentCommit(): string {
+  try {
+    const sha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const dirty = execFileSync('git', ['status', '--porcelain'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return dirty ? `${sha}+dirty` : sha;
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Declare the configuration under test before any number is printed.
+ *
+ * Every run of this script is a candidate artefact for the evaluation chapter,
+ * and two runs differing only in RERANK_ENABLED produce entirely incomparable
+ * knowledge-base figures. A saved transcript must therefore be self-describing:
+ * a reader holding two files should be able to tell which is which without
+ * consulting a shell history that no longer exists.
+ */
+function reportConfiguration() {
+  console.log(bar('CONFIGURATION UNDER TEST'));
+  console.log(`commit                ${currentCommit()}`);
+  console.log(`run at                ${new Date().toISOString()}`);
+  console.log(`tenant                ${EVAL_INSTITUTION_ID ?? '(unset — GLOBAL documents only)'}`);
+  console.log(`credentials           KB ${hasKbCredentials() ? 'present' : 'ABSENT — knowledge-base tier will skip'}`);
+  console.log(`retrieval             k=${K}  embedding floor=${RETRIEVAL_CONFIG.relevanceThreshold}`);
+  console.log(
+    `rerank                ${RERANK_CONFIG.enabled ? 'ENABLED' : 'DISABLED'}` +
+    (RERANK_CONFIG.enabled
+      ? `  model=${RERANK_CONFIG.model}  floor=${RERANK_CONFIG.minScore}  topN=${RERANK_CONFIG.topN}`
+      : '  ← the cross-encoder will not rule; see the summary'),
+  );
+  console.log(`cascade repeats       ${REPEAT}${REPEAT === 1 ? '  (web tier is non-deterministic — consider --repeat 5)' : ''}`);
+}
+
 async function main() {
+  // Before anything measurable. The calibration and label modes get it too:
+  // a threshold recommendation is only interpretable against the corpus and
+  // judge configuration that produced it.
+  reportConfiguration();
+
   if (CORPUS) {
     await inspectCorpus();
     return;

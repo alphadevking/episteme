@@ -64,6 +64,21 @@ interface Sample {
   chunks: number;
   /** Whether a frame carrying generated text was ever identified. */
   streamed: boolean;
+  /**
+   * Whether the response declared a `Content-Length`.
+   *
+   * This is the direct signature of the buffering defect fixed in `4a16769`: a
+   * body with a declared length cannot be sent chunked, so the platform must
+   * buffer it whole. Capturing it distinguishes the two explanations for a
+   * non-streaming run that otherwise look identical — the fix is not deployed
+   * (length still declared) versus the fix is deployed and something further
+   * upstream buffers anyway (no length, still no progressive delivery).
+   */
+  declaredLength: boolean;
+  /** Transfer-encoding as returned, for the same discrimination. */
+  transferEncoding: string | null;
+  /** Vercel's per-deployment identifier, so a run can name the build it hit. */
+  deployment: string | null;
 }
 
 async function measure(query: string, role: string, trust: number): Promise<Sample> {
@@ -86,9 +101,18 @@ async function measure(query: string, role: string, trust: number): Promise<Samp
     }),
   });
 
+  // Read before touching the body: these describe how the response was framed,
+  // which is what decides whether a stream was ever possible.
+  const declaredLength   = res.headers.get('content-length') !== null;
+  const transferEncoding = res.headers.get('transfer-encoding');
+  const deployment       = res.headers.get('x-vercel-id') ?? res.headers.get('x-vercel-deployment-url');
+
   if (!res.ok || !res.body) {
     const elapsed = Date.now() - started;
-    return { query, role, ttftMs: elapsed, totalMs: elapsed, ok: false, chunks: 0, streamed: false };
+    return {
+      query, role, ttftMs: elapsed, totalMs: elapsed, ok: false, chunks: 0, streamed: false,
+      declaredLength, transferEncoding, deployment,
+    };
   }
 
   const reader  = res.body.getReader();
@@ -122,7 +146,10 @@ async function measure(query: string, role: string, trust: number): Promise<Samp
   // here, so report the honest value and let the caller flag it. Publishing the
   // first-read time instead is what produced the misleading 2026-08-13 production
   // figures, where TTFT sat within 4ms of total on all 20 requests.
-  return { query, role, ttftMs: streamed ? ttftMs : totalMs, totalMs, ok: true, chunks, streamed };
+  return {
+    query, role, ttftMs: streamed ? ttftMs : totalMs, totalMs, ok: true, chunks, streamed,
+    declaredLength, transferEncoding, deployment,
+  };
 }
 
 /** Runs tasks with a fixed concurrency cap — same shape as the embedder's. */
@@ -183,6 +210,42 @@ async function main() {
         'TTFT and total are the same event there.',
       );
     }
+  }
+
+  // RESPONSE FRAMING. Printed on every run, not only failing ones, so a saved
+  // transcript can be interpreted later without re-running anything.
+  //
+  // A non-streaming result has two very different causes that the timings alone
+  // cannot separate, and the distinction decides what to do next:
+  //
+  //   content-length present -> the route is still declaring a length it cannot
+  //                             honour. The fix in 4a16769 is not in the build
+  //                             being measured; redeploy before re-measuring.
+  //   content-length absent  -> the route is framing the response correctly and
+  //                             something else in the path is buffering. That is
+  //                             a new finding, and NFR-101 needs restating
+  //                             against total response time.
+  const withLength = ok.filter((s) => s.declaredLength);
+  const deployments = [...new Set(ok.map((s) => s.deployment).filter(Boolean))];
+  console.log('\n  Response framing');
+  console.log(`    content-length declared   ${withLength.length}/${ok.length}`);
+  const encodings = [...new Set(ok.map((s) => s.transferEncoding ?? '(none)'))];
+  console.log(`    transfer-encoding         ${encodings.join(', ')}`);
+  if (deployments.length > 0) {
+    console.log(`    deployment                ${deployments.slice(0, 3).join(', ')}${deployments.length > 3 ? ` (+${deployments.length - 3} more)` : ''}`);
+  }
+  if (buffered.length > 0 && withLength.length > 0) {
+    console.log(
+      '\n    DIAGNOSIS  the response still declares a Content-Length, so the build under\n' +
+      '               test predates the streaming fix. Redeploy and re-run; these numbers\n' +
+      '               describe the old artefact.',
+    );
+  } else if (buffered.length > 0) {
+    console.log(
+      '\n    DIAGNOSIS  no Content-Length is declared, so the route is framing the response\n' +
+      '               correctly and the buffering has a SECOND cause further up the path.\n' +
+      '               This is a new finding — record it rather than re-running.',
+    );
   }
 
   if (ok.length < 100) {
