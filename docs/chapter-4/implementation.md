@@ -1,16 +1,78 @@
-# Chapter 4 — Sections 4.2 to 4.5 (draft)
+# Chapter 4 — Sections 4.1 to 4.6 (draft)
 
-Describes what was built. Every claim here is derived from the repository at
-commit `b63f42e`; performance figures live separately in
-`docs/evaluation/results.md` and are cross-referenced rather than repeated.
+Describes what was built and how it was tested. Every structural claim is derived
+from the repository; every performance figure lives in
+`docs/evaluation/results.md` and is cross-referenced rather than restated, so the
+two documents cannot drift.
 
-**What this draft does not contain**, and cannot:
+**Not included, and cannot be:**
 
 - **Screenshots.** §4.2 needs the chat interface, admin dashboard and claim
-  queue. Those are yours to capture.
-- **§4.9 comparison with existing systems.** That carries forward from Chapter 2.
-- **Anything about the verification workflow in operation.** It has never run —
-  see §4.5.
+  queue. Yours to capture.
+- **§4.7 evaluation results.** Written last, against `results.md`.
+- **§4.9 comparison with existing systems.** Carries forward from Chapter 2.
+
+---
+
+## 4.1 Introduction
+
+This chapter reports the construction and evaluation of Episteme, the
+role-aware grounded retrieval system specified in Chapter 3. It covers the
+artefact as built (§4.2–§4.5), the testing regime applied to it (§4.6), the
+results of evaluating it against the criteria set out in §3.18 (§4.7), and what
+those results mean for the research questions (§4.8).
+
+### 4.1.1 Mapping to the research objectives
+
+| Objective | Implementation | Evaluation |
+| :--- | :--- | :--- |
+| **1.** Enforce role- and trust-aware access to institutional knowledge | §4.3 | §4.7, dimensions 3 and 5 |
+| **2.** Ground responses in verified institutional sources, abstaining where none exist | §4.4 | §4.7, dimensions 1 and 2 |
+| **3.** Provide a human-in-the-loop verification workflow | §4.5 | §4.7, dimension 5 |
+
+### 4.1.2 Evaluation approach
+
+Evaluation follows the five dimensions of §3.18, and takes two complementary
+forms throughout.
+
+**Deterministic testing** covers logic that can be exercised without a network,
+a model, or credentials — access-control policy, chunking, scoring arithmetic,
+transition rules. This is where the security properties are established, because
+a policy that can only be checked against a live system can only be checked
+occasionally.
+
+**Live evaluation** covers behaviour that only exists in the running system —
+retrieval quality against a real index, instruction-following by a real model,
+latency against a real deployment. These are slower, costlier and less
+repeatable, and are treated accordingly: they are scripts rather than tests, and
+they never gate a build.
+
+### 4.1.3 A note on what is and is not claimed
+
+Several results in this chapter are reported as limitations rather than
+achievements, and that is deliberate. Three in particular shape how the chapter
+should be read.
+
+**Not every dimension reached the same evidential strength.** Retrieval,
+abstention, grounding and attribution were measured against live services.
+Workflow integrity was specified, implemented and unit-tested, but at the time of
+writing had almost no execution history — so it is reported as unverified rather
+than as passing. A control that has never run cannot be evidenced by the fact
+that nothing has gone wrong.
+
+**One requirement was not met.** Latency against the deployed system fell short
+of NFR-101, and §4.7 reports the shortfall together with the distribution that
+explains it and the defect subsequently found to be causing it.
+
+**One metric was withdrawn during evaluation.** An entity-level faithfulness
+proxy was implemented, run, and found to misfire in three independent ways. It is
+reported as a methodological finding rather than as a score, because publishing a
+number known to be measuring the wrong thing would be worse than publishing none.
+
+This posture — reporting what the evidence supports and no more — is the same one
+the evaluation instruments themselves were built to enforce, and §4.6 and §4.7
+describe several cases where a harness was corrected after it was found capable
+of reporting success without having examined anything.
 
 ---
 
@@ -362,3 +424,103 @@ considerably easier than adding them after.
 
 The honest formulation for the chapter: *the system specifies and can detect
 these controls; it does not yet prevent them.*
+
+---
+
+## 4.6 System Testing
+
+*Full per-module census: `results.md` §8.*
+
+### 4.6.1 Scale and distribution
+
+| Package | Test files | Suites | Tests | Passing |
+| :--- | ---: | ---: | ---: | ---: |
+| `episteme-core` | 28 | 125 | 513 | 513 |
+| `episteme-chat` | 11 | 55 | 216 | 216 |
+| **Total** | **39** | **180** | **729** | **729** |
+
+All pass; `tsc --noEmit` is clean on both packages.
+
+The distribution is more informative than the total, because it records where
+risk was judged to sit:
+
+| Area | Tests | Why concentrated here |
+| :--- | ---: | :--- |
+| Access control | **105** | Objective 1. A leak is unrecoverable |
+| Evaluation harnesses | 140 | An instrument that misreports is worse than none |
+| Ingestion | 146 | Silent corruption at ingest is invisible downstream |
+| Retrieval tiers | 93 | Where grounding is won or lost |
+| Other (agent, scorers, admin routes, workflow) | 29 | |
+
+Those five groups sum to 513, the whole of `episteme-core`.
+
+### 4.6.2 Access control is tested without a database
+
+The 105 access-control tests — 50 for the retrieval gate, 27 for the record gate,
+28 for session resolution — run with no network, no credentials and no database.
+
+That is a consequence of the design decision in §4.3.2: both gates are pure
+functions. They perform no I/O, read no environment, and construct no clients.
+Policy is therefore exercised exhaustively and cheaply, on every commit, rather
+than occasionally against a live system.
+
+The alternative — asserting access control end to end only — would mean the
+security properties were checked only when someone remembered to run an
+integration suite with real credentials. §4.7 records why that matters
+concretely: the end-to-end entitlement evaluation was found to be partly
+unfalsifiable, and the unit layer is what carries Objective 1.
+
+### 4.6.3 Testing what cannot be tested cheaply
+
+Some logic is load-bearing but sits inside modules that cannot be imported
+without credentials. The response-context builder is the clearest case: it
+attaches the date labels the conflict rule depends on, and it lived in a module
+that constructs a vector-store client at import time. Any unit test of it
+therefore required live credentials, so it had none — the most consequential
+prompt logic in the system was **structurally untestable**.
+
+Extracting it into a pure module made 23 tests possible, covering the labelling
+that a stale-source rule cannot work without. This pattern — separating decision
+logic from the I/O it is embedded in — recurs throughout, and is why scoring,
+policy, ranking arithmetic and transition rules are all testable offline.
+
+### 4.6.4 A defect in the test regime itself
+
+Both packages declared their test script with an unquoted glob:
+
+```
+tsx --test src/**/*.test.ts
+```
+
+POSIX `sh` does not implement `**`. The pattern expanded to a single directory
+level, and the runner silently executed a fraction of the suite — **30 of 367
+tests in one package, 171 of 208 in the other.**
+
+Nothing was failing. 337 tests were simply never running, and every green result
+reported before the fix understated the suite it claimed to represent.
+
+This is worth reporting rather than quietly correcting, because it is an instance
+of the failure mode the evaluation instruments were repeatedly found to share: a
+check that reports success without having examined what it claims to cover.
+§4.7 documents the same shape in three further places — an access-control
+assertion over an empty namespace, a workflow replay over an empty population,
+and a retrieval evaluation that would pass if it could see no corpus at all. Each
+now carries an explicit guard.
+
+### 4.6.5 What the tests do not cover
+
+Deterministic tests establish that the logic is correct. They cannot establish:
+
+- **Model behaviour.** Whether the agent follows an instruction it was correctly
+  given requires a live model — §4.7, dimension 2.
+- **Retrieval quality.** Whether the right document is returned depends on the
+  corpus, not the code — §4.7, dimension 1.
+- **Real-world latency.** Measured against the deployment, not in a test
+  process — §4.7, dimension 4.
+- **Workflow execution.** Transition rules are unit-tested; whether real claims
+  obey them requires real claims — §4.7, dimension 5.
+
+The division is deliberate and is the reason live evaluation runs as scripts
+rather than as tests. Each costs real model and retrieval calls and depends on
+services outside this system; gating a build on them would produce a suite that
+measures a provider's availability rather than this artefact's correctness.
