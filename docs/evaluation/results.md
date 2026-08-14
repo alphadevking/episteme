@@ -907,20 +907,63 @@ validated while a violating row exists. **Not applied.** It is written against
 the generated types rather than a live database, and it is a production schema
 change that is yours to review.
 
-### The exporter — mapper built, query drafted
+> ### ⚠⚠ VERIFIED AGAINST THE LIVE DATABASE, 2026-08-14 — THE WORKFLOW HAS NEVER RUN
+>
+> Supabase project `episteme` (`rnbrtqstjbqxsljiilny`), read-only queries:
+>
+> | Query | Result |
+> | :--- | ---: |
+> | `verification_claims` | **0** |
+> | `claim_sla_rules` | **0** |
+> | `audit_logs` rows for any claim resource | **0** |
+> | Self-reviewed claims | 0 *(of 0)* |
+> | Dual-control breaches | 0 *(of 0)* |
+> | Cross-institution decisions | 0 *(of 0)* |
+> | Decided without assignment | 0 *(of 0)* |
+>
+> The rest of the system has been used — 4 users, 1 institution, 12 chat threads,
+> 37 audit rows for users and KB documents. **The verification workflow
+> specifically has never been exercised. Not one claim has ever been submitted.**
+>
+> **Dimension 5 cannot be reported as measured.** Every control returns zero
+> because the population is zero, which is the definition of a vacuous result —
+> the same failure as the empty-namespace entitlement cases, arrived at from a
+> different direction. `formatReplay` already refuses to let this read as a pass:
+> it prints **UNVERIFIED** and *"This is NOT a pass."* That output is now known
+> to be the system's actual state, not a defensive branch.
+>
+> **What Chapter 4 must say:** the workflow is implemented and its integrity rules
+> are specified and unit-tested, but **no execution evidence exists**. Submitting
+> and resolving even a handful of claims — including one deliberately routed to a
+> second reviewer — would convert this from unverifiable to measured. That is
+> hours of work, not weeks, and it is the highest-value remaining action for
+> this dimension.
+>
+> Two consequences worth noting:
+>
+> 1. **`audit_logs` records nothing for claims.** Its resource types are `user`,
+>    `kb_document` and `user_student_link` only. `fn_submit_verification_claim`
+>    is documented as writing an audit row atomically, and that has never been
+>    observed to happen because no claim has been submitted. Whether it works is
+>    itself untested.
+> 2. **`claim_sla_rules` is empty**, so every claim would fall back to the
+>    harness default. The configured-vs-fallback distinction in `slaHours` is
+>    correct to have, and currently exercises only the fallback path.
+
+### The exporter — mapper built, query drafted, schema VERIFIED
 
 `src/evals/claim-history.ts` maps a `verification_claims` row to a
 `ClaimHistory`. 17 tests, and the column names match the database's exactly so
 no translation layer sits between query and mapper to get subtly wrong.
 
+**Every column in `ClaimRow` was confirmed present against the live schema on
+2026-08-14**, so the mapper is no longer written against generated types alone.
+
 **It derives history from the claim's own timestamps, not from `audit_logs`** —
-and that choice is the finding. `audit_logs` would be the richer source, but its
-claim-transition shape cannot be established from outside the database: the only
-audit writes visible in the application are `fn_write_audit_log_for_kb`, for
-knowledge-base actions. The claim RPCs are `SECURITY DEFINER` and may log
-internally, but neither the `action` vocabulary nor whether `new_value` carries
-the status is knowable from the client. Building on an assumed shape would yield
-an empty or wrong history **that reads as a clean audit**.
+a choice made under uncertainty and since **confirmed correct**. `audit_logs`
+contains no claim rows whatsoever; its resource types are `user`, `kb_document`
+and `user_student_link`. Had the exporter been built on an assumed audit shape it
+would have returned an empty history **that reads as a clean audit**.
 
 `created_at`, `assigned_at` and `reviewed_at` are certain, and `assigned_by` /
 `reviewer_id` attribute the transitions they mark.
