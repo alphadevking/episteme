@@ -203,3 +203,43 @@ export function formatLatencySummary(summary: LatencySummary): string {
 
   return lines.join('\n');
 }
+
+/**
+ * True when one decoded stream line carries generated text a user would see.
+ *
+ * WHY THIS LIVES HERE AND NOT IN THE BENCHMARK. Timing the first chunk off the
+ * HTTP reader does not measure time-to-first-token: the transport emits protocol
+ * scaffolding first — SSE preamble, start frames, tool-call frames — and on a
+ * buffered endpoint the entire body arrives as one chunk. The 2026-08-13
+ * benchmark did exactly that and reported TTFT p50=56ms locally (far too fast to
+ * be a real first token) while production showed TTFT within 4ms of total on all
+ * 20 requests. Stream parsing is therefore load-bearing for the headline number,
+ * which makes it exactly the kind of logic that must be unit-tested rather than
+ * left inline in a script that only runs against a live endpoint.
+ *
+ * Recognises the AI SDK data-stream shape (`data: {"type":"text-delta",…}`) and
+ * the legacy prefixed protocol (`0:"token"`). Anything unrecognised returns
+ * false, so the caller reports "not streamed" instead of publishing a number
+ * that looks like a TTFT and is not one.
+ */
+export function carriesText(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+
+  const payload = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
+  if (!payload || payload === '[DONE]') return false;
+
+  if (payload.startsWith('{')) {
+    try {
+      const frame = JSON.parse(payload) as Record<string, unknown>;
+      const type  = typeof frame['type'] === 'string' ? (frame['type'] as string) : '';
+      if (!type.includes('text')) return false;
+      const text = frame['delta'] ?? frame['textDelta'] ?? frame['text'];
+      return typeof text === 'string' && text.length > 0;
+    } catch {
+      return false; // partial frame — the caller's line buffer presents it whole later
+    }
+  }
+
+  return /^0:"/.test(payload) && payload !== '0:""';
+}

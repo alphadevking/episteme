@@ -20,6 +20,7 @@
  * It does consume model tokens — that is the cost of measuring the real thing.
  */
 import {
+  carriesText,
   describe as describeDistribution,
   formatLatencySummary,
   summarizeLatency,
@@ -53,11 +54,37 @@ function arg(name: string, fallback: number): number {
 const RUNS        = arg('runs', 3);
 const CONCURRENCY = arg('concurrency', 1);
 
-interface Sample { query: string; role: string; ttftMs: number; totalMs: number; ok: boolean }
+interface Sample {
+  query: string;
+  role: string;
+  ttftMs: number;
+  totalMs: number;
+  ok: boolean;
+  /** Reads that delivered bytes. 1 means the whole body arrived in one piece. */
+  chunks: number;
+  /** Whether a frame carrying generated text was ever identified. */
+  streamed: boolean;
+  /**
+   * Whether the response declared a `Content-Length`.
+   *
+   * This is the direct signature of the buffering defect fixed in `4a16769`: a
+   * body with a declared length cannot be sent chunked, so the platform must
+   * buffer it whole. Capturing it distinguishes the two explanations for a
+   * non-streaming run that otherwise look identical — the fix is not deployed
+   * (length still declared) versus the fix is deployed and something further
+   * upstream buffers anyway (no length, still no progressive delivery).
+   */
+  declaredLength: boolean;
+  /** Transfer-encoding as returned, for the same discrimination. */
+  transferEncoding: string | null;
+  /** Vercel's per-deployment identifier, so a run can name the build it hit. */
+  deployment: string | null;
+}
 
 async function measure(query: string, role: string, trust: number): Promise<Sample> {
   const started = Date.now();
   let ttftMs = -1;
+  let chunks = 0;
 
   const res = await fetch(`${BASE_URL.replace(/\/$/, '')}/chat/${encodeURIComponent(AGENT_ID)}`, {
     method: 'POST',
@@ -74,19 +101,55 @@ async function measure(query: string, role: string, trust: number): Promise<Samp
     }),
   });
 
+  // Read before touching the body: these describe how the response was framed,
+  // which is what decides whether a stream was ever possible.
+  const declaredLength   = res.headers.get('content-length') !== null;
+  const transferEncoding = res.headers.get('transfer-encoding');
+  const deployment       = res.headers.get('x-vercel-id') ?? res.headers.get('x-vercel-deployment-url');
+
   if (!res.ok || !res.body) {
-    return { query, role, ttftMs: Date.now() - started, totalMs: Date.now() - started, ok: false };
+    const elapsed = Date.now() - started;
+    return {
+      query, role, ttftMs: elapsed, totalMs: elapsed, ok: false, chunks: 0, streamed: false,
+      declaredLength, transferEncoding, deployment,
+    };
   }
 
-  const reader = res.body.getReader();
-  // Read to completion: first chunk gives TTFT, stream close gives total.
+  const reader  = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  // Read to completion, timing the first CONTENT frame rather than the first
+  // read. Whole lines only: a frame split across a chunk boundary will not parse,
+  // and treating that as "no content yet" would push TTFT artificially later.
   for (;;) {
-    const { done } = await reader.read();
-    if (ttftMs === -1) ttftMs = Date.now() - started;
+    const { done, value } = await reader.read();
     if (done) break;
+    if (!value || value.length === 0) continue;
+
+    chunks++;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    if (ttftMs === -1 && lines.some(carriesText)) ttftMs = Date.now() - started;
   }
 
-  return { query, role, ttftMs, totalMs: Date.now() - started, ok: true };
+  buffer += decoder.decode();
+  if (ttftMs === -1 && buffer.split('\n').some(carriesText)) ttftMs = Date.now() - started;
+
+  const totalMs  = Date.now() - started;
+  const streamed = ttftMs !== -1;
+
+  // No identifiable content frame — the endpoint buffered the whole body, or it
+  // speaks a protocol this script does not know. Either way TTFT is unmeasurable
+  // here, so report the honest value and let the caller flag it. Publishing the
+  // first-read time instead is what produced the misleading 2026-08-13 production
+  // figures, where TTFT sat within 4ms of total on all 20 requests.
+  return {
+    query, role, ttftMs: streamed ? ttftMs : totalMs, totalMs, ok: true, chunks, streamed,
+    declaredLength, transferEncoding, deployment,
+  };
 }
 
 /** Runs tasks with a fixed concurrency cap — same shape as the embedder's. */
@@ -123,9 +186,74 @@ async function main() {
   const failed = samples.length - ok.length;
 
   for (const s of ok) {
-    console.log(`  ${String(s.ttftMs).padStart(6)}ms ttft  ${String(s.totalMs).padStart(6)}ms total  [${s.role}] ${s.query}`);
+    const mark = s.streamed ? '' : '   ← not streamed';
+    console.log(`  ${String(s.ttftMs).padStart(6)}ms ttft  ${String(s.totalMs).padStart(6)}ms total  [${s.role}] ${s.query}${mark}`);
   }
   if (failed > 0) console.log(`\n  ${failed} request(s) failed — excluded from the distribution.`);
+
+  // VALIDITY GATE. A TTFT number is only a time-to-first-token if the response
+  // actually streamed. Say so loudly rather than letting a buffered response be
+  // written up as if it met a first-token target.
+  const buffered = ok.filter((s) => !s.streamed);
+  if (buffered.length > 0) {
+    console.log(
+      `\n  WARNING  ${buffered.length}/${ok.length} response(s) carried no identifiable content frame.\n` +
+      '           The endpoint buffered the body, or speaks a protocol this script does not\n' +
+      '           recognise. For those rows TTFT EQUALS total response time and is NOT a\n' +
+      '           time-to-first-token. Do not report NFR-101 from this run until that is resolved.',
+    );
+  } else {
+    const singleChunk = ok.filter((s) => s.chunks <= 1);
+    if (singleChunk.length > 0) {
+      console.log(
+        `\n  NOTE  ${singleChunk.length}/${ok.length} response(s) arrived in a single chunk — ` +
+        'TTFT and total are the same event there.',
+      );
+    }
+  }
+
+  // RESPONSE FRAMING. Printed on every run, not only failing ones, so a saved
+  // transcript can be interpreted later without re-running anything.
+  //
+  // A non-streaming result has two very different causes that the timings alone
+  // cannot separate, and the distinction decides what to do next:
+  //
+  //   content-length present -> the route is still declaring a length it cannot
+  //                             honour. The fix in 4a16769 is not in the build
+  //                             being measured; redeploy before re-measuring.
+  //   content-length absent  -> the route is framing the response correctly and
+  //                             something else in the path is buffering. That is
+  //                             a new finding, and NFR-101 needs restating
+  //                             against total response time.
+  const withLength = ok.filter((s) => s.declaredLength);
+  const deployments = [...new Set(ok.map((s) => s.deployment).filter(Boolean))];
+  console.log('\n  Response framing');
+  console.log(`    content-length declared   ${withLength.length}/${ok.length}`);
+  const encodings = [...new Set(ok.map((s) => s.transferEncoding ?? '(none)'))];
+  console.log(`    transfer-encoding         ${encodings.join(', ')}`);
+  if (deployments.length > 0) {
+    console.log(`    deployment                ${deployments.slice(0, 3).join(', ')}${deployments.length > 3 ? ` (+${deployments.length - 3} more)` : ''}`);
+  }
+  if (buffered.length > 0 && withLength.length > 0) {
+    console.log(
+      '\n    DIAGNOSIS  the response still declares a Content-Length, so the build under\n' +
+      '               test predates the streaming fix. Redeploy and re-run; these numbers\n' +
+      '               describe the old artefact.',
+    );
+  } else if (buffered.length > 0) {
+    console.log(
+      '\n    DIAGNOSIS  no Content-Length is declared, so the route is framing the response\n' +
+      '               correctly and the buffering has a SECOND cause further up the path.\n' +
+      '               This is a new finding — record it rather than re-running.',
+    );
+  }
+
+  if (ok.length < 100) {
+    console.log(
+      `\n  NOTE  n=${ok.length}. Nearest-rank p99 over ${ok.length} samples is just the maximum ` +
+      'observation.\n        Quote p50/p95, or raise --runs, before citing a percentile.',
+    );
+  }
   if (ok.length === 0) {
     console.error('\nNo successful requests; nothing to summarize.');
     process.exit(1);

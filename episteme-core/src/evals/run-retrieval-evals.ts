@@ -20,6 +20,7 @@
  * on live services, so it must never gate `pnpm test`. The scoring rules that
  * must not drift are pure and unit-tested in retrieval-metrics.test.ts.
  */
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { RETRIEVAL_CONFIG, RERANK_CONFIG } from '../mastra/config';
@@ -47,6 +48,10 @@ import {
 
 const K = RETRIEVAL_CONFIG.maxResults;
 
+/** Served from disk, never from the index — excluded from reconciliation. */
+const PLATFORM_HELP_NS  = 'platform-help';
+const PLATFORM_ADMIN_NS = 'platform-admin';
+
 // Quality gates for --strict. Deliberately conservative: this is a floor that
 // catches regressions, not a target. Raise them as the labelled set grows.
 const MIN_PRECISION           = Number(process.env['EVAL_MIN_PRECISION']   ?? 0.7);
@@ -59,6 +64,24 @@ const LABEL  = args.includes('--label');
 const STRICT = args.includes('--strict');
 const CORPUS = args.includes('--corpus');
 const SCORES = args.includes('--scores');
+
+/**
+ * How many times to run each cascade case.
+ *
+ * The web tier is NOT deterministic — it depends on what a live search returns
+ * against the uniben.edu allowlist — so a single observation cannot tell a
+ * regression from a flake. On 2026-08-13 the transcript query resolved from the
+ * web tier in one run and reached tier=none in the next, same corpus, no code
+ * change, and there was no way to say which reading was right.
+ *
+ *   --repeat 5    run every cascade case five times and report the distribution
+ */
+const REPEAT = (() => {
+  const i = args.indexOf('--repeat');
+  if (i === -1) return 1;
+  const n = Number(args[i + 1]);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
+})();
 
 /**
  * The tenant whose documents the eval should be able to see.
@@ -179,6 +202,21 @@ async function runKbCases() {
   const abstentionResults: boolean[] = [];
   const failures: string[] = [];
 
+  // WHICH JUDGE ACTUALLY RULED, observed per case rather than read from config.
+  //
+  // Reranking is FAIL-SOFT: any error falls back to embedding order and still
+  // answers, and it is off by default so it ships dark. Either way the run
+  // produces numbers with no indication that the mechanism under test was
+  // absent — which is exactly what happened on 2026-08-13, when abstention
+  // dropped to 3/4 and the whole cascade collapsed to the KB tier with nothing
+  // in the output saying why.
+  //
+  // config.ts already predicts the signature: "weather in Benin City" hits the
+  // handbook at 0.744 on embeddings alone. A result set judged by embedding is
+  // therefore not comparable with one judged by cross-encoder, and reporting
+  // them under the same heading invites exactly that comparison.
+  const judges = new Set<string>();
+
   for (const c of KB_CASES) {
     const res = await retrieveKnowledge({
       query: c.query,
@@ -191,6 +229,8 @@ async function runKbCases() {
       programme: c.programme,
       level: c.level,
     });
+
+    if (res.found) judges.add(res.judgedBy);
 
     const retrieved: RetrievedItem[] = res.found
       ? res.results.map((r) => ({ source: r.source, score: res.maxScore }))
@@ -237,7 +277,11 @@ async function runKbCases() {
     }
   }
 
-  return { summary: summarize(retrievalScores, abstentionResults), failures };
+  return {
+    summary: summarize(retrievalScores, abstentionResults),
+    failures,
+    judges: [...judges].sort(),
+  };
 }
 
 // ── Threshold calibration (--scores) ─────────────────────────────────────────
@@ -535,6 +579,10 @@ async function runCascadeCases() {
   const { SESSION_KEYS } = await import('../mastra/server/session-context');
   const { groundedResponseTool } = await import('../mastra/tools/grounded-response-tool');
 
+  if (REPEAT > 1) {
+    console.log(`  Running each case ${REPEAT} times to separate flake from regression.\n`);
+  }
+
   for (const c of CASCADE_CASES) {
     const rc = new RequestContext();
     rc.set(SESSION_KEYS.role, c.role);
@@ -543,26 +591,51 @@ async function runCascadeCases() {
     rc.set(SESSION_KEYS.isPlatformAdmin, c.isPlatformAdmin === true);
     if (EVAL_INSTITUTION_ID) rc.set(SESSION_KEYS.institutionId, EVAL_INSTITUTION_ID);
 
-    try {
-      const result = await (groundedResponseTool.execute as unknown as (
-        input: unknown, ctx: unknown,
-      ) => Promise<{ tier?: string; confidence?: string }>)(
-        { query: c.query },
-        { requestContext: rc },
-      );
+    // Tier per attempt. With --repeat this is the whole point: a query that
+    // answers 4 times out of 5 is a non-deterministic fallback, not a defect,
+    // and only the distribution can say so.
+    const tiers: string[] = [];
+    let confidence = 'unknown';
 
-      const tier = result?.tier ?? 'unknown';
-      const confidence = result?.confidence ?? 'unknown';
-      // Flag both failure shapes: nothing answered when something should have,
-      // and the WRONG tier answering — which is how the platform/KB hijack
-      // showed up in the first place.
-      const flag =
-        c.expectAnswered && tier === 'none' ? '  ← expected a fallback tier to answer this'
-        : c.expectTier && tier !== c.expectTier ? `  ← expected tier=${c.expectTier}`
-        : '';
-      console.log(`  tier=${String(tier).padEnd(9)} confidence=${String(confidence).padEnd(5)} ${c.query}${flag}`);
-    } catch (err) {
-      console.log(`  ERROR     ${c.query}: ${(err as Error).message}`);
+    for (let attempt = 0; attempt < REPEAT; attempt++) {
+      try {
+        const result = await (groundedResponseTool.execute as unknown as (
+          input: unknown, ctx: unknown,
+        ) => Promise<{ tier?: string; confidence?: string }>)(
+          { query: c.query },
+          { requestContext: rc },
+        );
+        tiers.push(result?.tier ?? 'unknown');
+        confidence = result?.confidence ?? 'unknown';
+      } catch (err) {
+        tiers.push('ERROR');
+        if (REPEAT === 1) console.log(`  ERROR     ${c.query}: ${(err as Error).message}`);
+      }
+    }
+
+    // Tally, most frequent first.
+    const tally = new Map<string, number>();
+    for (const t of tiers) tally.set(t, (tally.get(t) ?? 0) + 1);
+    const ranked = [...tally].sort((a, b) => b[1] - a[1]);
+    const dominant = ranked[0]?.[0] ?? 'unknown';
+
+    // Flag both failure shapes: nothing answered when something should have,
+    // and the WRONG tier answering — which is how the platform/KB hijack
+    // showed up in the first place. Judged on the DOMINANT tier, so one flaky
+    // attempt does not condemn a case that mostly works.
+    const flag =
+      c.expectAnswered && dominant === 'none' ? '  ← expected a fallback tier to answer this'
+      : c.expectTier && dominant !== c.expectTier ? `  ← expected tier=${c.expectTier}`
+      : '';
+
+    if (REPEAT === 1) {
+      console.log(`  tier=${dominant.padEnd(9)} confidence=${String(confidence).padEnd(5)} ${c.query}${flag}`);
+    } else {
+      const spread = ranked.map(([t, n]) => `${t}x${n}`).join(' ');
+      // An unstable case is the finding. Say so on the line itself rather than
+      // leaving a reader to compare counts across runs by eye.
+      const stability = ranked.length > 1 ? '  ← UNSTABLE' : '';
+      console.log(`  ${spread.padEnd(22)} ${c.query}${flag}${stability}`);
     }
   }
 
@@ -684,14 +757,29 @@ async function runEntitlementCases() {
   }
 
   const { Pinecone } = await import('@pinecone-database/pinecone');
-  const { resolveNamespacesForRoles, expandAudienceRoles, GLOBAL_INSTITUTION } =
-    await import('../mastra/security/retrieval-gate');
+  const {
+    resolveNamespacesForRoles, expandAudienceRoles, GLOBAL_INSTITUTION,
+    ROLE_NAMESPACES, TRUST_NAMESPACES,
+  } = await import('../mastra/security/retrieval-gate');
+  const { assessExclusionCoverage, formatExclusionCoverage, knownNamespaces } =
+    await import('./entitlement-coverage');
   const retrieveKnowledge = await loadRetriever();
 
   const index = new Pinecone({ apiKey: process.env['PINECONE_API_KEY']! })
     .index({ name: process.env['PINECONE_INDEX']! });
 
+  // A vector census, so the harness can tell an exclusion that WITHHELD content
+  // from one that merely described an empty namespace. Pinecone omits empty
+  // namespaces entirely, so an absent key means zero.
+  const indexStats = await index.describeIndexStats();
+  const census: Record<string, number> = Object.fromEntries(
+    Object.entries(indexStats.namespaces ?? {})
+      .map(([ns, st]) => [ns, (st as { recordCount?: number }).recordCount ?? 0]),
+  );
+  const universe = knownNamespaces(ROLE_NAMESPACES, TRUST_NAMESPACES);
+
   const failures: string[] = [];
+  const vacuousCases: string[] = [];
   let chunksInspected = 0;
   let casesWithResults = 0;
 
@@ -774,14 +862,89 @@ async function runEntitlementCases() {
       }
     }
 
+    // Could this case's exclusions have failed at all? A green access-control
+    // result nobody can falsify is worse than a red one — it gets written up as
+    // evidence. Reported per case rather than aggregated so the specific
+    // assertion that is hollow is named.
+    const coverage = assessExclusionCoverage(allowedNamespaces, universe, census);
+    if (coverage.whollyVacuous) vacuousCases.push(c.id);
+
     console.log(
       `${violations.length === 0 ? 'PASS' : 'FAIL'}  ${c.id}  ` +
       `(${res.results.length} chunk(s), namespaces: ${allowedNamespaces.join(', ')})`,
     );
+    console.log(`        exclusions: ${formatExclusionCoverage(coverage)}`);
     for (const v of violations) failures.push(`${c.id}: ${v}`);
   }
 
-  return { failures, chunksInspected, casesWithResults, totalCases: KB_ENTITLEMENT_CASES.length };
+  if (vacuousCases.length > 0) {
+    console.log(
+      `\n  WARNING  ${vacuousCases.length} case(s) rest ENTIRELY on empty namespaces: ` +
+      `${vacuousCases.join(', ')}.\n` +
+      '           Every exclusion they assert is unfalsifiable against this corpus — nothing\n' +
+      '           is there to leak. They cannot be cited as access-control evidence until a\n' +
+      '           document is ingested into the namespaces they guard.',
+    );
+  }
+
+  return {
+    failures, chunksInspected, casesWithResults,
+    totalCases: KB_ENTITLEMENT_CASES.length, vacuousCases,
+  };
+}
+
+// ── Registry reconciliation (does the registry match the index?) ─────────────
+
+/**
+ * The registry and the index are written by the same ingestion run and nothing
+ * keeps them in step afterwards — by design, since db.ts deliberately keeps the
+ * registry off the chat path. This is the only check that notices when they part.
+ */
+async function runRegistryReconciliation(): Promise<{ reconciled: boolean } | null> {
+  console.log(bar('REGISTRY RECONCILIATION (kb_documents vs resident vectors)'));
+
+  if (!hasKbCredentials()) {
+    console.log('SKIPPED — KB credentials not set.');
+    return null;
+  }
+
+  const { Pinecone } = await import('@pinecone-database/pinecone');
+  const { reconcileRegistry, formatReconciliation } = await import('./registry-reconciliation');
+
+  let documents;
+  try {
+    const { listDocuments } = await import('../mastra/ingestion/kb-store');
+    documents = await listDocuments();
+  } catch (err) {
+    // The registry is deliberately not on the chat path, so it can be
+    // unreachable while everything else here works. Say which half failed
+    // rather than reporting a reconciliation result that examined one side.
+    console.log(`SKIPPED — the registry is unreachable: ${(err as Error).message}`);
+    console.log('Reconciliation needs LIBSQL_URL; the index side alone proves nothing.');
+    return null;
+  }
+
+  const index = new Pinecone({ apiKey: process.env['PINECONE_API_KEY']! })
+    .index({ name: process.env['PINECONE_INDEX']! });
+  const stats = await index.describeIndexStats();
+  const census: Record<string, number> = Object.fromEntries(
+    Object.entries(stats.namespaces ?? {})
+      .map(([ns, st]) => [ns, (st as { recordCount?: number }).recordCount ?? 0]),
+  );
+
+  // The platform tier ships in the repository and is read from disk, so it has
+  // no registry rows by design and must not be reported as unregistered.
+  const report = reconcileRegistry(
+    documents.map((d) => ({
+      docId: d.docId, fileName: d.fileName,
+      namespace: d.namespace, vectorsUpserted: d.vectorsUpserted,
+    })),
+    census,
+    [PLATFORM_HELP_NS, PLATFORM_ADMIN_NS],
+  );
+
+  console.log(formatReconciliation(report));
+  return { reconciled: report.reconciled };
 }
 
 // ── Suggestion chips (the product's promises) ────────────────────────────────
@@ -1071,7 +1234,62 @@ function report(
   return meetsQuality;
 }
 
+/**
+ * The commit the run executed at, or 'unknown' outside a git checkout.
+ *
+ * Not decoration. Twice in this project a result was misattributed because
+ * nobody recorded which build produced it: a latency figure was credited to a
+ * benchmark fix that was not yet in the tree, and a retrieval run was compared
+ * against one taken at a different commit. A saved eval output that cannot name
+ * its own build cannot be reasoned about later.
+ */
+function currentCommit(): string {
+  try {
+    const sha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const dirty = execFileSync('git', ['status', '--porcelain'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return dirty ? `${sha}+dirty` : sha;
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Declare the configuration under test before any number is printed.
+ *
+ * Every run of this script is a candidate artefact for the evaluation chapter,
+ * and two runs differing only in RERANK_ENABLED produce entirely incomparable
+ * knowledge-base figures. A saved transcript must therefore be self-describing:
+ * a reader holding two files should be able to tell which is which without
+ * consulting a shell history that no longer exists.
+ */
+function reportConfiguration() {
+  console.log(bar('CONFIGURATION UNDER TEST'));
+  console.log(`commit                ${currentCommit()}`);
+  console.log(`run at                ${new Date().toISOString()}`);
+  console.log(`tenant                ${EVAL_INSTITUTION_ID ?? '(unset — GLOBAL documents only)'}`);
+  console.log(`credentials           KB ${hasKbCredentials() ? 'present' : 'ABSENT — knowledge-base tier will skip'}`);
+  console.log(`retrieval             k=${K}  embedding floor=${RETRIEVAL_CONFIG.relevanceThreshold}`);
+  console.log(
+    `rerank                ${RERANK_CONFIG.enabled ? 'ENABLED' : 'DISABLED'}` +
+    (RERANK_CONFIG.enabled
+      ? `  model=${RERANK_CONFIG.model}  floor=${RERANK_CONFIG.minScore}  topN=${RERANK_CONFIG.topN}`
+      : '  ← the cross-encoder will not rule; see the summary'),
+  );
+  console.log(`cascade repeats       ${REPEAT}${REPEAT === 1 ? '  (web tier is non-deterministic — consider --repeat 5)' : ''}`);
+}
+
 async function main() {
+  // Before anything measurable. The calibration and label modes get it too:
+  // a threshold recommendation is only interpretable against the corpus and
+  // judge configuration that produced it.
+  reportConfiguration();
+
   if (CORPUS) {
     await inspectCorpus();
     return;
@@ -1114,9 +1332,32 @@ async function main() {
   const suggestions = await runSuggestionCases();
   const entitlement = await runEntitlementCases();
   await runCascadeCases();
+  await runRegistryReconciliation();
 
   console.log(bar('SUMMARY'));
   const platformOk = report('Platform documentation tier', platform);
+  if (kb && kb.judges.length > 0) {
+    const rerankRuled = kb.judges.includes('rerank');
+    console.log(
+      `\nRelevance judge   ${kb.judges.join(' + ')}` +
+      (rerankRuled ? '' : '   ← CROSS-ENCODER DID NOT RULE'),
+    );
+    if (!rerankRuled) {
+      // Not a footnote. Every KB figure below was produced without the mechanism
+      // the abstention numbers depend on, and is not comparable with a run where
+      // it ruled.
+      console.log(
+        '  Every knowledge-base figure below was judged by EMBEDDING SIMILARITY alone.\n' +
+        '  config.ts records why that matters: in-domain (0.694-0.808) and out-of-domain\n' +
+        '  (0.611-0.744) scores OVERLAP, so no threshold separates them and out-of-domain\n' +
+        '  probes get answered. Expect degraded abstention and a cascade that never falls\n' +
+        '  through to the news, web or platform tiers.\n' +
+        '  Either RERANK_ENABLED is unset (it defaults to FALSE) or reranking failed and\n' +
+        '  fell soft to embedding order. Do not compare these numbers with a reranked run.',
+      );
+    }
+  }
+
   const kbOk       = report('Knowledge base tier', kb);
 
   // An abstention score computed against an invisible corpus is not a result.
@@ -1164,6 +1405,14 @@ async function main() {
     console.log('\nEntitlement');
     console.log(`  cases          ${entitlement.casesWithResults}/${entitlement.totalCases} returned results`);
     console.log(`  chunks checked ${entitlement.chunksInspected}`);
+    if (entitlement.vacuousCases.length > 0) {
+      // Surfaced in the summary as well as inline: a reader who skims to the
+      // bottom must not carry away "no violations" without this attached to it.
+      console.log(
+        `  vacuous        ${entitlement.vacuousCases.length}/${entitlement.totalCases} ` +
+        `case(s) assert only about EMPTY namespaces — not evidence`,
+      );
+    }
     if (entitlement.chunksInspected === 0) {
       // Every case returned nothing, so nothing was actually verified. Saying
       // "PASS" here would be the most dangerous possible output: a security

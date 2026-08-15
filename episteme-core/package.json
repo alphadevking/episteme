@@ -5,7 +5,7 @@
   "main": "index.js",
   "bin": "dist/stdio.mjs",
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "dev": "mastra dev",
     "build": "mastra build",

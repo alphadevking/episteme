@@ -378,5 +378,31 @@ export async function POST(req: Request) {
 
   const headers = new Headers(upstreamResponse.headers);
   headers.set("x-episteme-proxy", "mastra");
+
+  // ── Keep the response STREAMED end to end ──────────────────────────────────
+  //
+  // The body above is piped through two transforms, and sanitizeTransform DROPS
+  // malformed chunks — so the upstream byte count no longer describes what we
+  // send. Copying the upstream headers verbatim carried `content-length` (and
+  // possibly `content-encoding`) onto a body that no longer matches them.
+  //
+  // That is a correctness bug before it is a performance one: a response with a
+  // declared length cannot be sent chunked, so the platform must buffer the
+  // whole body to honour the number — and the number is wrong anyway.
+  //
+  // Measured symptom, 2026-08-13 (results.md §5): against the deployment, TTFT
+  // landed within 2-4ms of total on all 20 requests and within a few ms on 100,
+  // i.e. the first byte arrived only as the last one did. NFR-101 was assessed
+  // at <=86% on that basis. Locally, where nothing re-buffers, the same code
+  // streamed normally — which is why this only ever showed up in production.
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+
+  // Ask intermediaries not to buffer or rewrite the stream. `no-transform` stops
+  // a proxy compressing it (which would re-introduce buffering), and
+  // X-Accel-Buffering is the explicit opt-out honoured by nginx-family proxies.
+  headers.set("cache-control", "no-cache, no-transform");
+  headers.set("x-accel-buffering", "no");
+
   return new Response(instrumentedBody, { status: upstreamResponse.status, headers });
 }

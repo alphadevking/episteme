@@ -33,6 +33,18 @@ const { mastra }         = await import('../mastra/index');
 const { SESSION_KEYS }   = await import('../mastra/server/session-context');
 const { promptEvalCases } = await import('./prompt-eval-dataset');
 const { promptEvalScorers } = await import('./prompt-eval-scorers');
+const { withRetry, totalBackoffMs } = await import('./retry');
+
+/**
+ * Concurrency is env-configurable and defaults to 1.
+ *
+ * It was hardcoded at 2, which meant the only way to slow a run down was to
+ * edit this file — an edit that `git pull` then silently discarded, which is
+ * exactly what happened between runs 3 and 4 and cost five cases. Serial is the
+ * right default: 13 cases against a 50k tokens/minute ceiling has headroom one
+ * at a time, and an eval that finishes slowly beats one that finishes wrong.
+ */
+const MAX_CONCURRENCY = Math.max(1, Number(process.env['EVAL_MAX_CONCURRENCY'] ?? 1) || 1);
 
 import type { PromptEvalCase } from './prompt-eval-dataset';
 import type { EvalRunOutput } from './prompt-eval-scorers';
@@ -81,35 +93,81 @@ const summary = await runExperiment(mastra, {
   })),
   task: async ({ input }): Promise<EvalRunOutput> => {
     const c = input as PromptEvalCase;
-    const result = await agent.generate(c.query, {
-      system: c.system,
-      requestContext: buildRequestContext(c),
-    });
+    // A 429 means the case was never asked, not that it answered badly. Waiting
+    // out the per-minute window turns a lost measurement back into a real one.
+    const result = await withRetry(
+      () => agent.generate(c.query, {
+        system: c.system,
+        requestContext: buildRequestContext(c),
+      }),
+      {
+        onRetry: (attempt, delayMs) =>
+          console.log(`  … ${c.id}: rate limited, retry ${attempt} in ${delayMs / 1000}s`),
+      },
+    );
 
     const toolsCalled = (result.toolCalls ?? []).map(toolName).filter(Boolean);
 
     let groundedConfidence: 'high' | 'low' | undefined;
     let toolAnswer: string | undefined;
+    // Any source-bearing tier counts — the attribution scorer asks whether the
+    // prose's [N](cite:N) badges resolve against whatever source list the client
+    // will render, and news and web answers carry one just as the KB does.
+    let toolSources: Array<{ number: number }> | undefined;
+
     for (const tr of result.toolResults ?? []) {
-      if (toolName(tr) !== 'groundedResponseTool') continue;
       const payload = toolResultPayload(tr);
-      if (payload && (payload.confidence === 'high' || payload.confidence === 'low')) {
+      if (!payload) continue;
+
+      if (Array.isArray(payload.sources)) {
+        const numbered = payload.sources.filter(
+          (s: unknown): s is { number: number } =>
+            typeof (s as { number?: unknown })?.number === 'number',
+        );
+        // A tier that answered from nothing still reports an empty list; that is
+        // meaningfully different from no source-bearing tool having run at all.
+        toolSources = [...(toolSources ?? []), ...numbered];
+      }
+
+      // unibenNewsTool names its list `posts`, and numbers them IMPLICITLY by
+      // array position — buildNewsContext emits <post index="i + 1"> and tells
+      // the model those indices are the citation numbers. Reading only `sources`
+      // left attribution blind on the news tier, which reported "no
+      // source-bearing tool ran" for an answer visibly carrying [3](cite:3)[4](cite:4)
+      // — the one tier where badge stacking actually shows up.
+      if (Array.isArray(payload.posts)) {
+        const numbered = payload.posts.map((_: unknown, i: number) => ({ number: i + 1 }));
+        toolSources = [...(toolSources ?? []), ...numbered];
+      }
+
+      if (toolName(tr) !== 'groundedResponseTool') continue;
+      if (payload.confidence === 'high' || payload.confidence === 'low') {
         groundedConfidence = payload.confidence;
         toolAnswer = typeof payload.answer === 'string' ? payload.answer : undefined;
       }
     }
 
-    return { text: result.text, toolsCalled, groundedConfidence, toolAnswer };
+    return { text: result.text, toolsCalled, groundedConfidence, toolAnswer, toolSources };
   },
   scorers: promptEvalScorers,
-  maxConcurrency: 2,
-  itemTimeout: 120_000,
+  maxConcurrency: MAX_CONCURRENCY,
+  // Sized FROM the backoff schedule, not guessed. A timeout shorter than the
+  // total wait would cancel the very retry the schedule exists to perform,
+  // reintroducing the dropped case by another route.
+  itemTimeout: totalBackoffMs() + 120_000,
 });
 
 // ── Report ────────────────────────────────────────────────────────────────────
 let failures = 0;
 
-console.log(`\n═══ prompt-behaviour-evals — experiment ${summary.experimentId} ═══\n`);
+// Record HOW the run was configured, not just what it produced. Four earlier
+// runs had to have their concurrency reconstructed from which cases went
+// missing; a results file should never need that kind of forensics.
+console.log(
+  `\n═══ prompt-behaviour-evals — experiment ${summary.experimentId} ═══\n` +
+  `    concurrency ${MAX_CONCURRENCY}` +
+  `${MAX_CONCURRENCY > 1 ? ' (set EVAL_MAX_CONCURRENCY=1 if rate limited)' : ''}\n`,
+);
 
 for (const item of summary.results) {
   const caseId = (item.input as PromptEvalCase)?.id ?? item.itemId;

@@ -16,6 +16,7 @@ import {
   summarizeLatency,
   formatLatencySummary,
   NFR_101_TTFT_MS,
+  carriesText,
 } from './latency';
 
 suite('percentile', () => {
@@ -159,5 +160,54 @@ suite('describe', () => {
     assert.equal(d.max, 300);
     assert.equal(d.mean, 200);
     assert.equal(d.count, 3);
+  });
+});
+
+suite('carriesText — what counts as a first token', () => {
+  test('an AI SDK text-delta frame carries text', () => {
+    assert.equal(carriesText('data: {"type":"text-delta","delta":"Hello"}'), true);
+  });
+
+  test('alternative text field names are accepted', () => {
+    assert.equal(carriesText('data: {"type":"text-delta","textDelta":"Hi"}'), true);
+    assert.equal(carriesText('data: {"type":"text","text":"Hi"}'), true);
+  });
+
+  test('a bare JSON frame with no data: prefix still counts', () => {
+    assert.equal(carriesText('{"type":"text-delta","delta":"Hello"}'), true);
+  });
+
+  test('the legacy prefixed protocol counts', () => {
+    assert.equal(carriesText('0:"Hello"'), true);
+  });
+
+  // The whole point: scaffolding must NOT be timed as a first token. Timing the
+  // first chunk of any kind is what produced a 56ms "TTFT" against a hosted model.
+  test('protocol scaffolding does not count', () => {
+    assert.equal(carriesText('data: {"type":"start"}'), false);
+    assert.equal(carriesText('data: {"type":"start-step"}'), false);
+    assert.equal(carriesText('data: {"type":"finish"}'), false);
+    assert.equal(carriesText('data: [DONE]'), false);
+    assert.equal(carriesText(''), false);
+    assert.equal(carriesText('   '), false);
+    assert.equal(carriesText(':keepalive'), false);
+  });
+
+  test('a tool-call frame does not count as generated text', () => {
+    assert.equal(
+      carriesText('data: {"type":"tool-call","toolName":"groundedResponseTool"}'),
+      false,
+    );
+  });
+
+  test('an empty delta does not count', () => {
+    assert.equal(carriesText('data: {"type":"text-delta","delta":""}'), false);
+    assert.equal(carriesText('0:""'), false);
+  });
+
+  test('a frame split across a chunk boundary is not mistaken for content', () => {
+    // The caller buffers and re-presents whole lines; a partial must not throw
+    // and must not be counted.
+    assert.equal(carriesText('data: {"type":"text-delta","del'), false);
   });
 });

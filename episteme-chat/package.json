@@ -12,7 +12,7 @@
     "format": "biome format .",
     "format:fix": "biome format --write .",
     "lint:fix": "biome check --write .",
-    "test": "tsx --test lib/**/*.test.ts",
+    "test": "tsx --test \"lib/**/*.test.ts\"",
     "harvest": "tsx scripts/harvest.ts",
     "latency:report": "tsx scripts/latency-report.ts",
     "bench:latency": "tsx scripts/bench-latency.ts"

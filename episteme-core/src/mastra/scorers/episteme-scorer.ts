@@ -93,6 +93,38 @@ function extractToolAnswer(run: Record<string, any>): string {
 }
 
 /**
+ * Strips the model's own PRESENTATION LAYER — markdown headings and the bold
+ * labels that open a list item.
+ *
+ * WHY THIS EXISTS. The proper-noun rule below matches any run of Title-Case
+ * words, and an answer's structure is written in exactly that register:
+ * "### How to Use This Assistant", "1. **Grade Point Conversion**:". Those
+ * strings can never appear verbatim in a retrieved chunk, so faithfulness
+ * counted them as hallucinations — and therefore PENALISED WELL-FORMATTED
+ * ANSWERS. The more structure an answer carried, the worse it scored, which is
+ * backwards.
+ *
+ * Measured on the 2026-08-13 prompt-eval run, before this fix:
+ *   platform-help-public-tier   0.00  ungrounded: [Use This Assistant, …]
+ *   direct-policy-question      0.71  ungrounded: [0.0, Grade Point Conversion,
+ *                                                  Compute Total Units, Total Units]
+ * Three of those four were the answer's own list labels.
+ *
+ * DELIBERATELY NARROW. A bold span MID-SENTENCE is left alone:
+ * "**Professor Edoba Bright Omoregie, SAN**" is a claim about the world and is
+ * precisely what this scorer exists to check. Over-stripping would inflate the
+ * score, which is a worse failure than the one being fixed here — a faithfulness
+ * number that flatters the system is more dangerous than one that maligns it.
+ */
+function stripPresentation(text: string): string {
+  return text
+    // Heading lines — organisational scaffolding, never an assertion.
+    .replace(/^[ \t]*#{1,6}[ \t]+.*$/gm, '')
+    // Bold label opening a list item and introducing its body: "1. **Label**:".
+    .replace(/^[ \t]*(?:\d+[.)]|[-*+])[ \t]*\*\*[^*\n]+\*\*[ \t]*:/gm, '');
+}
+
+/**
  * Named-entity extraction — pure regex, no LLM.
  * Targets the entity classes most likely to be hallucinated in academic contexts:
  *   - Dates and years
@@ -102,16 +134,32 @@ function extractToolAnswer(run: Record<string, any>): string {
 export function extractEntities(text: string): string[] {
   const entities: Set<string> = new Set();
 
+  // Dates and numerics are read from the FULL text, headings included: a
+  // fabricated year or grade point is a fabrication wherever it sits, and
+  // stripping presentation before this step would open a blind spot. This is
+  // why "0.0" stayed reportable — on the run above every other grade point
+  // (5.0, 4.0, 3.0, 2.0, 1.0) WAS grounded, so a lone unmatched 0.0 is a
+  // credible fabricated table row rather than a formatting artefact.
+
   // Years and structured dates
   const dates = text.match(
     /\b\d{4}\b|\b\d{1,2}(?:st|nd|rd|th)?[\s-]+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b/gi
   ) ?? [];
 
-  // Numeric academic values: GPA, CGPA, percentages, course codes
-  const numbers = text.match(/\b\d+\.\d+\b|\b\d+\s*%\b|\b[A-Z]{2,}\s*\d{3,}\b/g) ?? [];
+  // Numeric academic values: GPA, CGPA, percentages, course codes.
+  //
+  // The percentage branch deliberately has NO trailing \b. It used to, and `%`
+  // is a non-word character, so the boundary only held when a word character
+  // followed it — "40% overall" never matched and percentages went unchecked
+  // almost everywhere in ordinary prose. Dropping it makes the scorer stricter,
+  // never more forgiving.
+  const numbers = text.match(/\b\d+\.\d+\b|\b\d+\s*%|\b[A-Z]{2,}\s*\d{3,}\b/g) ?? [];
 
-  // Multi-word capitalized proper nouns (skip common sentence-starters)
-  const properNouns = text.match(/\b(?:[A-Z][a-z]{1,}(?:\s+[A-Z][a-z]{1,}){1,})\b/g) ?? [];
+  // Multi-word capitalized proper nouns, from the text with the answer's own
+  // structure removed — see stripPresentation.
+  const properNouns = stripPresentation(text).match(
+    /\b(?:[A-Z][a-z]{1,}(?:\s+[A-Z][a-z]{1,}){1,})\b/g
+  ) ?? [];
 
   for (const e of [...dates, ...numbers, ...properNouns]) {
     entities.add(e.trim());

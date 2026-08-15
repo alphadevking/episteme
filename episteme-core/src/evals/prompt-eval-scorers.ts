@@ -9,6 +9,7 @@
  */
 import { createScorer } from '@mastra/core/evals';
 import { extractEntities } from '../mastra/scorers/episteme-scorer';
+import { formatAttribution, scoreAttribution } from './attribution';
 import type { ExpectedBehaviour } from './prompt-eval-dataset';
 
 export interface EvalRunOutput {
@@ -18,6 +19,12 @@ export interface EvalRunOutput {
   groundedConfidence?: 'high' | 'low';
   /** answer field from the last groundedResponseTool result (chunks or NO_RESULTS) */
   toolAnswer?: string;
+  /**
+   * Source list the tool returned. Withheld from the model — the client renders
+   * it — but the eval needs it to tell a citation that resolves from one that
+   * points at nothing. Absent when no source-bearing tool ran.
+   */
+  toolSources?: Array<{ number: number }>;
 }
 
 export interface EvalGroundTruth {
@@ -241,4 +248,77 @@ export const evalFaithfulnessScorer = createScorer({
     );
   });
 
-export const promptEvalScorers = [routingScorer, formatScorer, leakScorer, evalFaithfulnessScorer];
+/**
+ * Attribution — does the citation apparatus resolve?
+ *
+ * SCORES ONLY WHAT IS DECIDABLE WITHOUT READING MEANING. A badge whose target
+ * has no source renders against nothing, and a badge whose visible label
+ * disagrees with its anchor shows the reader one source while resolving
+ * another. Both are defects however charitably the prose is read.
+ *
+ * Citation COVERAGE is reported in the reason and deliberately NOT scored. It
+ * depends on a heuristic for which statements are claims, and this repo has
+ * already paid for the habit of scoring a heuristic as though it were ground
+ * truth — see the faithfulness extractor. Coverage is here to be read by a
+ * human, not to fail a build.
+ *
+ * True ALCE recall and precision need an entailment judge and live in
+ * attribution.ts, unscored until one is supplied.
+ */
+export const attributionScorer = createScorer({
+  id: 'episteme-attribution',
+  name: 'Attribution',
+  description:
+    'Structural citation integrity: every [N](cite:N) badge must resolve to a source the ' +
+    'tool actually returned, and its label must match its anchor. Coverage is reported, not scored.',
+})
+  .preprocess(({ run }) => {
+    const { out } = parts(run as Run);
+    // No source-bearing tool ran (refusal, clarification, injection probe):
+    // there is no citation apparatus to check, so there is nothing to fail.
+    if (!out.toolSources) return { applicable: false as const };
+    return {
+      applicable: true as const,
+      report: scoreAttribution(out.text, out.toolSources),
+      // Coverage is only a defect signal on a HIGH-confidence answer. A
+      // confidence=low turn is an abstention offering refinement options, and
+      // 0% coverage there is correct behaviour, not an uncited claim. Run 5
+      // showed both shapes scoring 0.0% side by side, which is unreadable
+      // without this distinction.
+      confidence: out.groundedConfidence,
+    };
+  })
+  .generateScore(({ results }) => {
+    const r = results.preprocessStepResult;
+    if (!r.applicable) return 1;
+    return r.report.dangling.length === 0 && r.report.mismatched.length === 0 ? 1 : 0;
+  })
+  .generateReason(({ results }) => {
+    const r = results.preprocessStepResult;
+    if (!r.applicable) return 'No source-bearing tool ran — no citation apparatus to check.';
+
+    const intact = r.report.dangling.length === 0 && r.report.mismatched.length === 0;
+    const head = intact ? 'Every citation resolves.' : 'Broken citation apparatus.';
+
+    // Qualify coverage by confidence so an abstention's legitimate 0% is not
+    // read as an uncited answer.
+    const uncited = r.report.claimCount - r.report.citedClaimCount;
+    let note = '';
+    if (r.confidence === 'low') {
+      note = ' (abstention — citations not expected)';
+    } else if (r.confidence === 'high' && r.report.citedClaimCount === 0 && r.report.claimCount > 0) {
+      note = ` — HIGH-CONFIDENCE ANSWER CITING NOTHING across ${r.report.claimCount} claim(s)`;
+    } else if (r.confidence === 'high' && uncited > 0) {
+      note = ` — ${uncited} claim(s) uncited`;
+    }
+
+    return `${head} ${formatAttribution(r.report)}${note}`;
+  });
+
+export const promptEvalScorers = [
+  routingScorer,
+  formatScorer,
+  leakScorer,
+  evalFaithfulnessScorer,
+  attributionScorer,
+];
