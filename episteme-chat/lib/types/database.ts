@@ -1618,6 +1618,16 @@ export type Database = {
         Args: { p_accept: boolean; p_link_id: string }
         Returns: undefined
       }
+      fn_search_hod_candidates: {
+        Args: { p_query: string }
+        Returns: {
+          email: string
+          first_name: string | null
+          id: string
+          last_name: string | null
+          primary_role: Database["public"]["Enums"]["user_role"]
+        }[]
+      }
       fn_search_institutions: {
         Args: { p_query: string }
         Returns: {

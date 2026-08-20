@@ -4,7 +4,7 @@
 "use client";
 
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -39,27 +39,49 @@ export function HODPicker({ departmentId, institutionId, currentHod }: Props) {
   const [error,     setError]     = useState<string | null>(null);
   const [success,   setSuccess]   = useState(false);
 
+  // Debounce (mirrors filter-bar.tsx) + a request counter so a slow response
+  // to an earlier keystroke can't overwrite a later, faster one.
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchSeq   = useRef(0);
+
   // ── Search existing users in this institution ─────────────────────────
-  const search = useCallback(async (q: string) => {
-    setQuery(q);
-    setSelected(null);
-    if (q.length < 2) { setResults([]); return; }
-
+  // fn_search_hod_candidates (SECURITY DEFINER) does the eligibility check —
+  // primary_role OR roles[] contains staff/hod/admin — and derives the
+  // institution scope server-side via current_admin_institution_id(),
+  // instead of trusting the institutionId prop. p_query is a bound SQL
+  // parameter, not a hand-built PostgREST filter string, so there's no
+  // filter-syntax escaping to get wrong.
+  const runSearch = useCallback(async (q: string) => {
+    const seq = ++searchSeq.current;
     setSearching(true);
-    const { data } = await supabase
-      .from("users")
-      .select("id, email, first_name, last_name, primary_role")
-      .eq("institution_id", institutionId)
-      .or(`email.ilike.%${q}%,first_name.ilike.%${q}%,last_name.ilike.%${q}%`)
-      .in("primary_role", ["staff", "hod", "admin"])
-      .is("deleted_at", null)
-      .limit(8);
 
+    const { data, error: searchErr } = await supabase.rpc(
+      "fn_search_hod_candidates",
+      { p_query: q },
+    );
+
+    if (seq !== searchSeq.current) return; // a newer search superseded this one
+    if (searchErr) { setError(searchErr.message); setSearching(false); return; }
     setResults((data as UserResult[]) ?? []);
     setSearching(false);
-  }, [supabase, institutionId]);
+  }, [supabase]);
+
+  const search = useCallback((q: string) => {
+    setQuery(q);
+    setSelected(null);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (q.length < 2) { setResults([]); return; }
+    debounceRef.current = setTimeout(() => runSearch(q), 300);
+  }, [runSearch]);
 
   // ── Assign HOD ────────────────────────────────────────────────────────
+  // Two writes: fn_admin_set_user_role (SECURITY DEFINER — enforces caller
+  // is admin/superadmin, same institution) grants the actual 'hod' role,
+  // then departments.hod_user_id links them to this department. Without the
+  // first call, fn_assert_active_hod() (the /hod route gate) still sees the
+  // user's old role and keeps them out, even though the department shows
+  // them as HOD — see provision-admin-form.tsx for the equivalent pattern
+  // for admins, and user-actions.tsx for the same RPC used generically.
   const assign = async () => {
     setError(null);
     setSaving(true);
@@ -90,6 +112,13 @@ export function HODPicker({ departmentId, institutionId, currentHod }: Props) {
       return;
     }
 
+    const { error: roleErr } = await supabase.rpc("fn_admin_set_user_role", {
+      p_target_user_id: userId,
+      p_role: "hod",
+    });
+
+    if (roleErr) { setError(roleErr.message); setSaving(false); return; }
+
     const { error: err } = await supabase
       .from("departments")
       .update({ hod_user_id: userId })
@@ -107,8 +136,23 @@ export function HODPicker({ departmentId, institutionId, currentHod }: Props) {
   };
 
   // ── Clear HOD ─────────────────────────────────────────────────────────
+  // Mirrors assign(): unlink the department AND step the user's role back
+  // down. There's no dedicated "remove role" RPC — fn_admin_set_user_role
+  // sets the role directly (see user-actions.tsx's role dropdown, which
+  // includes 'hod' as one of several settable values) — so "demote to
+  // staff" is the closest equivalent to what an admin would do by hand via
+  // that dropdown. Without this, a removed HOD would keep hod-level access
+  // (including the /hod portal and trust-4 retrieval) indefinitely.
   const clear = async () => {
     setSaving(true);
+
+    if (currentHod) {
+      await supabase.rpc("fn_admin_set_user_role", {
+        p_target_user_id: currentHod.id,
+        p_role: "staff",
+      });
+    }
+
     await supabase
       .from("departments")
       .update({ hod_user_id: null })
@@ -152,7 +196,11 @@ export function HODPicker({ departmentId, institutionId, currentHod }: Props) {
         {(["search", "email"] as const).map((m) => (
           <button
             key={m}
-            onClick={() => { setMode(m); setResults([]); setSelected(null); setQuery(""); setEmail(""); }}
+            onClick={() => {
+              if (debounceRef.current) clearTimeout(debounceRef.current);
+              searchSeq.current++; // invalidate any in-flight search response
+              setMode(m); setResults([]); setSelected(null); setQuery(""); setEmail("");
+            }}
             className={[
               "flex-1 rounded py-1.5 text-xs font-medium transition-colors",
               mode === m
